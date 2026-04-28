@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+
+src-tauri/target/
+src-tauri/gen/
+
+services/document-service/.venv/
+services/document-service/.packages/
+services/document-service/**/__pycache__/
+services/document-service/.pytest_cache/
+*.pyc
+
+.env
+.env.local
