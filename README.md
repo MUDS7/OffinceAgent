@@ -1,4 +1,4 @@
-# OfficeAgent
+# OffinceAgent
 
 Tauri + React + Rust + Python 文档处理服务的桌面 Agent 项目骨架。
 
