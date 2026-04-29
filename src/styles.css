@@ -698,6 +698,19 @@ body.is-resizing-layout * {
   gap: 14px;
 }
 
+.pdf-selection-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.pdf-selection-marker {
+  position: absolute;
+  border-radius: 2px;
+  background: rgba(31, 111, 235, 0.22);
+}
+
 .pdf-page {
   --user-unit: 1;
   --total-scale-factor: calc(var(--pdf-scale-factor, 1) * var(--user-unit));
@@ -715,9 +728,18 @@ body.is-resizing-layout * {
 .pdf-text-layer {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  z-index: 1;
+  overflow: clip;
+  opacity: 1;
   line-height: 1;
   text-align: initial;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  user-select: text;
+  forced-color-adjust: none;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
 }
 
 .pdf-text-layer span,
@@ -729,17 +751,41 @@ body.is-resizing-layout * {
   white-space: pre;
 }
 
+.pdf-text-layer > :not(.markedContent),
+.pdf-text-layer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.pdf-text-layer .markedContent {
+  display: contents;
+}
+
+.pdf-text-layer span[role="img"] {
+  cursor: default;
+  user-select: none;
+}
+
 .pdf-text-layer ::selection {
   background: rgba(31, 111, 235, 0.25);
+}
+
+.pdf-text-layer br::selection {
+  background: transparent;
 }
 
 .pdf-text-layer .endOfContent {
   position: absolute;
   display: block;
   inset: 100% 0 0;
-  z-index: -1;
+  z-index: 0;
   cursor: default;
   user-select: none;
+}
+
+.pdf-text-layer.selecting .endOfContent {
+  top: 0;
 }
 
 .pdf-preview-status {

@@ -100,13 +100,17 @@ function App() {
     [workspaceFiles, selectedFileId],
   );
 
-  const activePreviewFile = selectedWorkspaceFile
-    ? {
-        id: selectedWorkspaceFile.id,
-        filename: selectedWorkspaceFile.file.name,
-        file: selectedWorkspaceFile.file,
-      }
-    : null;
+  const activePreviewFile = useMemo(
+    () =>
+      selectedWorkspaceFile
+        ? {
+            id: selectedWorkspaceFile.id,
+            filename: selectedWorkspaceFile.file.name,
+            file: selectedWorkspaceFile.file,
+          }
+        : null,
+    [selectedWorkspaceFile],
+  );
   const openPreviewTabs = useMemo(
     () =>
       openFileIds
