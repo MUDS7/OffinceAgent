@@ -1,6 +1,7 @@
 import {
   ArrowUp,
   ChevronDown,
+  Check,
   Edit3,
   Hand,
   Maximize2,
@@ -10,6 +11,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { useState } from "react";
 
 type ChatMessage = {
   id: string;
@@ -26,6 +28,11 @@ type RightPanelProps = {
   onSendMessage: () => void;
 };
 
+const modelOptions = [
+  { id: "deepseek-v3", label: "deepseek v3" },
+  { id: "deepseek-v4", label: "deepseek v4" },
+];
+
 export function RightPanel({
   chatMessages,
   codexWidth,
@@ -34,6 +41,10 @@ export function RightPanel({
   onOpenFilePicker,
   onSendMessage,
 }: RightPanelProps) {
+  const [selectedModel, setSelectedModel] = useState("deepseek-v3");
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const selectedModelLabel = modelOptions.find((option) => option.id === selectedModel)?.label ?? modelOptions[0].label;
+
   return (
     <aside
       className={codexWidth === 0 ? "codex-pane collapsed" : "codex-pane"}
@@ -42,9 +53,8 @@ export function RightPanel({
     >
       <div className="codex-top">
         <div className="codex-tabs">
-          <button type="button">聊天</button>
           <button className="active" type="button">
-            CODEX
+            聊天
           </button>
         </div>
         <div className="codex-window-actions">
@@ -82,7 +92,7 @@ export function RightPanel({
         <div className="chat-input">
           <textarea
             value={draftMessage}
-            placeholder="问 Codex 任何事。输入 @ 使用插件或提及文件"
+            placeholder="问 Agent 任何事。输入 @ 使用插件或提及文件"
             rows={3}
             onChange={(event) => onDraftMessageChange(event.target.value)}
             onKeyDown={(event) => {
@@ -95,22 +105,57 @@ export function RightPanel({
             <button className="icon-button" type="button" title="添加上下文" onClick={onOpenFilePicker}>
               <Paperclip size={19} />
             </button>
-            <button className="permission-button" type="button">
-              <Hand size={16} />
-              默认权限
-              <ChevronDown size={15} />
-            </button>
-            <span className="model-select">5.5 高</span>
+            <div
+              className="permission-menu"
+              onBlur={(event) => {
+                const nextTarget = event.relatedTarget;
+                if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+                  setIsModelMenuOpen(false);
+                }
+              }}
+            >
+              <button
+                className="permission-trigger"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={isModelMenuOpen}
+                onClick={() => setIsModelMenuOpen((isOpen) => !isOpen)}
+              >
+                <Hand size={16} />
+                <span>{selectedModelLabel}</span>
+                <ChevronDown className={isModelMenuOpen ? "chevron-open" : undefined} size={15} />
+              </button>
+              {isModelMenuOpen ? (
+                <div className="permission-popover" role="listbox" aria-label="模型选择">
+                  {modelOptions.map((option) => {
+                    const isSelected = option.id === selectedModel;
+
+                    return (
+                      <button
+                        className="permission-option"
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        key={option.id}
+                        onClick={() => {
+                          setSelectedModel(option.id);
+                          setIsModelMenuOpen(false);
+                        }}
+                      >
+                        <Hand size={17} />
+                        <span>{option.label}</span>
+                        {isSelected ? <Check size={18} /> : <span className="permission-check-spacer" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
             <button className="send-button" type="button" onClick={onSendMessage} disabled={!draftMessage.trim()} title="发送">
               <ArrowUp size={22} />
             </button>
           </div>
         </div>
-        <button className="local-mode" type="button">
-          <span />
-          本地模式
-          <ChevronDown size={14} />
-        </button>
       </div>
     </aside>
   );

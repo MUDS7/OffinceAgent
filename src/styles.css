@@ -751,22 +751,87 @@ body.is-resizing-layout * {
 }
 
 .icon-button:hover,
-.permission-button:hover {
+.permission-trigger:hover {
   background: #f1f1f1;
 }
 
-.permission-button {
+.permission-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.permission-trigger {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   height: 31px;
-  padding: 0 6px;
-  border-radius: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
   color: #7b7b7b;
-  background: transparent;
+  background: #eeeeee;
   cursor: pointer;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.permission-trigger:focus-visible,
+.permission-option:focus-visible {
+  outline: 1px solid #4b89dc;
+  outline-offset: 2px;
+}
+
+.permission-trigger .chevron-open {
+  transform: rotate(180deg);
+}
+
+.permission-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 178px;
+  padding: 9px;
+  border: 1px solid #e6e6e6;
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+  background: #ffffff;
+}
+
+.permission-option {
+  display: grid;
+  grid-template-columns: 21px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 7px;
+  border-radius: 9px;
+  color: #6f6f6f;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.permission-option:hover,
+.permission-option[aria-selected="true"] {
+  background: #f5f5f5;
+}
+
+.permission-option span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.permission-option svg:last-child {
+  color: #777777;
+}
+
+.permission-check-spacer {
+  width: 18px;
+  height: 18px;
 }
 
 .model-select {
@@ -777,6 +842,7 @@ body.is-resizing-layout * {
 }
 
 .send-button {
+  margin-left: auto;
   width: 36px;
   height: 36px;
   color: #ffffff;
@@ -790,25 +856,6 @@ body.is-resizing-layout * {
 
 .send-button:not(:disabled) {
   background: #4b89dc;
-}
-
-.local-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 11px;
-  padding: 0 14px;
-  color: #828282;
-  background: transparent;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.local-mode span {
-  width: 13px;
-  height: 9px;
-  border: 1px solid #8d8d8d;
-  border-radius: 2px;
 }
 
 .spin {
