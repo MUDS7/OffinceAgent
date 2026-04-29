@@ -8,7 +8,9 @@
     "dev:frontend": "vite --host 127.0.0.1",
     "dev:python": "python services/document-service/run.py",
     "tauri:dev": "tauri dev",
-    "build": "npm run build:frontend && tauri build",
+    "build": "tauri build --no-bundle",
+    "build:desktop": "tauri build --no-bundle",
+    "build:installer": "tauri build",
     "build:frontend": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
