@@ -15,7 +15,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type PreviewTab = {
   id: string;
@@ -38,6 +38,7 @@ type CenterPaneProps = {
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
   onSelectPreviewTab: (fileId: string) => void;
+  onUpdateTextFile: (fileId: string, text: string) => void;
 };
 
 export function CenterPane({
@@ -49,16 +50,20 @@ export function CenterPane({
   onClosePreviewTab,
   onRefreshStatus,
   onSelectPreviewTab,
+  onUpdateTextFile,
 }: CenterPaneProps) {
+  const textEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const [textPreview, setTextPreview] = useState({
     fileId: "",
     isLoading: false,
     text: "",
     error: "",
   });
+  const [textScrollTop, setTextScrollTop] = useState(0);
   const [pdfUrl, setPdfUrl] = useState("");
+  const activeFileId = activeFile?.id ?? "";
   const activeExtension = getFileExtension(activeFile?.filename ?? "");
-  const isTextPreview = activeExtension === "txt";
+  const isTextPreview = isEditableTextFile(activeFile?.file, activeExtension);
   const isPdfPreview = activeExtension === "pdf";
   const textLines = useMemo(
     () => (textPreview.text ? textPreview.text.split(/\r?\n/) : [""]),
@@ -66,24 +71,27 @@ export function CenterPane({
   );
 
   useEffect(() => {
-    if (!activeFile || !isTextPreview) {
+    const fileToRead = activeFile;
+
+    if (!fileToRead || !isTextPreview) {
       setTextPreview({ fileId: "", isLoading: false, text: "", error: "" });
       return;
     }
 
     let isCancelled = false;
-    setTextPreview({ fileId: activeFile.id, isLoading: true, text: "", error: "" });
+    setTextScrollTop(0);
+    setTextPreview({ fileId: fileToRead.id, isLoading: true, text: "", error: "" });
 
-    activeFile.file
+    fileToRead.file
       .text()
       .then((text) => {
         if (isCancelled) return;
-        setTextPreview({ fileId: activeFile.id, isLoading: false, text, error: "" });
+        setTextPreview({ fileId: fileToRead.id, isLoading: false, text, error: "" });
       })
       .catch((error) => {
         if (isCancelled) return;
         setTextPreview({
-          fileId: activeFile.id,
+          fileId: fileToRead.id,
           isLoading: false,
           text: "",
           error: error instanceof Error ? error.message : String(error),
@@ -93,7 +101,12 @@ export function CenterPane({
     return () => {
       isCancelled = true;
     };
-  }, [activeFile, isTextPreview]);
+  }, [activeFileId, isTextPreview]);
+
+  useEffect(() => {
+    if (!isTextPreview || textPreview.isLoading || textPreview.error) return;
+    textEditorRef.current?.focus();
+  }, [activeFileId, isTextPreview, textPreview.error, textPreview.isLoading]);
 
   useEffect(() => {
     if (!activeFile || !isPdfPreview) {
@@ -107,7 +120,7 @@ export function CenterPane({
     return () => {
       URL.revokeObjectURL(nextPdfUrl);
     };
-  }, [activeFile, isPdfPreview]);
+  }, [activeFileId, isPdfPreview]);
 
   return (
     <section className="preview-pane" aria-label="文件预览">
@@ -203,13 +216,23 @@ export function CenterPane({
 
       return (
         <div className="editor-content">
-          <div className="editor-scroll">
-            <div className="line-numbers" aria-hidden="true">
-              {textLines.map((_, index) => (
-                <span key={index}>{index + 1}</span>
-              ))}
+          <div className="text-editor-layout">
+            <div className="line-number-gutter" aria-hidden="true">
+              <div className="line-numbers" style={{ transform: `translateY(${-textScrollTop}px)` }}>
+                {textLines.map((_, index) => (
+                  <span key={index}>{index + 1}</span>
+                ))}
+              </div>
             </div>
-            <pre>{textPreview.text}</pre>
+            <textarea
+              ref={textEditorRef}
+              className="preview-text-editor"
+              aria-label={`${activeFile.filename} text editor`}
+              spellCheck={false}
+              value={textPreview.text}
+              onChange={(event) => updateTextPreview(event.target.value)}
+              onScroll={(event) => setTextScrollTop(event.currentTarget.scrollTop)}
+            />
             <div className="minimap" aria-hidden="true">
               {textLines.slice(0, 48).map((line, index) => (
                 <span key={index} style={{ width: `${Math.max(12, Math.min(96, line.length * 1.8))}%` }} />
@@ -224,7 +247,7 @@ export function CenterPane({
       return (
         <div className="editor-content pdf-preview">
           {pdfUrl ? (
-            <iframe className="pdf-preview-frame" src={pdfUrl} title={`${activeFile.filename} 预览`} />
+            <iframe className="pdf-preview-frame" src={pdfUrl} title={`${activeFile.filename} preview`} />
           ) : (
             <div className="preview-empty">
               <RefreshCw className="spin" size={26} />
@@ -242,6 +265,19 @@ export function CenterPane({
       </div>
     );
   }
+
+  function updateTextPreview(nextText: string) {
+    if (!activeFile) return;
+
+    setTextPreview((current) => ({
+      ...current,
+      fileId: activeFile.id,
+      isLoading: false,
+      text: nextText,
+      error: "",
+    }));
+    onUpdateTextFile(activeFile.id, nextText);
+  }
 }
 
 function EditorTabIcon({ filename }: { filename: string }) {
@@ -257,4 +293,12 @@ function EditorTabIcon({ filename }: { filename: string }) {
 
 function getFileExtension(filename: string) {
   return filename.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function isEditableTextFile(file: File | undefined, extension: string) {
+  if (file?.type.startsWith("text/")) return true;
+
+  return ["txt", "md", "csv", "json", "js", "jsx", "ts", "tsx", "html", "css", "xml", "yaml", "yml"].includes(
+    extension,
+  );
 }

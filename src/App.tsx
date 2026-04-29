@@ -169,6 +169,21 @@ function App() {
     setErrorMessage("");
   }
 
+  function updateTextFile(fileId: string, text: string) {
+    setWorkspaceFiles((current) =>
+      current.map((item) => {
+        if (item.id !== fileId) return item;
+
+        const file = new File([text], item.file.name, {
+          type: item.file.type || getFileMimeType(item.file.name),
+          lastModified: Date.now(),
+        });
+
+        return { ...item, file, analysis: null };
+      }),
+    );
+  }
+
   function openWorkspaceFile(fileId: string) {
     setSelectedFileId(fileId);
 
@@ -357,6 +372,7 @@ function App() {
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
           onSelectPreviewTab={setSelectedFileId}
+          onUpdateTextFile={updateTextFile}
         />
 
         <div
