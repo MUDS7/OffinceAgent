@@ -5,10 +5,10 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, ArrowRight, ChevronDown, Share2 } from "lucide-react";
 import { CenterPane } from "./components/CenterPane";
 import { LeftPanel } from "./components/LeftPanel";
 import { RightPanel } from "./components/RightPanel";
+import { TopBar } from "./components/TopBar";
 
 type AgentInfo = {
   name: string;
@@ -258,32 +258,12 @@ function App() {
         onChange={(event) => handleFileSelection(event.target.files)}
       />
 
-      <header className="menu-bar" aria-label="应用菜单">
-        <div className="app-mark">◆</div>
-        <nav className="menu-items" aria-label="顶部菜单">
-          <button type="button" onClick={openFilePicker}>
-            文件(F)
-          </button>
-          <button type="button">编辑(E)</button>
-          <button type="button">选择(S)</button>
-          <button type="button">查看(V)</button>
-          <button type="button">转到(G)</button>
-          <button type="button">运行(R)</button>
-          <button type="button">终端(T)</button>
-          <button type="button">帮助(H)</button>
-        </nav>
-        <div className="command-center">
-          <ArrowLeft size={16} />
-          <ArrowRight size={16} />
-          <span>{agentInfo?.name ?? "OfficeAgent"}</span>
-        </div>
-        <div className="menu-status">
-          <span className={serviceStatus?.running ? "service-dot online" : "service-dot"} />
-          <strong>{workspaceFiles.length}</strong>
-          <Share2 size={16} />
-          <ChevronDown size={15} />
-        </div>
-      </header>
+      <TopBar
+        agentInfo={agentInfo}
+        serviceStatus={serviceStatus}
+        workspaceFileCount={workspaceFiles.length}
+        onOpenFilePicker={openFilePicker}
+      />
 
       <section className="workbench" style={workbenchStyle}>
         <LeftPanel
