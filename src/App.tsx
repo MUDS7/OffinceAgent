@@ -74,7 +74,13 @@ function App() {
     [workspaceFiles, selectedFileId],
   );
 
-  const selectedAnalysis = selectedWorkspaceFile?.analysis ?? null;
+  const activePreviewFile = selectedWorkspaceFile
+    ? {
+        id: selectedWorkspaceFile.id,
+        filename: selectedWorkspaceFile.file.name,
+        file: selectedWorkspaceFile.file,
+      }
+    : null;
   const openPreviewTabs = useMemo(
     () =>
       openFileIds
@@ -88,8 +94,6 @@ function App() {
     [openFileIds, selectedFileId, workspaceFiles],
   );
   const canAnalyze = Boolean(selectedWorkspaceFile && serviceStatus?.running && !isAnalyzing);
-  const editorText = selectedAnalysis?.text_preview ?? "";
-  const editorLines = useMemo(() => (editorText ? editorText.split(/\r?\n/) : [""]), [editorText]);
   const workbenchStyle = {
     "--explorer-width": `${layoutWidths.explorer}px`,
     "--codex-width": `${layoutWidths.codex}px`,
@@ -346,8 +350,7 @@ function App() {
 
         <CenterPane
           activeFilename={activeFilename}
-          editorLines={editorLines}
-          editorText={editorText}
+          activeFile={activePreviewFile}
           errorMessage={errorMessage}
           isChecking={isChecking}
           previewTabs={openPreviewTabs}
@@ -414,6 +417,8 @@ function getFileMimeType(filename: string) {
   const extension = filename.split(".").pop()?.toLowerCase();
 
   if (extension === "json") return "application/json";
+  if (extension === "pdf") return "application/pdf";
+  if (extension === "txt") return "text/plain";
   if (extension === "md") return "text/markdown";
   if (extension === "csv") return "text/csv";
   if (extension === "html") return "text/html";
