@@ -1,11 +1,12 @@
 import {
+  Atom,
   Bot,
-  ChevronRight,
+  Braces,
   Code2,
   Copy,
   FileText,
+  Hash,
   Info,
-  Loader2,
   MoreHorizontal,
   RefreshCw,
   RotateCcw,
@@ -14,57 +15,75 @@ import {
   XCircle,
 } from "lucide-react";
 
-type AnalyzeResult = {
-  filename: string;
-  extension: string;
-  size_bytes: number;
-  sha256: string;
-  text_preview: string;
-  warnings: string[];
-};
-
-type WorkspaceFile = {
+type PreviewTab = {
   id: string;
-  file: File;
-  analysis: AnalyzeResult | null;
+  filename: string;
+  isActive: boolean;
 };
 
 type CenterPaneProps = {
   activeFilename: string;
-  canAnalyze: boolean;
   editorLines: string[];
   editorText: string;
   errorMessage: string;
-  isAnalyzing: boolean;
   isChecking: boolean;
-  selectedAnalysis: AnalyzeResult | null;
-  selectedWorkspaceFile: WorkspaceFile | null;
-  onAnalyzeDocument: () => void;
+  previewTabs: PreviewTab[];
+  onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
+  onSelectPreviewTab: (fileId: string) => void;
 };
 
 export function CenterPane({
   activeFilename,
-  canAnalyze,
   editorLines,
   editorText,
   errorMessage,
-  isAnalyzing,
   isChecking,
-  selectedAnalysis,
-  selectedWorkspaceFile,
-  onAnalyzeDocument,
+  previewTabs,
+  onClosePreviewTab,
   onRefreshStatus,
+  onSelectPreviewTab,
 }: CenterPaneProps) {
   return (
     <section className="preview-pane" aria-label="文件预览">
       <div className="editor-action-strip">
-        <div className="editor-tabs">
-          <div className="editor-tab active">
-            <Info size={15} />
-            <span>{activeFilename}</span>
-            <X size={15} />
-          </div>
+        <div className="editor-tabs" role="tablist" aria-label="已打开文件">
+          {previewTabs.length ? (
+            previewTabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={tab.isActive ? "editor-tab active" : "editor-tab"}
+                role="tab"
+                tabIndex={0}
+                aria-selected={tab.isActive}
+                onClick={() => onSelectPreviewTab(tab.id)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  onSelectPreviewTab(tab.id);
+                }}
+              >
+                <EditorTabIcon filename={tab.filename} />
+                <span>{tab.filename}</span>
+                <button
+                  className="editor-tab-close"
+                  type="button"
+                  aria-label={`关闭 ${tab.filename}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onClosePreviewTab(tab.id);
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="editor-tab active placeholder-tab">
+              <Info size={15} />
+              <span>{activeFilename}</span>
+            </div>
+          )}
         </div>
         <div className="editor-actions">
           <Bot size={20} />
@@ -75,17 +94,6 @@ export function CenterPane({
           <SplitSquareVertical size={19} />
           <MoreHorizontal size={19} />
         </div>
-      </div>
-
-      <div className="breadcrumbs">
-        <Info size={15} />
-        <span>{activeFilename}</span>
-        {selectedAnalysis ? (
-          <>
-            <ChevronRight size={14} />
-            <span>{selectedAnalysis.extension.toUpperCase()}</span>
-          </>
-        ) : null}
       </div>
 
       {errorMessage ? (
@@ -110,26 +118,17 @@ export function CenterPane({
           </div>
         </div>
       </div>
-
-      <div className="editor-bottom">
-        <button className="tool-text-button" type="button" onClick={onAnalyzeDocument} disabled={!canAnalyze}>
-          {isAnalyzing ? <Loader2 className="spin" size={16} /> : <FileText size={16} />}
-          解析预览
-        </button>
-        {selectedAnalysis ? (
-          <span>
-            {selectedAnalysis.extension.toUpperCase()} · {formatBytes(selectedAnalysis.size_bytes)}
-          </span>
-        ) : (
-          <span>{selectedWorkspaceFile ? "未解析" : "空白"}</span>
-        )}
-      </div>
     </section>
   );
 }
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+function EditorTabIcon({ filename }: { filename: string }) {
+  const extension = filename.split(".").pop()?.toLowerCase();
+
+  if (extension === "css") return <Hash className="css-tab-icon" size={16} />;
+  if (extension === "tsx" || extension === "jsx") return <Atom className="react-tab-icon" size={16} />;
+  if (extension === "json") return <Braces className="json-tab-icon" size={16} />;
+  if (extension === "ts" || extension === "js" || extension === "html") return <Code2 className="code-tab-icon" size={16} />;
+
+  return <FileText className="file-tab-icon" size={16} />;
 }

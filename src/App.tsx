@@ -60,6 +60,7 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
   const [selectedFileId, setSelectedFileId] = useState("");
+  const [openFileIds, setOpenFileIds] = useState<string[]>([]);
   const [isChecking, setIsChecking] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -74,6 +75,18 @@ function App() {
   );
 
   const selectedAnalysis = selectedWorkspaceFile?.analysis ?? null;
+  const openPreviewTabs = useMemo(
+    () =>
+      openFileIds
+        .map((fileId) => workspaceFiles.find((item) => item.id === fileId))
+        .filter((item): item is WorkspaceFile => Boolean(item))
+        .map((item) => ({
+          id: item.id,
+          filename: item.file.name,
+          isActive: item.id === selectedFileId,
+        })),
+    [openFileIds, selectedFileId, workspaceFiles],
+  );
   const canAnalyze = Boolean(selectedWorkspaceFile && serviceStatus?.running && !isAnalyzing);
   const editorText = selectedAnalysis?.text_preview ?? "";
   const editorLines = useMemo(() => (editorText ? editorText.split(/\r?\n/) : [""]), [editorText]);
@@ -124,7 +137,7 @@ function App() {
       const knownIds = new Set(current.map((item) => item.id));
       return [...current, ...nextFiles.filter((item) => !knownIds.has(item.id))];
     });
-    setSelectedFileId(nextFiles[0].id);
+    openWorkspaceFile(nextFiles[0].id);
     setErrorMessage("");
   }
 
@@ -148,8 +161,28 @@ function App() {
     };
 
     setWorkspaceFiles((current) => [...current, nextFile]);
-    setSelectedFileId(nextFile.id);
+    openWorkspaceFile(nextFile.id);
     setErrorMessage("");
+  }
+
+  function openWorkspaceFile(fileId: string) {
+    setSelectedFileId(fileId);
+
+    if (!fileId) return;
+
+    setOpenFileIds((current) => [fileId, ...current.filter((id) => id !== fileId)]);
+  }
+
+  function closePreviewTab(fileId: string) {
+    setOpenFileIds((current) => {
+      const nextOpenFileIds = current.filter((id) => id !== fileId);
+
+      if (fileId === selectedFileId) {
+        setSelectedFileId(nextOpenFileIds[0] ?? "");
+      }
+
+      return nextOpenFileIds;
+    });
   }
 
   async function analyzeDocument() {
@@ -294,7 +327,7 @@ function App() {
           workspaceFiles={workspaceFiles}
           selectedFileId={selectedFileId}
           explorerWidth={layoutWidths.explorer}
-          onSelectFile={setSelectedFileId}
+          onSelectFile={openWorkspaceFile}
           onCreateEmptyFile={createEmptyFile}
           onOpenFilePicker={openFilePicker}
         />
@@ -313,16 +346,14 @@ function App() {
 
         <CenterPane
           activeFilename={activeFilename}
-          canAnalyze={canAnalyze}
           editorLines={editorLines}
           editorText={editorText}
           errorMessage={errorMessage}
-          isAnalyzing={isAnalyzing}
           isChecking={isChecking}
-          selectedAnalysis={selectedAnalysis}
-          selectedWorkspaceFile={selectedWorkspaceFile}
-          onAnalyzeDocument={analyzeDocument}
+          previewTabs={openPreviewTabs}
+          onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
+          onSelectPreviewTab={setSelectedFileId}
         />
 
         <div
