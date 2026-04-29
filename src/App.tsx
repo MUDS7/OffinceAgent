@@ -5,43 +5,10 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  Bot,
-  Braces,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Circle,
-  CircleUserRound,
-  Code2,
-  Copy,
-  Edit3,
-  FilePlus2,
-  FileText,
-  Files,
-  FolderOpen,
-  GitBranch,
-  Hand,
-  Info,
-  Loader2,
-  Maximize2,
-  MoreHorizontal,
-  Paperclip,
-  Play,
-  RefreshCw,
-  RotateCcw,
-  Search,
-  Settings,
-  Settings2,
-  Share2,
-  Sparkles,
-  SplitSquareVertical,
-  X,
-  XCircle,
-} from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Share2 } from "lucide-react";
+import { CenterPane } from "./components/CenterPane";
+import { LeftPanel } from "./components/LeftPanel";
+import { RightPanel } from "./components/RightPanel";
 
 type AgentInfo = {
   name: string;
@@ -99,7 +66,6 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const workbenchRef = useRef<HTMLElement | null>(null);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
 
   const selectedWorkspaceFile = useMemo(
@@ -253,9 +219,10 @@ function App() {
     setLayoutWidths((current) => {
       if (target === "explorer") {
         const nextWidth = current.explorer + direction * step;
-        const explorerWidth = current.explorer <= MIN_EXPLORER_WIDTH && nextWidth < MIN_EXPLORER_WIDTH
-          ? 0
-          : normalizePanelWidth(nextWidth, MIN_EXPLORER_WIDTH);
+        const explorerWidth =
+          current.explorer <= MIN_EXPLORER_WIDTH && nextWidth < MIN_EXPLORER_WIDTH
+            ? 0
+            : normalizePanelWidth(nextWidth, MIN_EXPLORER_WIDTH);
 
         return {
           ...current,
@@ -318,74 +285,14 @@ function App() {
         </div>
       </header>
 
-      <section ref={workbenchRef} className="workbench" style={workbenchStyle}>
-        <aside className="activity-bar" aria-label="活动栏">
-          <div className="activity-top">
-            <button className="activity-button active" type="button" title="资源管理器">
-              <Files size={26} />
-            </button>
-            <button className="activity-button" type="button" title="搜索">
-              <Search size={26} />
-            </button>
-            <button className="activity-button" type="button" title="源代码管理">
-              <GitBranch size={25} />
-            </button>
-            <button className="activity-button" type="button" title="运行和调试">
-              <Play size={25} />
-            </button>
-            <button className="activity-button" type="button" title="扩展">
-              <Braces size={25} />
-            </button>
-          </div>
-          <div className="activity-bottom">
-            <button className="activity-button" type="button" title="账户">
-              <CircleUserRound size={25} />
-            </button>
-            <button className="activity-button" type="button" title="管理">
-              <Settings size={24} />
-            </button>
-          </div>
-        </aside>
-
-        <aside
-          className={layoutWidths.explorer === 0 ? "explorer-panel collapsed" : "explorer-panel"}
-          aria-label="文件目录"
-          aria-hidden={layoutWidths.explorer === 0}
-        >
-          <div className="panel-heading explorer-heading">
-            <span>资源管理器</span>
-            <MoreHorizontal size={17} />
-          </div>
-
-          <div className="tree-section">
-            <div className="tree-root">
-              <ChevronDown size={16} />
-              <span>工作区</span>
-            </div>
-
-            <div className="file-list">
-              {workspaceFiles.map((item) => (
-                <button
-                  key={item.id}
-                  className={item.id === selectedFileId ? "file-row selected" : "file-row"}
-                  type="button"
-                  onClick={() => setSelectedFileId(item.id)}
-                >
-                  <FileIcon filename={item.file.name} />
-                  <span>{item.file.name}</span>
-                  {item.analysis ? <Check size={14} /> : <Circle size={9} />}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <button className="empty-tree-action" type="button" onClick={openFilePicker}>
-            <FilePlus2 size={16} />
-            打开本地文档
-          </button>
-
-          <div className="explorer-spacer" />
-        </aside>
+      <section className="workbench" style={workbenchStyle}>
+        <LeftPanel
+          workspaceFiles={workspaceFiles}
+          selectedFileId={selectedFileId}
+          explorerWidth={layoutWidths.explorer}
+          onSelectFile={setSelectedFileId}
+          onOpenFilePicker={openFilePicker}
+        />
 
         <div
           className="layout-resizer"
@@ -399,74 +306,19 @@ function App() {
           onPointerDown={(event) => startLayoutResize("explorer", event)}
         />
 
-        <section className="preview-pane" aria-label="文件预览">
-          <div className="editor-action-strip">
-            <div className="editor-tabs">
-              <div className="editor-tab active">
-                <Info size={15} />
-                <span>{activeFilename}</span>
-                <X size={15} />
-              </div>
-            </div>
-            <div className="editor-actions">
-              <Bot size={20} />
-              <Copy size={19} />
-              <RotateCcw size={19} />
-              <RefreshCw className={isChecking ? "spin" : ""} size={19} onClick={refreshStatus} />
-              <Code2 size={19} />
-              <SplitSquareVertical size={19} />
-              <MoreHorizontal size={19} />
-            </div>
-          </div>
-
-          <div className="breadcrumbs">
-            <Info size={15} />
-            <span>{activeFilename}</span>
-            {selectedAnalysis ? (
-              <>
-                <ChevronRight size={14} />
-                <span>{selectedAnalysis.extension.toUpperCase()}</span>
-              </>
-            ) : null}
-          </div>
-
-          {errorMessage ? (
-            <div className="error-line" role="alert">
-              <XCircle size={16} />
-              {errorMessage}
-            </div>
-          ) : null}
-
-          <div className="editor-content">
-            <div className="editor-scroll">
-              <div className="line-numbers" aria-hidden="true">
-                {editorLines.map((_, index) => (
-                  <span key={index}>{index + 1}</span>
-                ))}
-              </div>
-              <pre>{editorText}</pre>
-              <div className="minimap" aria-hidden="true">
-                {editorLines.slice(0, 48).map((line, index) => (
-                  <span key={index} style={{ width: `${Math.max(12, Math.min(96, line.length * 1.8))}%` }} />
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="editor-bottom">
-            <button className="tool-text-button" type="button" onClick={analyzeDocument} disabled={!canAnalyze}>
-              {isAnalyzing ? <Loader2 className="spin" size={16} /> : <FileText size={16} />}
-              解析预览
-            </button>
-            {selectedAnalysis ? (
-              <span>
-                {selectedAnalysis.extension.toUpperCase()} · {formatBytes(selectedAnalysis.size_bytes)}
-              </span>
-            ) : (
-              <span>{selectedWorkspaceFile ? "未解析" : "空白"}</span>
-            )}
-          </div>
-        </section>
+        <CenterPane
+          activeFilename={activeFilename}
+          canAnalyze={canAnalyze}
+          editorLines={editorLines}
+          editorText={editorText}
+          errorMessage={errorMessage}
+          isAnalyzing={isAnalyzing}
+          isChecking={isChecking}
+          selectedAnalysis={selectedAnalysis}
+          selectedWorkspaceFile={selectedWorkspaceFile}
+          onAnalyzeDocument={analyzeDocument}
+          onRefreshStatus={refreshStatus}
+        />
 
         <div
           className="layout-resizer"
@@ -480,84 +332,14 @@ function App() {
           onPointerDown={(event) => startLayoutResize("codex", event)}
         />
 
-        <aside
-          className={layoutWidths.codex === 0 ? "codex-pane collapsed" : "codex-pane"}
-          aria-label="Codex 面板"
-          aria-hidden={layoutWidths.codex === 0}
-        >
-          <div className="codex-top">
-            <div className="codex-tabs">
-              <button type="button">聊天</button>
-              <button className="active" type="button">
-                CODEX
-              </button>
-            </div>
-            <div className="codex-window-actions">
-              <Maximize2 size={17} />
-              <X size={18} />
-            </div>
-          </div>
-
-          <div className="task-list">
-            <div className="task-title">任务</div>
-          </div>
-
-          <div className="codex-tools">
-            <RefreshCw size={16} />
-            <Settings2 size={16} />
-            <Edit3 size={16} />
-          </div>
-
-          <div className="codex-body">
-            <div className="codex-empty-mark">
-              <Sparkles size={36} />
-            </div>
-            {chatMessages.length ? (
-              <div className="floating-history">
-                {chatMessages.slice(-2).map((message) => (
-                  <article className={`chat-message ${message.role}`} key={message.id}>
-                    <p>{message.text}</p>
-                  </article>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="composer-wrap">
-            <div className="chat-input">
-              <textarea
-                value={draftMessage}
-                placeholder="问 Codex 任何事。输入 @ 使用插件或提及文件"
-                rows={3}
-                onChange={(event) => setDraftMessage(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                    sendMessage();
-                  }
-                }}
-              />
-              <div className="composer-actions">
-                <button className="icon-button" type="button" title="添加上下文" onClick={openFilePicker}>
-                  <Paperclip size={19} />
-                </button>
-                <button className="permission-button" type="button">
-                  <Hand size={16} />
-                  默认权限
-                  <ChevronDown size={15} />
-                </button>
-                <span className="model-select">5.5 高</span>
-                <button className="send-button" type="button" onClick={sendMessage} disabled={!draftMessage.trim()} title="发送">
-                  <ArrowUp size={22} />
-                </button>
-              </div>
-            </div>
-            <button className="local-mode" type="button">
-              <span />
-              本地模式
-              <ChevronDown size={14} />
-            </button>
-          </div>
-        </aside>
+        <RightPanel
+          chatMessages={chatMessages}
+          codexWidth={layoutWidths.codex}
+          draftMessage={draftMessage}
+          onDraftMessageChange={setDraftMessage}
+          onOpenFilePicker={openFilePicker}
+          onSendMessage={sendMessage}
+        />
       </section>
     </main>
   );
@@ -590,21 +372,6 @@ function normalizePanelWidth(width: number, minWidth: number) {
   if (width <= minWidth - HIDE_DRAG_DISTANCE) return 0;
   if (width === 0) return 0;
   return Math.max(minWidth, width);
-}
-
-function FileIcon({ filename }: { filename: string }) {
-  if (filename.endsWith(".json")) return <Braces className="json-icon" size={15} />;
-  if (filename.endsWith(".ts") || filename.endsWith(".tsx")) return <Code2 className="ts-icon" size={15} />;
-  if (filename.endsWith(".html")) return <Code2 className="html-icon" size={15} />;
-  if (filename === ".gitignore") return <GitBranch className="git-icon" size={15} />;
-  if (!filename) return <FolderOpen className="md-icon" size={15} />;
-  return <FileText className="md-icon" size={15} />;
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function isTauriUnavailable(message: string) {
