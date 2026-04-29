@@ -8,6 +8,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import type { KeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 type ChatMessage = {
@@ -27,6 +28,7 @@ type RightPanelProps = {
 };
 
 const modelOptions = [
+  { id: "deepseek-v3", label: "DeepSeek V3" },
   { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
   { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
 ];
@@ -51,6 +53,13 @@ export function RightPanel({
 
     historyElement.scrollTop = historyElement.scrollHeight;
   }, [chatMessages]);
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+
+    event.preventDefault();
+    onSendMessage(selectedModel);
+  }
 
   return (
     <aside
@@ -97,11 +106,7 @@ export function RightPanel({
             placeholder="Ask Agent anything. Type @ to mention files."
             rows={3}
             onChange={(event) => onDraftMessageChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                onSendMessage(selectedModel);
-              }
-            }}
+            onKeyDown={handleComposerKeyDown}
           />
           <div className="composer-actions">
             <button className="icon-button" type="button" title="Attach context" onClick={onOpenFilePicker}>

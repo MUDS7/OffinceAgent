@@ -1003,13 +1003,17 @@ body.is-resizing-layout * {
 
 .permission-menu {
   position: relative;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .permission-trigger {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  justify-content: center;
+  min-width: 185px;
+  max-width: 100%;
   height: 31px;
   padding: 0 10px;
   border-radius: 999px;
@@ -1018,6 +1022,11 @@ body.is-resizing-layout * {
   cursor: pointer;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.permission-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .permission-trigger:focus-visible,
@@ -1036,7 +1045,7 @@ body.is-resizing-layout * {
   left: 0;
   z-index: 10;
   display: grid;
-  min-width: 178px;
+  min-width: 220px;
   padding: 9px;
   border: 1px solid #e6e6e6;
   border-radius: 18px;
@@ -1067,8 +1076,7 @@ body.is-resizing-layout * {
 }
 
 .permission-option span:nth-child(2) {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
 }
 
 .permission-option svg:last-child {
