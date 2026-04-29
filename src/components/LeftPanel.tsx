@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent } from "react";
+import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import {
   Braces,
   Check,
   ChevronDown,
+  ChevronRight,
   Circle,
   CircleUserRound,
   Code2,
@@ -79,6 +80,8 @@ export function LeftPanel({
   const [creatingFolderAfterFileId, setCreatingFolderAfterFileId] = useState<string | null>(null);
   const [creatingFolderParentId, setCreatingFolderParentId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState("");
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
+  const [isWorkspaceRootCollapsed, setIsWorkspaceRootCollapsed] = useState(false);
   const newFileInputRef = useRef<HTMLInputElement | null>(null);
   const newFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceTree = useMemo(
@@ -98,6 +101,7 @@ export function LeftPanel({
 
   function startCreatingFile() {
     setDraftFilename("");
+    setIsWorkspaceRootCollapsed(false);
     setIsCreatingFolder(false);
     setIsCreatingFile(true);
   }
@@ -106,6 +110,14 @@ export function LeftPanel({
     setDraftFolderName("");
     setCreatingFolderAfterFileId(selectedFolderId ? null : selectedFileId || null);
     setCreatingFolderParentId(selectedFolderId || null);
+    setIsWorkspaceRootCollapsed(false);
+    if (selectedFolderId) {
+      setCollapsedFolderIds((current) => {
+        const next = new Set(current);
+        next.delete(selectedFolderId);
+        return next;
+      });
+    }
     setIsCreatingFile(false);
     setIsCreatingFolder(true);
   }
@@ -161,6 +173,44 @@ export function LeftPanel({
     setIsCreatingFolder(false);
   }
 
+  function toggleWorkspaceRoot() {
+    setIsWorkspaceRootCollapsed((isCollapsed) => !isCollapsed);
+  }
+
+  function toggleFolder(folderId: string) {
+    setCollapsedFolderIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(folderId)) {
+        next.delete(folderId);
+      } else {
+        next.add(folderId);
+      }
+
+      return next;
+    });
+  }
+
+  function collapseAllFolders(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    setIsWorkspaceRootCollapsed(false);
+    setCollapsedFolderIds(new Set([...collectWorkspaceTreeFolderIds(workspaceTree), ...workspaceFolders.map((folder) => folder.id)]));
+  }
+
+  function handleStartCreatingFile(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    startCreatingFile();
+  }
+
+  function handleStartCreatingFolder(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    startCreatingFolder();
+  }
+
+  function stopTreeRootAction(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+  }
+
   function handleNewFileKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -211,6 +261,8 @@ export function LeftPanel({
 
   function renderFolder(folder: WorkspaceFolder, depth = 0) {
     const childFolders = workspaceFolders.filter((item) => item.parentFolderId === folder.id);
+    const isCollapsed = collapsedFolderIds.has(folder.id);
+    const ChevronIcon = isCollapsed ? ChevronRight : ChevronDown;
 
     return (
       <Fragment key={folder.id}>
@@ -218,38 +270,46 @@ export function LeftPanel({
           className={folder.id === selectedFolderId ? "file-row folder-tree-row selected" : "file-row folder-tree-row"}
           style={getTreeRowStyle(depth)}
           type="button"
+          aria-expanded={!isCollapsed}
           onClick={() => {
             setSelectedFolderId(folder.id);
             onSelectFile("");
+            toggleFolder(folder.id);
           }}
         >
+          <ChevronIcon className="tree-folder-chevron" size={14} />
           <FolderOpen className="folder-icon" size={15} />
           <span>{folder.name}</span>
         </button>
-        {isCreatingFolder && creatingFolderParentId === folder.id ? renderCreatingFolderRow(depth + 1) : null}
-        {childFolders.map((childFolder) => renderFolder(childFolder, depth + 1))}
+        {!isCollapsed && isCreatingFolder && creatingFolderParentId === folder.id ? renderCreatingFolderRow(depth + 1) : null}
+        {!isCollapsed ? childFolders.map((childFolder) => renderFolder(childFolder, depth + 1)) : null}
       </Fragment>
     );
   }
 
   function renderTreeNode(node: WorkspaceTreeNode, depth = 0) {
     if (node.kind === "folder") {
+      const isCollapsed = collapsedFolderIds.has(node.id);
+      const ChevronIcon = isCollapsed ? ChevronRight : ChevronDown;
+
       return (
         <Fragment key={node.id}>
           <button
             className={node.id === selectedFolderId ? "file-row folder-tree-row selected" : "file-row folder-tree-row"}
             style={getTreeRowStyle(depth)}
             type="button"
+            aria-expanded={!isCollapsed}
             onClick={() => {
               setSelectedFolderId(node.id);
               onSelectFile("");
+              toggleFolder(node.id);
             }}
           >
-            <ChevronDown className="tree-folder-chevron" size={14} />
+            <ChevronIcon className="tree-folder-chevron" size={14} />
             <FolderOpen className="folder-icon" size={15} />
             <span>{node.name}</span>
           </button>
-          {node.children.map((childNode) => renderTreeNode(childNode, depth + 1))}
+          {!isCollapsed ? node.children.map((childNode) => renderTreeNode(childNode, depth + 1)) : null}
         </Fragment>
       );
     }
@@ -323,50 +383,52 @@ export function LeftPanel({
             if (event.target === event.currentTarget) clearTreeSelection();
           }}
         >
-          <div className="tree-root">
-            <ChevronDown size={16} />
+          <div className={isWorkspaceRootCollapsed ? "tree-root collapsed" : "tree-root"} onClick={toggleWorkspaceRoot}>
+            {isWorkspaceRootCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
             <div className="tree-actions" aria-label="Workspace actions">
-              <button className="tree-action-button" type="button" title="新建文件" onClick={startCreatingFile}>
+              <button className="tree-action-button" type="button" title="新建文件" onClick={handleStartCreatingFile}>
                 <FilePlus2 size={18} strokeWidth={1.8} />
               </button>
-              <button className="tree-action-button" type="button" title="新建文件夹" onClick={startCreatingFolder}>
+              <button className="tree-action-button" type="button" title="新建文件夹" onClick={handleStartCreatingFolder}>
                 <FolderPlus size={18} strokeWidth={1.8} />
               </button>
-              <button className="tree-action-button" type="button" title="刷新资源管理器">
+              <button className="tree-action-button" type="button" title="刷新资源管理器" onClick={stopTreeRootAction}>
                 <RefreshCw size={18} strokeWidth={1.8} />
               </button>
-              <button className="tree-action-button" type="button" title="折叠文件夹">
+              <button className="tree-action-button" type="button" title="折叠文件夹" onClick={collapseAllFolders}>
                 <SquareMinus size={18} strokeWidth={1.8} />
               </button>
             </div>
             <span>{workspaceName || "工作区"}</span>
           </div>
 
-          <div
-            className="file-list"
-            onClick={(event) => {
-              if (event.target === event.currentTarget) clearTreeSelection();
-            }}
-          >
-            {isCreatingFile ? (
-              <div className="file-row creating-file-row">
-                <FileIcon filename={draftFilename} />
-                <input
-                  ref={newFileInputRef}
-                  aria-label="新建文件名"
-                  value={draftFilename}
-                  onChange={(event) => setDraftFilename(event.target.value)}
-                  onKeyDown={handleNewFileKeyDown}
-                  onBlur={cancelCreatingFile}
-                />
-              </div>
-            ) : null}
-            {isCreatingFolder && !creatingFolderAfterFileId && !creatingFolderParentId ? renderCreatingFolderRow() : null}
-            {workspaceFolders
-              .filter((folder) => !folder.afterFileId && !folder.parentFolderId)
-              .map((folder) => renderFolder(folder))}
-            {workspaceTree.map((node) => renderTreeNode(node))}
-          </div>
+          {!isWorkspaceRootCollapsed ? (
+            <div
+              className="file-list"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) clearTreeSelection();
+              }}
+            >
+              {isCreatingFile ? (
+                <div className="file-row creating-file-row">
+                  <FileIcon filename={draftFilename} />
+                  <input
+                    ref={newFileInputRef}
+                    aria-label="新建文件名"
+                    value={draftFilename}
+                    onChange={(event) => setDraftFilename(event.target.value)}
+                    onKeyDown={handleNewFileKeyDown}
+                    onBlur={cancelCreatingFile}
+                  />
+                </div>
+              ) : null}
+              {isCreatingFolder && !creatingFolderAfterFileId && !creatingFolderParentId ? renderCreatingFolderRow() : null}
+              {workspaceFolders
+                .filter((folder) => !folder.afterFileId && !folder.parentFolderId)
+                .map((folder) => renderFolder(folder))}
+              {workspaceTree.map((node) => renderTreeNode(node))}
+            </div>
+          ) : null}
         </div>
 
         <button className="empty-tree-action" type="button" onClick={onOpenFilePicker}>
@@ -387,6 +449,19 @@ function FileIcon({ filename }: { filename: string }) {
   if (filename === ".gitignore") return <GitBranch className="git-icon" size={15} />;
   if (!filename) return <FolderOpen className="md-icon" size={15} />;
   return <FileText className="md-icon" size={15} />;
+}
+
+function collectWorkspaceTreeFolderIds(nodes: WorkspaceTreeNode[]) {
+  const folderIds: string[] = [];
+
+  for (const node of nodes) {
+    if (node.kind !== "folder") continue;
+
+    folderIds.push(node.id);
+    folderIds.push(...collectWorkspaceTreeFolderIds(node.children));
+  }
+
+  return folderIds;
 }
 
 function buildWorkspaceTree(workspaceFiles: WorkspaceFile[], workspaceName: string) {
