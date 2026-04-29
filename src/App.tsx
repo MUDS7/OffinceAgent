@@ -33,6 +33,7 @@ type AnalyzeResult = {
 type WorkspaceFile = {
   id: string;
   file: File;
+  relativePath?: string;
   analysis: AnalyzeResult | null;
 };
 
@@ -59,6 +60,7 @@ function App() {
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [workspaceName, setWorkspaceName] = useState("工作区");
   const [selectedFileId, setSelectedFileId] = useState("");
   const [openFileIds, setOpenFileIds] = useState<string[]>([]);
   const [isChecking, setIsChecking] = useState(false);
@@ -67,6 +69,7 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
 
   const selectedWorkspaceFile = useMemo(
@@ -125,7 +128,19 @@ function App() {
   }
 
   function openFilePicker() {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+
     fileInputRef.current?.click();
+  }
+
+  function openFolderPicker() {
+    if (folderInputRef.current) {
+      folderInputRef.current.value = "";
+    }
+
+    folderInputRef.current?.click();
   }
 
   function handleFileSelection(files: FileList | null) {
@@ -142,6 +157,30 @@ function App() {
       return [...current, ...nextFiles.filter((item) => !knownIds.has(item.id))];
     });
     openWorkspaceFile(nextFiles[0].id);
+    setErrorMessage("");
+  }
+
+  function handleFolderSelection(files: FileList | null) {
+    if (!files?.length) return;
+
+    const selectedFiles = Array.from(files);
+    const firstRelativePath = normalizeFilePath(getFileRelativePath(selectedFiles[0]));
+    const rootName = firstRelativePath.split("/")[0] || "工作区";
+    const nextFiles = selectedFiles.map((file) => {
+      const relativePath = normalizeFilePath(getFileRelativePath(file)) || file.name;
+
+      return {
+        id: `${relativePath}-${file.size}-${file.lastModified}`,
+        file,
+        relativePath,
+        analysis: null,
+      };
+    });
+
+    setWorkspaceName(rootName);
+    setWorkspaceFiles(nextFiles);
+    setSelectedFileId("");
+    setOpenFileIds([]);
     setErrorMessage("");
   }
 
@@ -323,6 +362,14 @@ function App() {
     refreshStatus();
   }, []);
 
+  useEffect(() => {
+    const folderInput = folderInputRef.current;
+    if (!folderInput) return;
+
+    folderInput.setAttribute("webkitdirectory", "");
+    folderInput.setAttribute("directory", "");
+  }, []);
+
   return (
     <main className="desktop-shell">
       <input
@@ -333,16 +380,25 @@ function App() {
         accept=".txt,.md,.csv,.json,.pdf,.docx"
         onChange={(event) => handleFileSelection(event.target.files)}
       />
+      <input
+        ref={folderInputRef}
+        className="hidden-file-input"
+        type="file"
+        multiple
+        onChange={(event) => handleFolderSelection(event.target.files)}
+      />
 
       <TopBar
         agentInfo={agentInfo}
         serviceStatus={serviceStatus}
         workspaceFileCount={workspaceFiles.length}
         onOpenFilePicker={openFilePicker}
+        onOpenFolderPicker={openFolderPicker}
       />
 
       <section className="workbench" style={workbenchStyle}>
         <LeftPanel
+          workspaceName={workspaceName}
           workspaceFiles={workspaceFiles}
           selectedFileId={selectedFileId}
           explorerWidth={layoutWidths.explorer}
@@ -441,6 +497,14 @@ function getFileMimeType(filename: string) {
   if (extension === "ts" || extension === "tsx") return "text/typescript";
 
   return "text/plain";
+}
+
+function getFileRelativePath(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+}
+
+function normalizeFilePath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "");
 }
 
 function isTauriUnavailable(message: string) {

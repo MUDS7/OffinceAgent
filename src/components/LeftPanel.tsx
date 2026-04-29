@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import {
   Braces,
@@ -24,6 +24,7 @@ import {
 type WorkspaceFile = {
   id: string;
   file: File;
+  relativePath?: string;
   analysis: unknown | null;
 };
 
@@ -34,7 +35,25 @@ type WorkspaceFolder = {
   parentFolderId: string | null;
 };
 
+type WorkspaceTreeFile = {
+  kind: "file";
+  id: string;
+  name: string;
+  fileItem: WorkspaceFile;
+};
+
+type WorkspaceTreeFolder = {
+  kind: "folder";
+  id: string;
+  name: string;
+  path: string;
+  children: WorkspaceTreeNode[];
+};
+
+type WorkspaceTreeNode = WorkspaceTreeFile | WorkspaceTreeFolder;
+
 type LeftPanelProps = {
+  workspaceName: string;
   workspaceFiles: WorkspaceFile[];
   selectedFileId: string;
   explorerWidth: number;
@@ -44,6 +63,7 @@ type LeftPanelProps = {
 };
 
 export function LeftPanel({
+  workspaceName,
   workspaceFiles,
   selectedFileId,
   explorerWidth,
@@ -61,6 +81,10 @@ export function LeftPanel({
   const [selectedFolderId, setSelectedFolderId] = useState("");
   const newFileInputRef = useRef<HTMLInputElement | null>(null);
   const newFolderInputRef = useRef<HTMLInputElement | null>(null);
+  const workspaceTree = useMemo(
+    () => buildWorkspaceTree(workspaceFiles, workspaceName),
+    [workspaceFiles, workspaceName],
+  );
 
   useEffect(() => {
     if (!isCreatingFile) return;
@@ -208,6 +232,51 @@ export function LeftPanel({
     );
   }
 
+  function renderTreeNode(node: WorkspaceTreeNode, depth = 0) {
+    if (node.kind === "folder") {
+      return (
+        <Fragment key={node.id}>
+          <button
+            className={node.id === selectedFolderId ? "file-row folder-tree-row selected" : "file-row folder-tree-row"}
+            style={getTreeRowStyle(depth)}
+            type="button"
+            onClick={() => {
+              setSelectedFolderId(node.id);
+              onSelectFile("");
+            }}
+          >
+            <ChevronDown className="tree-folder-chevron" size={14} />
+            <FolderOpen className="folder-icon" size={15} />
+            <span>{node.name}</span>
+          </button>
+          {node.children.map((childNode) => renderTreeNode(childNode, depth + 1))}
+        </Fragment>
+      );
+    }
+
+    return (
+      <Fragment key={node.id}>
+        <button
+          className={node.fileItem.id === selectedFileId ? "file-row selected" : "file-row"}
+          style={getTreeRowStyle(depth)}
+          type="button"
+          onClick={() => {
+            setSelectedFolderId("");
+            onSelectFile(node.fileItem.id);
+          }}
+        >
+          <FileIcon filename={node.name} />
+          <span>{node.name}</span>
+          {node.fileItem.analysis ? <Check size={14} /> : <Circle size={9} />}
+        </button>
+        {isCreatingFolder && creatingFolderAfterFileId === node.fileItem.id ? renderCreatingFolderRow(depth) : null}
+        {workspaceFolders
+          .filter((folder) => folder.afterFileId === node.fileItem.id && !folder.parentFolderId)
+          .map((folder) => renderFolder(folder, depth))}
+      </Fragment>
+    );
+  }
+
   return (
     <>
       <aside className="activity-bar" aria-label="活动栏">
@@ -270,7 +339,7 @@ export function LeftPanel({
                 <SquareMinus size={18} strokeWidth={1.8} />
               </button>
             </div>
-            <span>工作区</span>
+            <span>{workspaceName || "工作区"}</span>
           </div>
 
           <div
@@ -296,26 +365,7 @@ export function LeftPanel({
             {workspaceFolders
               .filter((folder) => !folder.afterFileId && !folder.parentFolderId)
               .map((folder) => renderFolder(folder))}
-            {workspaceFiles.map((item) => (
-              <Fragment key={item.id}>
-                <button
-                  className={item.id === selectedFileId ? "file-row selected" : "file-row"}
-                  type="button"
-                  onClick={() => {
-                    setSelectedFolderId("");
-                    onSelectFile(item.id);
-                  }}
-                >
-                  <FileIcon filename={item.file.name} />
-                  <span>{item.file.name}</span>
-                  {item.analysis ? <Check size={14} /> : <Circle size={9} />}
-                </button>
-                {isCreatingFolder && creatingFolderAfterFileId === item.id ? renderCreatingFolderRow() : null}
-                {workspaceFolders
-                  .filter((folder) => folder.afterFileId === item.id && !folder.parentFolderId)
-                  .map((folder) => renderFolder(folder))}
-              </Fragment>
-            ))}
+            {workspaceTree.map((node) => renderTreeNode(node))}
           </div>
         </div>
 
@@ -337,4 +387,69 @@ function FileIcon({ filename }: { filename: string }) {
   if (filename === ".gitignore") return <GitBranch className="git-icon" size={15} />;
   if (!filename) return <FolderOpen className="md-icon" size={15} />;
   return <FileText className="md-icon" size={15} />;
+}
+
+function buildWorkspaceTree(workspaceFiles: WorkspaceFile[], workspaceName: string) {
+  const rootNodes: WorkspaceTreeNode[] = [];
+  const folderByPath = new Map<string, WorkspaceTreeFolder>();
+
+  for (const fileItem of workspaceFiles) {
+    const parts = getDisplayPathParts(fileItem, workspaceName);
+    const filename = parts[parts.length - 1] ?? fileItem.file.name;
+    let siblings = rootNodes;
+    let currentPath = "";
+
+    for (const folderName of parts.slice(0, -1)) {
+      currentPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+      let folder = folderByPath.get(currentPath);
+
+      if (!folder) {
+        folder = {
+          kind: "folder",
+          id: `tree-folder:${currentPath}`,
+          name: folderName,
+          path: currentPath,
+          children: [],
+        };
+        folderByPath.set(currentPath, folder);
+        siblings.push(folder);
+      }
+
+      siblings = folder.children;
+    }
+
+    siblings.push({
+      kind: "file",
+      id: fileItem.id,
+      name: filename,
+      fileItem,
+    });
+  }
+
+  sortWorkspaceNodes(rootNodes);
+  return rootNodes;
+}
+
+function getDisplayPathParts(fileItem: WorkspaceFile, workspaceName: string) {
+  const rawPath = fileItem.relativePath || fileItem.file.name;
+  const parts = rawPath.replace(/\\/g, "/").split("/").filter(Boolean);
+
+  if (parts.length > 1 && parts[0] === workspaceName) {
+    return parts.slice(1);
+  }
+
+  return parts.length ? parts : [fileItem.file.name];
+}
+
+function sortWorkspaceNodes(nodes: WorkspaceTreeNode[]) {
+  nodes.sort((left, right) => {
+    if (left.kind !== right.kind) return left.kind === "folder" ? -1 : 1;
+    return left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+  });
+
+  for (const node of nodes) {
+    if (node.kind === "folder") {
+      sortWorkspaceNodes(node.children);
+    }
+  }
 }

@@ -446,6 +446,11 @@ body.is-resizing-layout * {
   cursor: pointer;
 }
 
+.tree-folder-chevron {
+  flex: 0 0 auto;
+  color: #737373;
+}
+
 .creating-file-row input {
   min-width: 0;
   height: 21px;
