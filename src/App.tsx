@@ -44,6 +44,18 @@ type ChatMessage = {
   text: string;
 };
 
+type DeepSeekApiMessage = {
+  role: "assistant" | "system" | "user";
+  content: string;
+};
+
+type DocumentSelectionContext = {
+  fileId: string;
+  filename: string;
+  sourceType: "pdf" | "text";
+  text: string;
+};
+
 type DeepSeekStreamEvent = {
   stream_id: string;
   kind: "start" | "delta" | "done" | "error";
@@ -56,6 +68,7 @@ const UI_SCALE_FALLBACK = 0.8;
 const MIN_EXPLORER_WIDTH = 240;
 const MIN_CODEX_WIDTH = 340;
 const HIDE_DRAG_DISTANCE = 48;
+const MAX_SELECTION_CONTEXT_CHARS = 12000;
 
 type ResizeTarget = "explorer" | "codex";
 
@@ -77,6 +90,7 @@ function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
+  const [documentSelection, setDocumentSelection] = useState<DocumentSelectionContext | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
@@ -190,6 +204,7 @@ function App() {
     setWorkspaceFiles(nextFiles);
     setSelectedFileId("");
     setOpenFileIds([]);
+    setDocumentSelection(null);
     setErrorMessage("");
   }
 
@@ -234,6 +249,7 @@ function App() {
 
   function openWorkspaceFile(fileId: string) {
     setSelectedFileId(fileId);
+    setDocumentSelection(null);
 
     if (!fileId) return;
 
@@ -302,6 +318,7 @@ function App() {
     const userMessage: ChatMessage = { id: `user-${now}`, role: "user", text };
     const assistantMessage: ChatMessage = { id: assistantMessageId, role: "assistant", text: "" };
     const nextMessages = [...chatMessages, userMessage];
+    const apiMessages = buildDeepSeekMessages(nextMessages, documentSelection);
 
     setChatMessages([...nextMessages, assistantMessage]);
     setDraftMessage("");
@@ -339,10 +356,7 @@ function App() {
       await invoke("chat_with_deepseek", {
         model,
         streamId,
-        messages: nextMessages.map((message) => ({
-          role: message.role,
-          content: message.text,
-        })),
+        messages: apiMessages,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -506,6 +520,7 @@ function App() {
           previewTabs={openPreviewTabs}
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
+          onSelectionContextChange={setDocumentSelection}
           onSelectPreviewTab={setSelectedFileId}
           onUpdateTextFile={updateTextFile}
         />
@@ -526,6 +541,7 @@ function App() {
           chatMessages={chatMessages}
           codexWidth={layoutWidths.codex}
           draftMessage={draftMessage}
+          documentSelection={documentSelection}
           isSendingMessage={isSendingMessage}
           onDraftMessageChange={setDraftMessage}
           onOpenFilePicker={openFilePicker}
@@ -563,6 +579,44 @@ function normalizePanelWidth(width: number, minWidth: number) {
   if (width <= minWidth - HIDE_DRAG_DISTANCE) return 0;
   if (width === 0) return 0;
   return Math.max(minWidth, width);
+}
+
+function buildDeepSeekMessages(
+  chatMessages: ChatMessage[],
+  documentSelection: DocumentSelectionContext | null,
+): DeepSeekApiMessage[] {
+  const messages = chatMessages.map((message) => ({
+    role: message.role,
+    content: message.text,
+  }));
+
+  if (!documentSelection?.text.trim()) {
+    return messages;
+  }
+
+  const rawSelectionText = documentSelection.text.trim();
+  const selectionText = truncateSelectionContext(rawSelectionText);
+  const isTruncated = rawSelectionText.length > MAX_SELECTION_CONTEXT_CHARS;
+  const contextMessage: DeepSeekApiMessage = {
+    role: "system",
+    content: [
+      "你是 OfficeAgent。用户正在针对文件预览页中选中的片段提问。",
+      "请优先依据这个选中片段回答；如果问题需要片段以外的信息，请明确说明依据不足。",
+      `文件名：${documentSelection.filename}`,
+      `文件类型：${documentSelection.sourceType === "pdf" ? "PDF" : "文本"}`,
+      `选中片段${isTruncated ? "（已截断）" : ""}：`,
+      selectionText,
+    ].join("\n"),
+  };
+
+  return [contextMessage, ...messages];
+}
+
+function truncateSelectionContext(text: string) {
+  const trimmedText = text.trim();
+  const context = trimmedText.slice(0, MAX_SELECTION_CONTEXT_CHARS);
+
+  return context.length < trimmedText.length ? `${context}\n...[selection truncated]` : context;
 }
 
 function getFileMimeType(filename: string) {

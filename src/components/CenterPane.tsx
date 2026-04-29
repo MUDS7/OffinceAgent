@@ -16,6 +16,11 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import type { PDFPageProxy, RenderTask } from "pdfjs-dist";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 type PreviewTab = {
   id: string;
@@ -29,6 +34,13 @@ type PreviewFile = {
   file: File;
 };
 
+type DocumentSelectionContext = {
+  fileId: string;
+  filename: string;
+  sourceType: "pdf" | "text";
+  text: string;
+};
+
 type CenterPaneProps = {
   activeFilename: string;
   activeFile: PreviewFile | null;
@@ -37,6 +49,7 @@ type CenterPaneProps = {
   previewTabs: PreviewTab[];
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
+  onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onSelectPreviewTab: (fileId: string) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
 };
@@ -49,6 +62,7 @@ export function CenterPane({
   previewTabs,
   onClosePreviewTab,
   onRefreshStatus,
+  onSelectionContextChange,
   onSelectPreviewTab,
   onUpdateTextFile,
 }: CenterPaneProps) {
@@ -60,7 +74,6 @@ export function CenterPane({
     error: "",
   });
   const [textScrollTop, setTextScrollTop] = useState(0);
-  const [pdfUrl, setPdfUrl] = useState("");
   const activeFileId = activeFile?.id ?? "";
   const activeExtension = getFileExtension(activeFile?.filename ?? "");
   const isTextPreview = isEditableTextFile(activeFile?.file, activeExtension);
@@ -104,23 +117,13 @@ export function CenterPane({
   }, [activeFileId, isTextPreview]);
 
   useEffect(() => {
+    onSelectionContextChange(null);
+  }, [activeFileId, onSelectionContextChange]);
+
+  useEffect(() => {
     if (!isTextPreview || textPreview.isLoading || textPreview.error) return;
     textEditorRef.current?.focus();
   }, [activeFileId, isTextPreview, textPreview.error, textPreview.isLoading]);
-
-  useEffect(() => {
-    if (!activeFile || !isPdfPreview) {
-      setPdfUrl("");
-      return;
-    }
-
-    const nextPdfUrl = URL.createObjectURL(activeFile.file);
-    setPdfUrl(nextPdfUrl);
-
-    return () => {
-      URL.revokeObjectURL(nextPdfUrl);
-    };
-  }, [activeFileId, isPdfPreview]);
 
   return (
     <section className="preview-pane" aria-label="文件预览">
@@ -231,7 +234,10 @@ export function CenterPane({
               spellCheck={false}
               value={textPreview.text}
               onChange={(event) => updateTextPreview(event.target.value)}
+              onKeyUp={(event) => publishTextSelection(event.currentTarget)}
+              onMouseUp={(event) => publishTextSelection(event.currentTarget)}
               onScroll={(event) => setTextScrollTop(event.currentTarget.scrollTop)}
+              onSelect={(event) => publishTextSelection(event.currentTarget)}
             />
             <div className="minimap" aria-hidden="true">
               {textLines.slice(0, 48).map((line, index) => (
@@ -244,18 +250,7 @@ export function CenterPane({
     }
 
     if (isPdfPreview) {
-      return (
-        <div className="editor-content pdf-preview">
-          {pdfUrl ? (
-            <iframe className="pdf-preview-frame" src={pdfUrl} title={`${activeFile.filename} preview`} />
-          ) : (
-            <div className="preview-empty">
-              <RefreshCw className="spin" size={26} />
-              <span>正在打开 PDF...</span>
-            </div>
-          )}
-        </div>
-      );
+      return <PdfTextPreview activeFile={activeFile} onSelectionContextChange={onSelectionContextChange} />;
     }
 
     return (
@@ -278,6 +273,205 @@ export function CenterPane({
     }));
     onUpdateTextFile(activeFile.id, nextText);
   }
+
+  function publishTextSelection(textarea: HTMLTextAreaElement | null) {
+    if (!activeFile || !textarea) return;
+
+    const selectedText = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd).trim();
+    onSelectionContextChange(
+      selectedText
+        ? {
+            fileId: activeFile.id,
+            filename: activeFile.filename,
+            sourceType: "text",
+            text: selectedText,
+          }
+        : null,
+    );
+  }
+}
+
+type PdfTextPreviewProps = {
+  activeFile: PreviewFile;
+  onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
+};
+
+function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfTextPreviewProps) {
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const pagesRef = useRef<HTMLDivElement | null>(null);
+  const [pdfState, setPdfState] = useState({
+    isLoading: true,
+    error: "",
+  });
+
+  useEffect(() => {
+    const pagesElement = pagesRef.current;
+    if (!pagesElement) return;
+
+    const targetPagesElement = pagesElement;
+    let isCancelled = false;
+    const renderTasks: RenderTask[] = [];
+    let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
+
+    targetPagesElement.replaceChildren();
+    setPdfState({ isLoading: true, error: "" });
+
+    async function renderPdf() {
+      try {
+        const fileData = await activeFile.file.arrayBuffer();
+        if (isCancelled) return;
+
+        loadingTask = pdfjsLib.getDocument({ data: fileData });
+        const pdfDocument = await loadingTask.promise;
+
+        for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+          if (isCancelled) return;
+
+          const page = await pdfDocument.getPage(pageNumber);
+          const viewport = getScaledViewport(page, targetPagesElement);
+          const pageElement = document.createElement("article");
+          const canvas = document.createElement("canvas");
+          const textLayerElement = document.createElement("div");
+          const outputScale = window.devicePixelRatio || 1;
+
+          pageElement.className = "pdf-page";
+          pageElement.setAttribute("aria-label", `Page ${pageNumber}`);
+          pageElement.style.width = `${viewport.width}px`;
+          pageElement.style.height = `${viewport.height}px`;
+          pageElement.style.setProperty("--pdf-scale-factor", String(viewport.scale));
+
+          canvas.width = Math.floor(viewport.width * outputScale);
+          canvas.height = Math.floor(viewport.height * outputScale);
+          canvas.style.width = `${viewport.width}px`;
+          canvas.style.height = `${viewport.height}px`;
+
+          textLayerElement.className = "textLayer pdf-text-layer";
+          textLayerElement.style.width = `${viewport.width}px`;
+          textLayerElement.style.height = `${viewport.height}px`;
+
+          pageElement.append(canvas, textLayerElement);
+          targetPagesElement.append(pageElement);
+
+          const canvasContext = canvas.getContext("2d");
+          if (!canvasContext) {
+            throw new Error("Canvas rendering is not available in this webview.");
+          }
+
+          const renderTask = page.render({
+            canvas,
+            canvasContext,
+            transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined,
+            viewport,
+          });
+          renderTasks.push(renderTask);
+
+          const textContent = await page.getTextContent();
+          const textLayer = new pdfjsLib.TextLayer({
+            container: textLayerElement,
+            textContentSource: textContent,
+            viewport,
+          });
+
+          await Promise.all([renderTask.promise, textLayer.render()]);
+        }
+
+        if (!isCancelled) {
+          setPdfState({ isLoading: false, error: "" });
+        }
+      } catch (error) {
+        if (isCancelled || isPdfRenderCancelled(error)) return;
+
+        setPdfState({
+          isLoading: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    renderPdf();
+
+    return () => {
+      isCancelled = true;
+      renderTasks.forEach((task) => task.cancel());
+      void loadingTask?.destroy();
+      targetPagesElement.replaceChildren();
+    };
+  }, [activeFile.id, activeFile.file]);
+
+  useEffect(() => {
+    function handleSelectionChange() {
+      publishPdfSelection(shellRef.current, activeFile, onSelectionContextChange);
+    }
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, [activeFile, onSelectionContextChange]);
+
+  return (
+    <div className="editor-content pdf-preview">
+      <div
+        className="pdf-viewer-shell"
+        ref={shellRef}
+        onKeyUp={() => publishPdfSelection(shellRef.current, activeFile, onSelectionContextChange)}
+        onMouseUp={() => publishPdfSelection(shellRef.current, activeFile, onSelectionContextChange)}
+      >
+        <div className="pdf-pages" ref={pagesRef} />
+        {pdfState.isLoading ? (
+          <div className="pdf-preview-status preview-empty">
+            <RefreshCw className="spin" size={26} />
+            <span>正在打开 PDF...</span>
+          </div>
+        ) : null}
+        {pdfState.error ? (
+          <div className="pdf-preview-status preview-empty">
+            <XCircle size={28} />
+            <span>{pdfState.error}</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function getScaledViewport(page: PDFPageProxy, container: HTMLElement) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  const availableWidth = Math.max(360, container.clientWidth - 28);
+  const scale = Math.min(1.65, Math.max(0.72, availableWidth / baseViewport.width));
+
+  return page.getViewport({ scale });
+}
+
+function publishPdfSelection(
+  shellElement: HTMLDivElement | null,
+  activeFile: PreviewFile,
+  onSelectionContextChange: (context: DocumentSelectionContext | null) => void,
+) {
+  if (!shellElement) return;
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.toString().trim()) return;
+
+  const range = selection.getRangeAt(0);
+  const selectionBelongsToPdf =
+    shellElement.contains(selection.anchorNode) ||
+    shellElement.contains(selection.focusNode) ||
+    range.intersectsNode(shellElement);
+
+  if (!selectionBelongsToPdf) return;
+
+  onSelectionContextChange({
+    fileId: activeFile.id,
+    filename: activeFile.filename,
+    sourceType: "pdf",
+    text: selection.toString().trim(),
+  });
+}
+
+function isPdfRenderCancelled(error: unknown) {
+  return error instanceof Error && error.name === "RenderingCancelledException";
 }
 
 function EditorTabIcon({ filename }: { filename: string }) {

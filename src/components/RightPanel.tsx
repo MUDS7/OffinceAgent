@@ -17,9 +17,17 @@ type ChatMessage = {
   text: string;
 };
 
+type DocumentSelectionContext = {
+  fileId: string;
+  filename: string;
+  sourceType: "pdf" | "text";
+  text: string;
+};
+
 type RightPanelProps = {
   chatMessages: ChatMessage[];
   codexWidth: number;
+  documentSelection: DocumentSelectionContext | null;
   draftMessage: string;
   isSendingMessage: boolean;
   onDraftMessageChange: (message: string) => void;
@@ -36,6 +44,7 @@ const modelOptions = [
 export function RightPanel({
   chatMessages,
   codexWidth,
+  documentSelection,
   draftMessage,
   isSendingMessage,
   onDraftMessageChange,
@@ -100,6 +109,14 @@ export function RightPanel({
       </div>
 
       <div className="composer-wrap">
+        {documentSelection ? (
+          <div className="selection-context-pill" title={documentSelection.text}>
+            <FileTextIcon sourceType={documentSelection.sourceType} />
+            <span>
+              {documentSelection.filename} · 已选中 {documentSelection.text.length} 字
+            </span>
+          </div>
+        ) : null}
         <div className="chat-input">
           <textarea
             value={draftMessage}
@@ -172,4 +189,8 @@ export function RightPanel({
       </div>
     </aside>
   );
+}
+
+function FileTextIcon({ sourceType }: { sourceType: DocumentSelectionContext["sourceType"] }) {
+  return sourceType === "pdf" ? <Paperclip size={15} /> : <Sparkles size={15} />;
 }
