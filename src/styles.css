@@ -139,9 +139,51 @@ button {
 
 .workbench {
   display: grid;
-  grid-template-columns: 57px 361px minmax(360px, 1fr) clamp(420px, 29vw, 600px);
+  grid-template-columns:
+    57px minmax(0, var(--explorer-width, 361px)) 6px minmax(360px, 1fr) 6px
+    minmax(0, var(--codex-width, clamp(420px, 29vw, 600px)));
   min-height: 0;
   background: #ffffff;
+}
+
+.layout-resizer {
+  position: relative;
+  z-index: 3;
+  min-width: 6px;
+  min-height: 0;
+  border: 0;
+  background: #ffffff;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.layout-resizer::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: #e3e3e3;
+  content: "";
+}
+
+.layout-resizer:hover,
+.layout-resizer:focus-visible {
+  outline: none;
+  background: #eef6ff;
+}
+
+.layout-resizer:hover::before,
+.layout-resizer:focus-visible::before {
+  left: 2px;
+  width: 2px;
+  background: #4b89dc;
+}
+
+body.is-resizing-layout,
+body.is-resizing-layout * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .activity-bar {
@@ -195,6 +237,13 @@ button {
   flex-direction: column;
   border-right: 1px solid #e5e5e5;
   background: #f4f4f4;
+}
+
+.explorer-panel.collapsed,
+.codex-pane.collapsed {
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .panel-heading {
@@ -774,7 +823,9 @@ button {
 
 @media (max-width: 1200px) {
   .workbench {
-    grid-template-columns: 53px 280px minmax(340px, 1fr) 390px;
+    grid-template-columns:
+      53px minmax(0, var(--explorer-width, 280px)) 6px minmax(340px, 1fr) 6px
+      minmax(0, var(--codex-width, 390px));
   }
 
   .explorer-heading {
@@ -800,6 +851,7 @@ button {
   }
 
   .explorer-panel,
+  .layout-resizer,
   .codex-pane {
     display: none;
   }

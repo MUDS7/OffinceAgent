@@ -1,4 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
@@ -71,6 +76,17 @@ type ChatMessage = {
 };
 
 const DOCUMENT_SERVICE_URL = "http://127.0.0.1:8765";
+const UI_SCALE_FALLBACK = 0.8;
+const MIN_EXPLORER_WIDTH = 240;
+const MIN_CODEX_WIDTH = 340;
+const HIDE_DRAG_DISTANCE = 48;
+
+type ResizeTarget = "explorer" | "codex";
+
+type LayoutWidths = {
+  explorer: number;
+  codex: number;
+};
 
 function App() {
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
@@ -83,6 +99,8 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const workbenchRef = useRef<HTMLElement | null>(null);
+  const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
 
   const selectedWorkspaceFile = useMemo(
     () => workspaceFiles.find((item) => item.id === selectedFileId) ?? null,
@@ -93,6 +111,10 @@ function App() {
   const canAnalyze = Boolean(selectedWorkspaceFile && serviceStatus?.running && !isAnalyzing);
   const editorText = selectedAnalysis?.text_preview ?? "";
   const editorLines = useMemo(() => (editorText ? editorText.split(/\r?\n/) : [""]), [editorText]);
+  const workbenchStyle = {
+    "--explorer-width": `${layoutWidths.explorer}px`,
+    "--codex-width": `${layoutWidths.codex}px`,
+  } as CSSProperties;
   const activeFilename = selectedWorkspaceFile?.file.name ?? "未选择文件";
 
   async function refreshStatus() {
@@ -178,6 +200,82 @@ function App() {
     setDraftMessage("");
   }
 
+  function startLayoutResize(target: ResizeTarget, event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const startWidth = layoutWidths[target];
+    const scale = getUiScale();
+
+    document.body.classList.add("is-resizing-layout");
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      const delta = (moveEvent.clientX - startX) / scale;
+
+      setLayoutWidths((current) => {
+        if (target === "explorer") {
+          const nextWidth = startWidth + delta;
+
+          return {
+            ...current,
+            explorer: normalizePanelWidth(nextWidth, MIN_EXPLORER_WIDTH),
+          };
+        }
+
+        const nextWidth = startWidth - delta;
+
+        return {
+          ...current,
+          codex: normalizePanelWidth(nextWidth, MIN_CODEX_WIDTH),
+        };
+      });
+    }
+
+    function stopLayoutResize() {
+      document.body.classList.remove("is-resizing-layout");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopLayoutResize);
+      window.removeEventListener("pointercancel", stopLayoutResize);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopLayoutResize);
+    window.addEventListener("pointercancel", stopLayoutResize);
+  }
+
+  function handleResizerKeyDown(target: ResizeTarget, event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+    event.preventDefault();
+    const step = event.shiftKey ? 40 : 16;
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+
+    setLayoutWidths((current) => {
+      if (target === "explorer") {
+        const nextWidth = current.explorer + direction * step;
+        const explorerWidth = current.explorer <= MIN_EXPLORER_WIDTH && nextWidth < MIN_EXPLORER_WIDTH
+          ? 0
+          : normalizePanelWidth(nextWidth, MIN_EXPLORER_WIDTH);
+
+        return {
+          ...current,
+          explorer: explorerWidth,
+        };
+      }
+
+      const nextWidth = current.codex - direction * step;
+      const codexWidth =
+        current.codex <= MIN_CODEX_WIDTH && nextWidth < MIN_CODEX_WIDTH
+          ? 0
+          : normalizePanelWidth(nextWidth, MIN_CODEX_WIDTH);
+
+      return {
+        ...current,
+        codex: codexWidth,
+      };
+    });
+  }
+
   useEffect(() => {
     refreshStatus();
   }, []);
@@ -220,7 +318,7 @@ function App() {
         </div>
       </header>
 
-      <section className="workbench">
+      <section ref={workbenchRef} className="workbench" style={workbenchStyle}>
         <aside className="activity-bar" aria-label="活动栏">
           <div className="activity-top">
             <button className="activity-button active" type="button" title="资源管理器">
@@ -249,7 +347,11 @@ function App() {
           </div>
         </aside>
 
-        <aside className="explorer-panel" aria-label="文件目录">
+        <aside
+          className={layoutWidths.explorer === 0 ? "explorer-panel collapsed" : "explorer-panel"}
+          aria-label="文件目录"
+          aria-hidden={layoutWidths.explorer === 0}
+        >
           <div className="panel-heading explorer-heading">
             <span>资源管理器</span>
             <MoreHorizontal size={17} />
@@ -284,6 +386,18 @@ function App() {
 
           <div className="explorer-spacer" />
         </aside>
+
+        <div
+          className="layout-resizer"
+          role="separator"
+          aria-label="调整左侧面板宽度"
+          aria-orientation="vertical"
+          aria-valuemin={0}
+          aria-valuenow={Math.round(layoutWidths.explorer)}
+          tabIndex={0}
+          onKeyDown={(event) => handleResizerKeyDown("explorer", event)}
+          onPointerDown={(event) => startLayoutResize("explorer", event)}
+        />
 
         <section className="preview-pane" aria-label="文件预览">
           <div className="editor-action-strip">
@@ -354,7 +468,23 @@ function App() {
           </div>
         </section>
 
-        <aside className="codex-pane" aria-label="Codex 面板">
+        <div
+          className="layout-resizer"
+          role="separator"
+          aria-label="调整右侧面板宽度"
+          aria-orientation="vertical"
+          aria-valuemin={0}
+          aria-valuenow={Math.round(layoutWidths.codex)}
+          tabIndex={0}
+          onKeyDown={(event) => handleResizerKeyDown("codex", event)}
+          onPointerDown={(event) => startLayoutResize("codex", event)}
+        />
+
+        <aside
+          className={layoutWidths.codex === 0 ? "codex-pane collapsed" : "codex-pane"}
+          aria-label="Codex 面板"
+          aria-hidden={layoutWidths.codex === 0}
+        >
           <div className="codex-top">
             <div className="codex-tabs">
               <button type="button">聊天</button>
@@ -431,6 +561,35 @@ function App() {
       </section>
     </main>
   );
+}
+
+function getInitialLayoutWidths(): LayoutWidths {
+  if (typeof window === "undefined") {
+    return { explorer: 361, codex: 520 };
+  }
+
+  if (window.innerWidth <= 1200) {
+    return { explorer: 280, codex: 390 };
+  }
+
+  return {
+    explorer: 361,
+    codex: Math.max(420, window.innerWidth * 0.29),
+  };
+}
+
+function getUiScale() {
+  if (typeof window === "undefined") return UI_SCALE_FALLBACK;
+
+  const rawScale = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+  const scale = Number.parseFloat(rawScale);
+  return Number.isFinite(scale) && scale > 0 ? scale : UI_SCALE_FALLBACK;
+}
+
+function normalizePanelWidth(width: number, minWidth: number) {
+  if (width <= minWidth - HIDE_DRAG_DISTANCE) return 0;
+  if (width === 0) return 0;
+  return Math.max(minWidth, width);
 }
 
 function FileIcon({ filename }: { filename: string }) {
