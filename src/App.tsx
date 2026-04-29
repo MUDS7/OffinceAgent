@@ -128,6 +128,30 @@ function App() {
     setErrorMessage("");
   }
 
+  function createEmptyFile(filename: string) {
+    const trimmedFilename = filename.trim();
+    if (!trimmedFilename) return;
+
+    if (workspaceFiles.some((item) => item.file.name === trimmedFilename)) {
+      setErrorMessage(`文件已存在：${trimmedFilename}`);
+      return;
+    }
+
+    const file = new File([""], trimmedFilename, {
+      type: getFileMimeType(trimmedFilename),
+      lastModified: Date.now(),
+    });
+    const nextFile = {
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      file,
+      analysis: null,
+    };
+
+    setWorkspaceFiles((current) => [...current, nextFile]);
+    setSelectedFileId(nextFile.id);
+    setErrorMessage("");
+  }
+
   async function analyzeDocument() {
     if (!selectedWorkspaceFile) return;
 
@@ -271,6 +295,7 @@ function App() {
           selectedFileId={selectedFileId}
           explorerWidth={layoutWidths.explorer}
           onSelectFile={setSelectedFileId}
+          onCreateEmptyFile={createEmptyFile}
           onOpenFilePicker={openFilePicker}
         />
 
@@ -352,6 +377,18 @@ function normalizePanelWidth(width: number, minWidth: number) {
   if (width <= minWidth - HIDE_DRAG_DISTANCE) return 0;
   if (width === 0) return 0;
   return Math.max(minWidth, width);
+}
+
+function getFileMimeType(filename: string) {
+  const extension = filename.split(".").pop()?.toLowerCase();
+
+  if (extension === "json") return "application/json";
+  if (extension === "md") return "text/markdown";
+  if (extension === "csv") return "text/csv";
+  if (extension === "html") return "text/html";
+  if (extension === "ts" || extension === "tsx") return "text/typescript";
+
+  return "text/plain";
 }
 
 function isTauriUnavailable(message: string) {

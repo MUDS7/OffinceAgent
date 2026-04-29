@@ -377,19 +377,89 @@ body.is-resizing-layout * {
   font-weight: 700;
 }
 
+.tree-root > svg:first-child {
+  order: 0;
+  flex: 0 0 auto;
+}
+
+.tree-root > span {
+  order: 1;
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-actions {
+  order: 2;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.tree-action-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border-radius: 4px;
+  color: #424242;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tree-action-button:hover {
+  background: #e1e1e1;
+}
+
+.tree-action-button:focus-visible {
+  outline: 1px solid #4b89dc;
+  outline-offset: -1px;
+}
+
 .file-list {
   display: grid;
   gap: 0;
-  margin-top: 6px;
+  margin-top: 2px;
 }
 
 .file-row {
-  padding: 0 12px 0 72px;
+  padding: 0 12px 0 25px;
   cursor: pointer;
+}
+
+.creating-file-row {
+  cursor: default;
+}
+
+.folder-tree-row {
+  cursor: pointer;
+}
+
+.creating-file-row input {
+  min-width: 0;
+  height: 21px;
+  flex: 1;
+  padding: 1px 5px;
+  border: 1px solid #4b89dc;
+  border-radius: 2px;
+  outline: none;
+  color: #4f4f4f;
+  background: #ffffff;
+  font-size: 15px;
+  line-height: 19px;
 }
 
 .folder-row {
   padding-left: 18px;
+}
+
+.folder-icon {
+  color: #d0a34a;
 }
 
 .file-row span {
@@ -970,7 +1040,7 @@ body.is-resizing-layout * {
   }
 
   .file-row {
-    padding-left: 50px;
+    padding-left: 25px;
   }
 
   .folder-row {
