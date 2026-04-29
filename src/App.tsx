@@ -17,7 +17,7 @@ import {
   FilePlus2,
   FileText,
   Files,
-  Folder,
+  FolderOpen,
   GitBranch,
   Hand,
   Info,
@@ -72,66 +72,6 @@ type ChatMessage = {
 
 const DOCUMENT_SERVICE_URL = "http://127.0.0.1:8765";
 
-const initialMessages: ChatMessage[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    text: "把文档放到左侧工作区后，我会在中间预览内容。右侧可以记录你对当前文档的处理要求。",
-  },
-];
-
-const fallbackDocument = `# OfficeAgent
-
-Tauri + React + Rust + Python 文档处理服务的桌面 Agent 项目骨架。
-
-## 结构
-
-\`\`\`text
-.
-|- src/                         # React + Vite 前端
-|- src-tauri/                   # Tauri v2 Rust 本地命令层
-|- services/document-service/   # Python FastAPI 文档处理服务
-|- scripts/                     # Windows PowerShell 启动脚本
-\`\`\`
-
-## 初始化环境
-
-\`\`\`powershell
-.\\scripts\\setup.ps1
-\`\`\`
-
-如果当前机器的 Python 不能创建 venv，脚本会自动把依赖安装到
-\`services/document-service/.packages\`，\`run.py\` 会在启动时加载这个目录。
-
-等价手动命令：
-
-\`\`\`powershell
-npm install
-python -m venv services/document-service/.venv
-services/document-service/.venv/Scripts/python.exe -m pip install -r services/document-service/requirements.txt
-\`\`\`
-
-venv 不可用时：
-
-\`\`\`powershell
-python -m pip install --upgrade --target services/document-service/.packages -r services/document-service/requirements.txt
-\`\`\`
-
-## 开发启动
-
-\`\`\`powershell
-.\\scripts\\dev.ps1
-\`\`\`
-`;
-
-const explorerFolders = ["dist", "node_modules", "scripts", "services", "src", "src-tauri"];
-const explorerFiles = [".gitignore", "index.html", "package-lock.json", "package.json", "README.md", "tsconfig.json", "tsconfig.node.json", "vite.config.ts"];
-const taskItems = [
-  { title: "调整为 VSCode 布局", time: "14 小时" },
-  { title: "创建 agent 项目结构", time: "15 小时" },
-  { title: "创建 agent 项目结构与环境", time: "15 小时" },
-];
-
 function App() {
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
@@ -140,7 +80,7 @@ function App() {
   const [isChecking, setIsChecking] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialMessages);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -151,9 +91,9 @@ function App() {
 
   const selectedAnalysis = selectedWorkspaceFile?.analysis ?? null;
   const canAnalyze = Boolean(selectedWorkspaceFile && serviceStatus?.running && !isAnalyzing);
-  const editorText = selectedAnalysis?.text_preview || fallbackDocument;
-  const editorLines = useMemo(() => editorText.split(/\r?\n/), [editorText]);
-  const activeFilename = selectedWorkspaceFile?.file.name ?? "README.md";
+  const editorText = selectedAnalysis?.text_preview ?? "";
+  const editorLines = useMemo(() => (editorText ? editorText.split(/\r?\n/) : [""]), [editorText]);
+  const activeFilename = selectedWorkspaceFile?.file.name ?? "未选择文件";
 
   async function refreshStatus() {
     setIsChecking(true);
@@ -223,16 +163,6 @@ function App() {
       setWorkspaceFiles((current) =>
         current.map((item) => (item.id === selectedWorkspaceFile.id ? { ...item, analysis: result } : item)),
       );
-      setChatMessages((current) => [
-        ...current,
-        {
-          id: `analysis-${Date.now()}`,
-          role: "assistant",
-          text: `已完成 ${result.filename} 的文本预览，识别到 ${result.extension.toUpperCase()} 文件，大小 ${formatBytes(
-            result.size_bytes,
-          )}。`,
-        },
-      ]);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -244,18 +174,7 @@ function App() {
     const text = draftMessage.trim();
     if (!text) return;
 
-    const filename = selectedWorkspaceFile?.file.name ?? "当前工作区";
-    setChatMessages((current) => [
-      ...current,
-      { id: `user-${Date.now()}`, role: "user", text },
-      {
-        id: `assistant-${Date.now() + 1}`,
-        role: "assistant",
-        text: selectedAnalysis
-          ? `已记录对 ${filename} 的要求。当前版本先完成本地预览和任务记录，后续可以接入真正的对话模型来执行总结、改写或抽取。`
-          : `已记录。先解析 ${filename}，中间编辑区会显示可用于处理的文本内容。`,
-      },
-    ]);
+    setChatMessages((current) => [...current, { id: `user-${Date.now()}`, role: "user", text }]);
     setDraftMessage("");
   }
 
@@ -291,11 +210,11 @@ function App() {
         <div className="command-center">
           <ArrowLeft size={16} />
           <ArrowRight size={16} />
-          <span>OfficeAgent</span>
+          <span>{agentInfo?.name ?? "OfficeAgent"}</span>
         </div>
         <div className="menu-status">
           <span className={serviceStatus?.running ? "service-dot online" : "service-dot"} />
-          <strong>14</strong>
+          <strong>{workspaceFiles.length}</strong>
           <Share2 size={16} />
           <ChevronDown size={15} />
         </div>
@@ -339,30 +258,10 @@ function App() {
           <div className="tree-section">
             <div className="tree-root">
               <ChevronDown size={16} />
-              <span>OFFICEAGENT</span>
+              <span>工作区</span>
             </div>
 
             <div className="file-list">
-              {explorerFolders.map((name) => (
-                <button className="file-row folder-row" type="button" key={name}>
-                  <ChevronRight size={15} />
-                  <Folder size={16} />
-                  <span>{name}</span>
-                </button>
-              ))}
-
-              {explorerFiles.map((name) => (
-                <button
-                  className={name === "README.md" && !selectedWorkspaceFile ? "file-row selected" : "file-row"}
-                  type="button"
-                  key={name}
-                  onClick={name === "README.md" ? () => setSelectedFileId("") : undefined}
-                >
-                  <FileIcon filename={name} />
-                  <span>{name}</span>
-                </button>
-              ))}
-
               {workspaceFiles.map((item) => (
                 <button
                   key={item.id}
@@ -370,7 +269,7 @@ function App() {
                   type="button"
                   onClick={() => setSelectedFileId(item.id)}
                 >
-                  <FileText size={15} />
+                  <FileIcon filename={item.file.name} />
                   <span>{item.file.name}</span>
                   {item.analysis ? <Check size={14} /> : <Circle size={9} />}
                 </button>
@@ -384,13 +283,6 @@ function App() {
           </button>
 
           <div className="explorer-spacer" />
-
-          {["大纲", "时间线", "RUST DEPENDENCIES"].map((name) => (
-            <button className="collapsed-section" type="button" key={name}>
-              <ChevronRight size={16} />
-              <span>{name}</span>
-            </button>
-          ))}
         </aside>
 
         <section className="preview-pane" aria-label="文件预览">
@@ -416,11 +308,12 @@ function App() {
           <div className="breadcrumbs">
             <Info size={15} />
             <span>{activeFilename}</span>
-            <ChevronRight size={14} />
-            <span>abc</span>
-            <span># OfficeAgent</span>
-            <ChevronRight size={14} />
-            <span>abc ## Python 文档服务 API</span>
+            {selectedAnalysis ? (
+              <>
+                <ChevronRight size={14} />
+                <span>{selectedAnalysis.extension.toUpperCase()}</span>
+              </>
+            ) : null}
           </div>
 
           {errorMessage ? (
@@ -456,7 +349,7 @@ function App() {
                 {selectedAnalysis.extension.toUpperCase()} · {formatBytes(selectedAnalysis.size_bytes)}
               </span>
             ) : (
-              <span>Markdown</span>
+              <span>{selectedWorkspaceFile ? "未解析" : "空白"}</span>
             )}
           </div>
         </section>
@@ -477,15 +370,6 @@ function App() {
 
           <div className="task-list">
             <div className="task-title">任务</div>
-            {taskItems.map((item) => (
-              <button className="task-row" type="button" key={item.title}>
-                <span>{item.title}</span>
-                <span>{item.time}</span>
-              </button>
-            ))}
-            <button className="task-more" type="button">
-              查看全部（50 个）
-            </button>
           </div>
 
           <div className="codex-tools">
@@ -498,7 +382,7 @@ function App() {
             <div className="codex-empty-mark">
               <Sparkles size={36} />
             </div>
-            {chatMessages.length > 1 ? (
+            {chatMessages.length ? (
               <div className="floating-history">
                 {chatMessages.slice(-2).map((message) => (
                   <article className={`chat-message ${message.role}`} key={message.id}>
@@ -545,27 +429,6 @@ function App() {
           </div>
         </aside>
       </section>
-
-      <footer className="status-bar">
-        <div>
-          <GitBranch size={15} />
-          <span>main</span>
-          <RefreshCw size={14} />
-          <span>Launchpad</span>
-          <XCircle size={15} />
-          <span>0</span>
-          <Info size={15} />
-          <span>0</span>
-        </div>
-        <div>
-          <span>行 103，列 1</span>
-          <span>空格: 4</span>
-          <span>UTF-8</span>
-          <span>CRLF</span>
-          <Braces size={15} />
-          <span>{agentInfo?.runtime ?? "Markdown"}</span>
-        </div>
-      </footer>
     </main>
   );
 }
@@ -575,6 +438,7 @@ function FileIcon({ filename }: { filename: string }) {
   if (filename.endsWith(".ts") || filename.endsWith(".tsx")) return <Code2 className="ts-icon" size={15} />;
   if (filename.endsWith(".html")) return <Code2 className="html-icon" size={15} />;
   if (filename === ".gitignore") return <GitBranch className="git-icon" size={15} />;
+  if (!filename) return <FolderOpen className="md-icon" size={15} />;
   return <FileText className="md-icon" size={15} />;
 }
 

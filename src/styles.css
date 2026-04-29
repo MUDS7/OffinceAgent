@@ -36,7 +36,7 @@ button {
 
 .desktop-shell {
   display: grid;
-  grid-template-rows: 41px minmax(0, 1fr) 27px;
+  grid-template-rows: 41px minmax(0, 1fr);
   width: calc(100vw / var(--ui-scale));
   height: calc(100vh / var(--ui-scale));
   overflow: hidden;
@@ -762,32 +762,6 @@ button {
   border-radius: 2px;
 }
 
-.status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 0 13px;
-  color: #ffffff;
-  background: #3478d4;
-  font-size: 14px;
-}
-
-.status-bar div {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.status-bar span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .spin {
   animation: spin 0.9s linear infinite;
 }
@@ -837,7 +811,7 @@ button {
 
 @media (max-width: 640px) {
   .desktop-shell {
-    grid-template-rows: 39px minmax(0, 1fr) 25px;
+    grid-template-rows: 39px minmax(0, 1fr);
   }
 
   .menu-bar {
@@ -865,7 +839,4 @@ button {
     font-size: 13px;
   }
 
-  .status-bar div:first-child {
-    display: none;
-  }
 }
