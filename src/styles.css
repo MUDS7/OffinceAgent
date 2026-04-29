@@ -768,7 +768,7 @@ body.is-resizing-layout * {
 .codex-pane {
   position: relative;
   display: grid;
-  grid-template-rows: 42px auto minmax(0, 1fr) auto;
+  grid-template-rows: 42px 34px minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   border-left: 1px solid #ececec;
@@ -820,11 +820,13 @@ body.is-resizing-layout * {
 }
 
 .task-list {
-  padding: 7px 19px 0;
+  display: flex;
+  align-items: center;
+  padding: 0 19px;
 }
 
 .task-title {
-  margin-bottom: 7px;
+  margin: 0;
   color: #777777;
   font-size: 15px;
   font-weight: 700;
@@ -873,10 +875,11 @@ body.is-resizing-layout * {
 
 .codex-body {
   position: relative;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  place-items: center;
   overflow: hidden;
+  border-top: 1px solid #eeeeee;
 }
 
 .codex-empty-mark {
@@ -887,29 +890,49 @@ body.is-resizing-layout * {
   border: 3px solid #dcdcdc;
   border-radius: 999px;
   color: #d2d2d2;
+  margin: auto;
 }
 
 .floating-history {
-  position: absolute;
-  right: 28px;
-  bottom: 42px;
-  left: 28px;
-  display: grid;
-  gap: 9px;
-  max-height: 150px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 20px 22px;
   overflow: auto;
 }
 
+.chat-message {
+  display: flex;
+  width: 100%;
+}
+
+.chat-message.assistant {
+  justify-content: flex-start;
+}
+
+.chat-message.user {
+  justify-content: flex-end;
+}
+
 .chat-message p {
+  max-width: min(100%, 38rem);
   margin: 0;
-  padding: 9px 11px;
+  padding: 10px 12px;
   border: 1px solid #e2e2e2;
   border-radius: 8px;
   color: #5d5d5d;
   background: #ffffff;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.chat-message.assistant p:empty::after {
+  color: #a0a0a0;
+  content: "Thinking...";
 }
 
 .chat-message.user p {

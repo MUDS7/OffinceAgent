@@ -2,16 +2,13 @@ import {
   ArrowUp,
   ChevronDown,
   Check,
-  Edit3,
   Hand,
   Maximize2,
   Paperclip,
-  RefreshCw,
-  Settings2,
   Sparkles,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type ChatMessage = {
   id: string;
@@ -23,38 +20,48 @@ type RightPanelProps = {
   chatMessages: ChatMessage[];
   codexWidth: number;
   draftMessage: string;
+  isSendingMessage: boolean;
   onDraftMessageChange: (message: string) => void;
   onOpenFilePicker: () => void;
-  onSendMessage: () => void;
+  onSendMessage: (model: string) => void;
 };
 
 const modelOptions = [
-  { id: "deepseek-v3", label: "deepseek v3" },
-  { id: "deepseek-v4", label: "deepseek v4" },
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
 ];
 
 export function RightPanel({
   chatMessages,
   codexWidth,
   draftMessage,
+  isSendingMessage,
   onDraftMessageChange,
   onOpenFilePicker,
   onSendMessage,
 }: RightPanelProps) {
-  const [selectedModel, setSelectedModel] = useState("deepseek-v3");
+  const [selectedModel, setSelectedModel] = useState("deepseek-v4-flash");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const historyRef = useRef<HTMLDivElement | null>(null);
   const selectedModelLabel = modelOptions.find((option) => option.id === selectedModel)?.label ?? modelOptions[0].label;
+
+  useEffect(() => {
+    const historyElement = historyRef.current;
+    if (!historyElement) return;
+
+    historyElement.scrollTop = historyElement.scrollHeight;
+  }, [chatMessages]);
 
   return (
     <aside
       className={codexWidth === 0 ? "codex-pane collapsed" : "codex-pane"}
-      aria-label="Codex 面板"
+      aria-label="Codex panel"
       aria-hidden={codexWidth === 0}
     >
       <div className="codex-top">
         <div className="codex-tabs">
           <button className="active" type="button">
-            聊天
+            Chat
           </button>
         </div>
         <div className="codex-window-actions">
@@ -64,45 +71,40 @@ export function RightPanel({
       </div>
 
       <div className="task-list">
-        <div className="task-title">任务</div>
-      </div>
-
-      <div className="codex-tools">
-        <RefreshCw size={16} />
-        <Settings2 size={16} />
-        <Edit3 size={16} />
+        <div className="task-title">Tasks</div>
       </div>
 
       <div className="codex-body">
-        <div className="codex-empty-mark">
-          <Sparkles size={36} />
-        </div>
         {chatMessages.length ? (
-          <div className="floating-history">
-            {chatMessages.slice(-2).map((message) => (
+          <div className="floating-history" ref={historyRef}>
+            {chatMessages.map((message) => (
               <article className={`chat-message ${message.role}`} key={message.id}>
                 <p>{message.text}</p>
               </article>
             ))}
           </div>
-        ) : null}
+        ) : (
+          <div className="codex-empty-mark">
+            <Sparkles size={36} />
+          </div>
+        )}
       </div>
 
       <div className="composer-wrap">
         <div className="chat-input">
           <textarea
             value={draftMessage}
-            placeholder="问 Agent 任何事。输入 @ 使用插件或提及文件"
+            placeholder="Ask Agent anything. Type @ to mention files."
             rows={3}
             onChange={(event) => onDraftMessageChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                onSendMessage();
+                onSendMessage(selectedModel);
               }
             }}
           />
           <div className="composer-actions">
-            <button className="icon-button" type="button" title="添加上下文" onClick={onOpenFilePicker}>
+            <button className="icon-button" type="button" title="Attach context" onClick={onOpenFilePicker}>
               <Paperclip size={19} />
             </button>
             <div
@@ -126,7 +128,7 @@ export function RightPanel({
                 <ChevronDown className={isModelMenuOpen ? "chevron-open" : undefined} size={15} />
               </button>
               {isModelMenuOpen ? (
-                <div className="permission-popover" role="listbox" aria-label="模型选择">
+                <div className="permission-popover" role="listbox" aria-label="Model selection">
                   {modelOptions.map((option) => {
                     const isSelected = option.id === selectedModel;
 
@@ -151,7 +153,13 @@ export function RightPanel({
                 </div>
               ) : null}
             </div>
-            <button className="send-button" type="button" onClick={onSendMessage} disabled={!draftMessage.trim()} title="发送">
+            <button
+              className="send-button"
+              type="button"
+              onClick={() => onSendMessage(selectedModel)}
+              disabled={!draftMessage.trim() || isSendingMessage}
+              title="Send"
+            >
               <ArrowUp size={22} />
             </button>
           </div>

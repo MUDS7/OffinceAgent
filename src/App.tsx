@@ -5,6 +5,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { CenterPane } from "./components/CenterPane";
 import { LeftPanel } from "./components/LeftPanel";
 import { RightPanel } from "./components/RightPanel";
@@ -43,6 +44,13 @@ type ChatMessage = {
   text: string;
 };
 
+type DeepSeekStreamEvent = {
+  stream_id: string;
+  kind: "start" | "delta" | "done" | "error";
+  content?: string;
+  error?: string;
+};
+
 const DOCUMENT_SERVICE_URL = "http://127.0.0.1:8765";
 const UI_SCALE_FALLBACK = 0.8;
 const MIN_EXPLORER_WIDTH = 240;
@@ -65,6 +73,7 @@ function App() {
   const [openFileIds, setOpenFileIds] = useState<string[]>([]);
   const [isChecking, setIsChecking] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
@@ -273,12 +282,82 @@ function App() {
     }
   }
 
-  function sendMessage() {
+  async function sendMessage(model: string) {
     const text = draftMessage.trim();
-    if (!text) return;
+    if (!text || isSendingMessage) return;
 
-    setChatMessages((current) => [...current, { id: `user-${Date.now()}`, role: "user", text }]);
+    if (!canUseTauriEvents()) {
+      const message = "DeepSeek streaming requires the Tauri desktop runtime. Start the app with npm run tauri:dev.";
+      setErrorMessage(message);
+      setChatMessages((current) => [
+        ...current,
+        { id: `assistant-runtime-error-${Date.now()}`, role: "assistant", text: message },
+      ]);
+      return;
+    }
+
+    const now = Date.now();
+    const streamId = `deepseek-${now}`;
+    const assistantMessageId = `assistant-${now}`;
+    const userMessage: ChatMessage = { id: `user-${now}`, role: "user", text };
+    const assistantMessage: ChatMessage = { id: assistantMessageId, role: "assistant", text: "" };
+    const nextMessages = [...chatMessages, userMessage];
+
+    setChatMessages([...nextMessages, assistantMessage]);
     setDraftMessage("");
+    setIsSendingMessage(true);
+    setErrorMessage("");
+
+    let unlisten: (() => void) | null = null;
+
+    try {
+      unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
+        const payload = event.payload;
+        if (payload.stream_id !== streamId) return;
+
+        if (payload.kind === "delta" && payload.content) {
+          setChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId ? { ...message, text: message.text + payload.content } : message,
+            ),
+          );
+          return;
+        }
+
+        if (payload.kind === "error" && payload.error) {
+          setErrorMessage(payload.error);
+          setChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, text: `DeepSeek request failed: ${payload.error}` }
+                : message,
+            ),
+          );
+        }
+      });
+
+      await invoke("chat_with_deepseek", {
+        model,
+        streamId,
+        messages: nextMessages.map((message) => ({
+          role: message.role,
+          content: message.text,
+        })),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setErrorMessage(message);
+      setChatMessages((current) =>
+        current.map((chatMessage) =>
+          chatMessage.id === assistantMessageId
+            ? { ...chatMessage, text: `DeepSeek request failed: ${message}` }
+            : chatMessage,
+        ),
+      );
+    } finally {
+      unlisten?.();
+      setIsSendingMessage(false);
+    }
   }
 
   function startLayoutResize(target: ResizeTarget, event: ReactPointerEvent<HTMLDivElement>) {
@@ -447,6 +526,7 @@ function App() {
           chatMessages={chatMessages}
           codexWidth={layoutWidths.codex}
           draftMessage={draftMessage}
+          isSendingMessage={isSendingMessage}
           onDraftMessageChange={setDraftMessage}
           onOpenFilePicker={openFilePicker}
           onSendMessage={sendMessage}
@@ -510,6 +590,18 @@ function normalizeFilePath(path: string) {
 function isTauriUnavailable(message: string) {
   const normalized = message.toLowerCase();
   return normalized.includes("tauri") || normalized.includes("__tauri");
+}
+
+function canUseTauriEvents() {
+  if (typeof window === "undefined") return false;
+
+  const tauriWindow = window as Window & {
+    __TAURI_INTERNALS__?: {
+      transformCallback?: unknown;
+    };
+  };
+
+  return typeof tauriWindow.__TAURI_INTERNALS__?.transformCallback === "function";
 }
 
 export default App;
