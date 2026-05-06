@@ -68,6 +68,10 @@ type TextEditAgentRequest = {
   instruction: string;
 };
 
+type TextSelectionIntentResult = {
+  intent: "answer" | "edit";
+};
+
 type AgentTextEditResult = {
   id: string;
   fileId: string;
@@ -543,17 +547,6 @@ function App() {
     const userMessage: ChatMessage = { id: `user-${now}`, role: "user", text };
     const assistantMessage: ChatMessage = { id: assistantMessageId, role: "assistant", text: "" };
     const nextMessages = [...chatMessages, userMessage];
-    const textEditRequest = buildTextEditAgentRequest(text, documentSelection);
-    const textEditTarget =
-      textEditRequest && documentSelection
-        ? {
-            fileId: documentSelection.fileId,
-            start: textEditRequest.start,
-            end: textEditRequest.end,
-            insertOnNextLine: !textEditRequest.selectedText.trim(),
-          }
-        : null;
-    const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
 
     setChatMessages([...nextMessages, assistantMessage]);
     setDraftMessage("");
@@ -563,6 +556,12 @@ function App() {
     let unlisten: (() => void) | null = null;
     let assistantText = "";
     let hasAppliedAgentText = false;
+    let textEditTarget: {
+      fileId: string;
+      start: number;
+      end: number;
+      insertOnNextLine: boolean;
+    } | null = null;
 
     function applyAgentTextResult() {
       if (!textEditTarget || hasAppliedAgentText || !assistantText.trim()) return;
@@ -579,6 +578,19 @@ function App() {
     }
 
     try {
+      const intent = await classifyTextSelectionIntent(model, text, documentSelection);
+      const textEditRequest = buildTextEditAgentRequest(text, documentSelection, intent);
+      textEditTarget =
+        textEditRequest && documentSelection
+          ? {
+              fileId: documentSelection.fileId,
+              start: textEditRequest.start,
+              end: textEditRequest.end,
+              insertOnNextLine: !textEditRequest.selectedText.trim(),
+            }
+          : null;
+      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
+
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
@@ -849,8 +861,9 @@ function normalizePanelWidth(width: number, minWidth: number) {
 function buildTextEditAgentRequest(
   instruction: string,
   documentSelection: DocumentSelectionContext | null,
+  intent: TextSelectionIntentResult["intent"],
 ): TextEditAgentRequest | null {
-  if (documentSelection?.sourceType !== "text") {
+  if (intent !== "edit" || documentSelection?.sourceType !== "text") {
     return null;
   }
 
@@ -864,6 +877,34 @@ function buildTextEditAgentRequest(
     selectedText: documentSelection.text,
     instruction,
   };
+}
+
+async function classifyTextSelectionIntent(
+  model: string,
+  instruction: string,
+  documentSelection: DocumentSelectionContext | null,
+): Promise<TextSelectionIntentResult["intent"]> {
+  if (documentSelection?.sourceType !== "text") {
+    return "answer";
+  }
+
+  let result: TextSelectionIntentResult;
+  try {
+    result = await invoke<TextSelectionIntentResult>("classify_text_selection_intent", {
+      model,
+      request: {
+        filePath: documentSelection.filePath,
+        filename: documentSelection.filename,
+        selectedText: documentSelection.text,
+        instruction,
+      },
+    });
+  } catch (error) {
+    console.warn("Text selection intent classification failed; falling back to answer mode.", error);
+    return "answer";
+  }
+
+  return result.intent === "edit" ? "edit" : "answer";
 }
 
 function buildDeepSeekMessages(

@@ -39,6 +39,20 @@ struct TextEditAgentRequest {
     instruction: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextSelectionIntentRequest {
+    file_path: String,
+    filename: String,
+    selected_text: String,
+    instruction: String,
+}
+
+#[derive(serde::Serialize)]
+struct TextSelectionIntentResult {
+    intent: &'static str,
+}
+
 #[derive(serde::Serialize)]
 struct DeepSeekChatRequest {
     model: String,
@@ -146,6 +160,67 @@ async fn chat_with_deepseek(
     emit_deepseek_stream_event(&app, &stream_id, "done", None, None)?;
 
     Ok(())
+}
+
+#[tauri::command]
+async fn classify_text_selection_intent(
+    model: Option<String>,
+    request: TextSelectionIntentRequest,
+) -> Result<TextSelectionIntentResult, String> {
+    let api_key = read_deepseek_api_key()?;
+    let instruction = request.instruction.trim();
+
+    if instruction.is_empty() {
+        return Err("Text selection intent classifier requires instruction".to_string());
+    }
+
+    let model = normalize_deepseek_model(model.as_deref());
+    let payload = DeepSeekChatRequest {
+        model,
+        messages: build_text_selection_intent_messages(request)?,
+        stream: false,
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| format!("Failed to create DeepSeek HTTP client: {error}"))?;
+    let response = client
+        .post(DEEPSEEK_CHAT_ENDPOINT)
+        .header(AUTHORIZATION, format!("Bearer {api_key}"))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to call DeepSeek intent classifier: {error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read DeepSeek intent response: {error}"))?;
+
+        return Err(format!(
+            "DeepSeek intent classifier returned {status}: {}",
+            truncate_error_body(&body)
+        ));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read DeepSeek intent response: {error}"))?;
+    let content = extract_deepseek_message_content(&body).map_err(|error| {
+        format!(
+            "Failed to parse DeepSeek intent response: {error}. Body: {}",
+            truncate_error_body(&body)
+        )
+    })?;
+
+    Ok(TextSelectionIntentResult {
+        intent: parse_text_selection_intent(&content),
+    })
 }
 
 async fn stream_deepseek_response(
@@ -324,6 +399,102 @@ fn build_text_edit_messages(request: TextEditAgentRequest) -> Result<Vec<DeepSee
     }])
 }
 
+fn build_text_selection_intent_messages(
+    request: TextSelectionIntentRequest,
+) -> Result<Vec<DeepSeekMessage>, String> {
+    let file_path = request.file_path.trim();
+    let filename = request.filename.trim();
+    let instruction = request.instruction.trim();
+
+    if file_path.is_empty() {
+        return Err("Text selection intent classifier requires filePath".to_string());
+    }
+
+    if instruction.is_empty() {
+        return Err("Text selection intent classifier requires instruction".to_string());
+    }
+
+    let selected_text = truncate_intent_selection_context(request.selected_text.trim());
+    let content = format!(
+        "你是 OfficeAgent 的意图分类器。用户正在文本文件中输入一条针对当前光标或选中文本的请求。\n\n请判断这条请求是：\n- edit：用户明确要求修改、替换、删除、插入、润色、重写、翻译、格式化或生成要写入文件的文本。\n- answer：用户只是提问、解释、总结、分析、询问含义、询问建议或让你判断文本内容，不应该修改文件。\n\n规则：\n1. 只输出一个英文单词：edit 或 answer。\n2. 不要解释。\n3. 如果意图不明确，输出 answer，避免误改文件。\n\n文件路径：{file_path}\n文件名：{filename}\n用户请求：\n<<<\n{instruction}\n>>>\n当前选中文本：\n<<<\n{selected_text}\n>>>"
+    );
+
+    Ok(vec![DeepSeekMessage {
+        role: "user".to_string(),
+        content,
+    }])
+}
+
+fn extract_deepseek_message_content(body: &str) -> Result<String, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|error| format!("invalid JSON: {error}"))?;
+
+    let choices = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .ok_or_else(|| "missing choices array".to_string())?;
+
+    for choice in choices {
+        if let Some(content) = choice
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(value_to_text)
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        {
+            return Ok(content.to_string());
+        }
+
+        if let Some(content) = choice
+            .get("message")
+            .and_then(|message| message.get("reasoning_content"))
+            .and_then(value_to_text)
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        {
+            return Ok(content.to_string());
+        }
+    }
+
+    Ok(String::new())
+}
+
+fn value_to_text(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn truncate_intent_selection_context(text: &str) -> String {
+    const MAX_INTENT_SELECTION_CHARS: usize = 4000;
+
+    let truncated = text
+        .chars()
+        .take(MAX_INTENT_SELECTION_CHARS)
+        .collect::<String>();
+    if text.chars().count() > MAX_INTENT_SELECTION_CHARS {
+        format!("{truncated}\n...[selection truncated]")
+    } else {
+        truncated
+    }
+}
+
+fn parse_text_selection_intent(content: &str) -> &'static str {
+    let normalized = content.trim().to_ascii_lowercase();
+
+    if normalized == "edit"
+        || normalized.starts_with("edit")
+        || normalized.contains("\"edit\"")
+        || normalized.contains("'edit'")
+        || content.trim().starts_with("编辑")
+    {
+        return "edit";
+    }
+
+    "answer"
+}
+
 fn normalize_deepseek_model(model: Option<&str>) -> String {
     match model.unwrap_or("deepseek-v4-flash").trim() {
         "" => "deepseek-v4-flash",
@@ -394,6 +565,7 @@ fn main() {
             get_agent_info,
             get_document_service_status,
             chat_with_deepseek,
+            classify_text_selection_intent,
             save_file_to_disk,
             read_file_text,
             list_dir_files
