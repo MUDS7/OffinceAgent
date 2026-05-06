@@ -49,6 +49,9 @@ export function PreviewHeader({
             >
               <EditorTabIcon filename={tab.filename} />
               <span>{tab.filename}</span>
+              {tab.isDirty && (
+                <span className="editor-tab-dirty-dot" aria-hidden="true" />
+              )}
               <button
                 className="editor-tab-close"
                 type="button"

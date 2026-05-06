@@ -616,6 +616,16 @@ body.is-resizing-layout * {
   background: #e2e2e2;
 }
 
+.editor-tab-dirty-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9fa6ad;
+  flex: 0 0 8px !important;
+  margin-right: 4px;
+}
+
 .css-tab-icon {
   color: #4389b9;
 }

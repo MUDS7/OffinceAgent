@@ -4,11 +4,19 @@ import type { DocumentSelectionContext, PreviewFile } from "./types";
 
 type TextFilePreviewProps = {
   activeFile: PreviewFile;
+  unsavedText?: string;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
+  onSaveTextFile: (fileId: string) => void;
 };
 
-export function TextFilePreview({ activeFile, onSelectionContextChange, onUpdateTextFile }: TextFilePreviewProps) {
+export function TextFilePreview({
+  activeFile,
+  unsavedText,
+  onSelectionContextChange,
+  onUpdateTextFile,
+  onSaveTextFile,
+}: TextFilePreviewProps) {
   const textEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const lastTextSelectionRef = useRef("");
   const [textPreview, setTextPreview] = useState({
@@ -24,11 +32,28 @@ export function TextFilePreview({ activeFile, onSelectionContextChange, onUpdate
     [textPreview.text],
   );
 
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  const initialUnsavedTextRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    initialUnsavedTextRef.current = unsavedText;
+  }, [activeFileId]);
+
   useEffect(() => {
     const fileToRead = activeFile;
     let isCancelled = false;
 
     setTextScrollTop(0);
+
+    const initialUnsaved = initialUnsavedTextRef.current;
+    if (initialUnsaved !== undefined) {
+      setTextPreview({ fileId: fileToRead.id, isLoading: false, text: initialUnsaved, error: "" });
+      setHistory([initialUnsaved]);
+      setHistoryIndex(0);
+      return;
+    }
+
     setTextPreview({ fileId: fileToRead.id, isLoading: true, text: "", error: "" });
 
     fileToRead.file
@@ -36,6 +61,8 @@ export function TextFilePreview({ activeFile, onSelectionContextChange, onUpdate
       .then((text) => {
         if (isCancelled) return;
         setTextPreview({ fileId: fileToRead.id, isLoading: false, text, error: "" });
+        setHistory([text]);
+        setHistoryIndex(0);
       })
       .catch((error) => {
         if (isCancelled) return;
@@ -51,6 +78,37 @@ export function TextFilePreview({ activeFile, onSelectionContextChange, onUpdate
       isCancelled = true;
     };
   }, [activeFileId]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        setHistory((currHistory) => {
+          if (historyIndex > 0) {
+            const prevIndex = historyIndex - 1;
+            const prevText = currHistory[prevIndex];
+            setHistoryIndex(prevIndex);
+            setTextPreview((current) => ({
+              ...current,
+              text: prevText,
+            }));
+            onUpdateTextFile(activeFile.id, prevText);
+          }
+          return currHistory;
+        });
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        onSaveTextFile(activeFile.id);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [historyIndex, activeFile.id, onUpdateTextFile, onSaveTextFile]);
 
   useEffect(() => {
     lastTextSelectionRef.current = "";
@@ -119,6 +177,14 @@ export function TextFilePreview({ activeFile, onSelectionContextChange, onUpdate
       text: nextText,
       error: "",
     }));
+
+    const nextIndex = historyIndex + 1;
+    setHistory((current) => {
+      const nextHistory = current.slice(0, nextIndex);
+      return [...nextHistory, nextText];
+    });
+    setHistoryIndex(nextIndex);
+
     onUpdateTextFile(activeFile.id, nextText);
   }
 

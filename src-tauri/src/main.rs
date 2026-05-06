@@ -299,12 +299,58 @@ fn truncate_error_body(body: &str) -> String {
     }
 }
 
+#[tauri::command]
+fn save_file_to_disk(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|error| format!("Failed to save file: {error}"))
+}
+
+#[tauri::command]
+fn read_file_text(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))
+}
+
+#[tauri::command]
+fn list_dir_files(path: String) -> Result<Vec<String>, String> {
+    use std::path::Path;
+
+    const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf"];
+
+    fn walk(dir: &Path, results: &mut Vec<String>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, results)?;
+            } else if let Some(ext) = path.extension() {
+                let ext_lower = ext.to_string_lossy().to_lowercase();
+                if SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
+                    if let Some(s) = path.to_str() {
+                        results.push(s.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut results = Vec::new();
+    walk(std::path::Path::new(&path), &mut results)
+        .map_err(|e| format!("Failed to list directory: {e}"))?;
+    results.sort();
+    Ok(results)
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             get_agent_info,
             get_document_service_status,
-            chat_with_deepseek
+            chat_with_deepseek,
+            save_file_to_disk,
+            read_file_text,
+            list_dir_files
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OfficeAgent");

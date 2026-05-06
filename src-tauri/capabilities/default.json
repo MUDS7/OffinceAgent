@@ -3,5 +3,14 @@
   "identifier": "default",
   "description": "Default permissions for the main OfficeAgent window",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:allow-listen"]
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "dialog:allow-save",
+    "dialog:allow-open",
+    "fs:allow-write-text-file",
+    "fs:allow-read-file",
+    "fs:allow-read-text-file",
+    "fs:scope-home-recursive"
+  ]
 }

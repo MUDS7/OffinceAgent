@@ -2,6 +2,7 @@ export type PreviewTab = {
   id: string;
   filename: string;
   isActive: boolean;
+  isDirty?: boolean;
 };
 
 export type PreviewFile = {
@@ -23,9 +24,11 @@ export type CenterPaneProps = {
   errorMessage: string;
   isChecking: boolean;
   previewTabs: PreviewTab[];
+  unsavedText?: string;
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onSelectPreviewTab: (fileId: string) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
+  onSaveTextFile: (fileId: string) => void;
 };

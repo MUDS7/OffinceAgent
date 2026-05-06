@@ -35,6 +35,7 @@ type WorkspaceFile = {
   id: string;
   file: File;
   relativePath?: string;
+  diskPath?: string;
   analysis: AnalyzeResult | null;
 };
 
@@ -93,6 +94,8 @@ function App() {
   const [documentSelection, setDocumentSelection] = useState<DocumentSelectionContext | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
+  const [dirtyFileIds, setDirtyFileIds] = useState<string[]>([]);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
 
   const selectedWorkspaceFile = useMemo(
@@ -120,8 +123,9 @@ function App() {
           id: item.id,
           filename: item.file.name,
           isActive: item.id === selectedFileId,
+          isDirty: dirtyFileIds.includes(item.id),
         })),
-    [openFileIds, selectedFileId, workspaceFiles],
+    [openFileIds, selectedFileId, workspaceFiles, dirtyFileIds],
   );
   const canAnalyze = Boolean(selectedWorkspaceFile && serviceStatus?.running && !isAnalyzing);
   const workbenchStyle = {
@@ -154,20 +158,121 @@ function App() {
     }
   }
 
-  function openFilePicker() {
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
+  async function openFilePicker() {
+    // In the Tauri desktop runtime, use the native dialog so we get the real
+    // filesystem path back — the HTML <input type="file"> in Tauri v2 does NOT
+    // expose file.path, so diskPath would never be set via that route.
+    if (canUseTauriEvents()) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const selected = await open({
+          multiple: true,
+          filters: [{ name: "Documents", extensions: ["txt", "md", "csv", "json", "pdf"] }],
+        });
+        if (!selected) return;
+        const paths = Array.isArray(selected) ? selected : [selected];
+        await openFilesByPath(paths);
+      } catch (error) {
+        setErrorMessage(`打开文件对话框失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
     }
-
+    // Fallback: browser / web preview mode
+    if (fileInputRef.current) fileInputRef.current.value = "";
     fileInputRef.current?.click();
   }
 
-  function openFolderPicker() {
-    if (folderInputRef.current) {
-      folderInputRef.current.value = "";
+  async function openFolderPicker() {
+    if (canUseTauriEvents()) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const selected = await open({ directory: true, multiple: false });
+        if (!selected) return;
+        const folderPath = Array.isArray(selected) ? selected[0] : selected;
+        await openFolderByPath(folderPath);
+      } catch (error) {
+        setErrorMessage(`打开文件夹对话框失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
     }
-
+    // Fallback: browser / web preview mode
+    if (folderInputRef.current) folderInputRef.current.value = "";
     folderInputRef.current?.click();
+  }
+
+  async function openFilesByPath(filePaths: string[]) {
+    const nextFiles: WorkspaceFile[] = [];
+    for (const filePath of filePaths) {
+      const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+      const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+      const isPdf = extension === "pdf";
+      try {
+        const content = isPdf ? "" : await invoke<string>("read_file_text", { path: filePath });
+        const file = new File([content], filename, {
+          type: getFileMimeType(filename),
+          lastModified: Date.now(),
+        });
+        nextFiles.push({
+          id: `${filePath}-${file.lastModified}`,
+          file,
+          diskPath: filePath,
+          analysis: null,
+        });
+      } catch (error) {
+        console.error(`Failed to open ${filePath}:`, error);
+      }
+    }
+    if (!nextFiles.length) return;
+    setWorkspaceFiles((current) => {
+      const knownPaths = new Set(current.map((item) => item.diskPath).filter(Boolean));
+      return [...current, ...nextFiles.filter((item) => !knownPaths.has(item.diskPath))];
+    });
+    openWorkspaceFile(nextFiles[0].id);
+    setErrorMessage("");
+  }
+
+  async function openFolderByPath(folderPath: string) {
+    try {
+      const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
+      const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
+      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf)$/i.test(p));
+      if (!supported.length) {
+        setErrorMessage("该文件夹中没有支持的文件类型");
+        return;
+      }
+      const nextFiles: WorkspaceFile[] = [];
+      for (const filePath of supported) {
+        const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+        const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+        const isPdf = extension === "pdf";
+        try {
+          const content = isPdf ? "" : await invoke<string>("read_file_text", { path: filePath });
+          const relativePath = normalizeFilePath(filePath.replace(folderPath, rootName));
+          const file = new File([content], filename, {
+            type: getFileMimeType(filename),
+            lastModified: Date.now(),
+          });
+          nextFiles.push({
+            id: `${filePath}-${file.lastModified}`,
+            file,
+            relativePath,
+            diskPath: filePath,
+            analysis: null,
+          });
+        } catch {
+          // Skip unreadable files silently
+        }
+      }
+      if (!nextFiles.length) return;
+      setWorkspaceName(rootName);
+      setWorkspaceFiles(nextFiles);
+      setSelectedFileId("");
+      setOpenFileIds([]);
+      setDocumentSelection(null);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(`读取文件夹失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   function handleFileSelection(files: FileList | null) {
@@ -176,7 +281,7 @@ function App() {
     const nextFiles = Array.from(files).map((file) => ({
       id: `${file.name}-${file.size}-${file.lastModified}`,
       file,
-      analysis: null,
+      analysis: null as AnalyzeResult | null,
     }));
 
     setWorkspaceFiles((current) => {
@@ -195,11 +300,13 @@ function App() {
     const rootName = firstRelativePath.split("/")[0] || "工作区";
     const nextFiles = selectedFiles.map((file) => {
       const relativePath = normalizeFilePath(getFileRelativePath(file)) || file.name;
+      const diskPath: string | undefined = (file as any).path || undefined;
 
       return {
         id: `${relativePath}-${file.size}-${file.lastModified}`,
         file,
         relativePath,
+        diskPath,
         analysis: null,
       };
     });
@@ -237,18 +344,90 @@ function App() {
   }
 
   function updateTextFile(fileId: string, text: string) {
-    setWorkspaceFiles((current) =>
-      current.map((item) => {
+    setUnsavedContents((current) => ({
+      ...current,
+      [fileId]: text,
+    }));
+    setDirtyFileIds((current) => {
+      if (current.includes(fileId)) return current;
+      return [...current, fileId];
+    });
+  }
+
+  async function saveTextFile(fileId: string) {
+    const currentItem = workspaceFiles.find((item) => item.id === fileId);
+    if (!currentItem) return;
+
+    // Use unsaved (dirty) content if available; otherwise read the file's current content
+    // so that Ctrl+S works even on unmodified files.
+    const unsavedText = unsavedContents[fileId];
+    let textToSave: string;
+    if (unsavedText !== undefined) {
+      textToSave = unsavedText;
+    } else {
+      try {
+        textToSave = await currentItem.file.text();
+      } catch {
+        return;
+      }
+    }
+
+    // Prefer the persisted diskPath over the transient file.path property.
+    let filePath: string | undefined = currentItem.diskPath;
+
+    if (!filePath && canUseTauriEvents()) {
+      try {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const defaultPath = currentItem.relativePath
+          ? currentItem.relativePath.split("/").pop()
+          : currentItem.file.name;
+
+        const chosen = await save({ defaultPath });
+        if (!chosen) return;
+        filePath = chosen;
+      } catch (error) {
+        console.error("Save dialog error:", error);
+        setErrorMessage("保存对话框打开失败");
+        return;
+      }
+    }
+
+    if (!filePath) {
+      setErrorMessage("无法确定保存路径，请在 Tauri 桌面端使用此功能");
+      return;
+    }
+
+    try {
+      await invoke("save_file_to_disk", { path: filePath, content: textToSave });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setErrorMessage(`保存文件到磁盘失败: ${message}`);
+      return;
+    }
+
+    // Persist diskPath so subsequent Ctrl+S saves go straight to disk without a dialog.
+    const resolvedDiskPath = filePath;
+
+    setWorkspaceFiles((wsFiles) =>
+      wsFiles.map((item) => {
         if (item.id !== fileId) return item;
 
-        const file = new File([text], item.file.name, {
+        const file = new File([textToSave], item.file.name, {
           type: item.file.type || getFileMimeType(item.file.name),
           lastModified: Date.now(),
         });
 
-        return { ...item, file, analysis: null };
+        return { ...item, file, diskPath: resolvedDiskPath, analysis: null };
       }),
     );
+
+    setUnsavedContents((current) => {
+      const next = { ...current };
+      delete next[fileId];
+      return next;
+    });
+
+    setDirtyFileIds((current) => current.filter((id) => id !== fileId));
   }
 
   function openWorkspaceFile(fileId: string) {
@@ -269,6 +448,13 @@ function App() {
       }
 
       return nextOpenFileIds;
+    });
+
+    setDirtyFileIds((current) => current.filter((id) => id !== fileId));
+    setUnsavedContents((current) => {
+      const next = { ...current };
+      delete next[fileId];
+      return next;
     });
   }
 
@@ -536,11 +722,13 @@ function App() {
           errorMessage={errorMessage}
           isChecking={isChecking}
           previewTabs={openPreviewTabs}
+          unsavedText={unsavedContents[selectedFileId]}
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
           onSelectionContextChange={setDocumentSelection}
           onSelectPreviewTab={setSelectedFileId}
           onUpdateTextFile={updateTextFile}
+          onSaveTextFile={saveTextFile}
         />
 
         <div
@@ -667,13 +855,7 @@ function isTauriUnavailable(message: string) {
 function canUseTauriEvents() {
   if (typeof window === "undefined") return false;
 
-  const tauriWindow = window as Window & {
-    __TAURI_INTERNALS__?: {
-      transformCallback?: unknown;
-    };
-  };
-
-  return typeof tauriWindow.__TAURI_INTERNALS__?.transformCallback === "function";
+  return "__TAURI_INTERNALS__" in window || "__TAURI_IPC__" in window || "__TAURI__" in window;
 }
 
 export default App;

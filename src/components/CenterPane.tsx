@@ -12,11 +12,13 @@ export function CenterPane({
   errorMessage,
   isChecking,
   previewTabs,
+  unsavedText,
   onClosePreviewTab,
   onRefreshStatus,
   onSelectionContextChange,
   onSelectPreviewTab,
   onUpdateTextFile,
+  onSaveTextFile,
 }: CenterPaneProps) {
   const activeExtension = getFileExtension(activeFile?.filename ?? "");
   const isTextPreview = isEditableTextFile(activeFile?.file, activeExtension);
@@ -58,8 +60,10 @@ export function CenterPane({
       return (
         <TextFilePreview
           activeFile={activeFile}
+          unsavedText={unsavedText}
           onSelectionContextChange={onSelectionContextChange}
           onUpdateTextFile={onUpdateTextFile}
+          onSaveTextFile={onSaveTextFile}
         />
       );
     }
