@@ -272,6 +272,19 @@ function App() {
     });
   }
 
+  function deleteFiles(fileIds: string[]) {
+    const idsSet = new Set(fileIds);
+    setWorkspaceFiles((current) => current.filter((item) => !idsSet.has(item.id)));
+    
+    setOpenFileIds((current) => {
+      const nextOpenFileIds = current.filter((id) => !idsSet.has(id));
+      if (idsSet.has(selectedFileId)) {
+        setSelectedFileId(nextOpenFileIds[0] ?? "");
+      }
+      return nextOpenFileIds;
+    });
+  }
+
   async function analyzeDocument() {
     if (!selectedWorkspaceFile) return;
 
@@ -502,6 +515,7 @@ function App() {
           onSelectFile={openWorkspaceFile}
           onCreateEmptyFile={createEmptyFile}
           onOpenFilePicker={openFilePicker}
+          onDeleteFiles={deleteFiles}
         />
 
         <div

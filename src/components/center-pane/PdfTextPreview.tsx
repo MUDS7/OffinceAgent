@@ -146,8 +146,19 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
 
     document.addEventListener("selectionchange", handleSelectionChange);
 
+    const resizeObserver = new ResizeObserver(() => {
+      if (lastPublishedSelectionRef.current) {
+        handleSelectionChange();
+      }
+    });
+
+    if (shellRef.current) {
+      resizeObserver.observe(shellRef.current);
+    }
+
     return () => {
       document.removeEventListener("selectionchange", handleSelectionChange);
+      resizeObserver.disconnect();
     };
   }, [activeFile, file, filename, id, onSelectionContextChange]);
 

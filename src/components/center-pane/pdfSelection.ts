@@ -23,14 +23,17 @@ export function publishPdfSelection(
 
   if (!selectionBelongsToPdf) return;
 
-  lastPublishedSelectionRef.current = selectedText;
   paintPdfSelectionOverlay(shellElement, selectionOverlayElement, range);
-  onSelectionContextChange({
-    fileId: activeFile.id,
-    filename: activeFile.filename,
-    sourceType: "pdf",
-    text: selectedText,
-  });
+
+  if (lastPublishedSelectionRef.current !== selectedText) {
+    lastPublishedSelectionRef.current = selectedText;
+    onSelectionContextChange({
+      fileId: activeFile.id,
+      filename: activeFile.filename,
+      sourceType: "pdf",
+      text: selectedText,
+    });
+  }
 }
 
 export function paintPdfSelectionOverlay(

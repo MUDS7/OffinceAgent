@@ -20,6 +20,7 @@ import {
   Search,
   Settings,
   SquareMinus,
+  Trash2,
 } from "lucide-react";
 
 type WorkspaceFile = {
@@ -61,6 +62,7 @@ type LeftPanelProps = {
   onSelectFile: (fileId: string) => void;
   onCreateEmptyFile: (filename: string) => void;
   onOpenFilePicker: () => void;
+  onDeleteFiles: (fileIds: string[]) => void;
 };
 
 export function LeftPanel({
@@ -71,6 +73,7 @@ export function LeftPanel({
   onSelectFile,
   onCreateEmptyFile,
   onOpenFilePicker,
+  onDeleteFiles,
 }: LeftPanelProps) {
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([]);
   const [isCreatingFile, setIsCreatingFile] = useState(false);
@@ -82,6 +85,7 @@ export function LeftPanel({
   const [selectedFolderId, setSelectedFolderId] = useState("");
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
   const [isWorkspaceRootCollapsed, setIsWorkspaceRootCollapsed] = useState(false);
+  const [nodeToDelete, setNodeToDelete] = useState<{ id: string; name: string; kind: "file" | "folder" | "virtual_folder", fileIds?: string[] } | null>(null);
   const newFileInputRef = useRef<HTMLInputElement | null>(null);
   const newFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceTree = useMemo(
@@ -207,6 +211,20 @@ export function LeftPanel({
     startCreatingFolder();
   }
 
+  function handleConfirmDelete() {
+    if (!nodeToDelete) return;
+    
+    if (nodeToDelete.kind === "file" || nodeToDelete.kind === "folder") {
+      if (nodeToDelete.fileIds && nodeToDelete.fileIds.length > 0) {
+        onDeleteFiles(nodeToDelete.fileIds);
+      }
+    } else if (nodeToDelete.kind === "virtual_folder") {
+      setWorkspaceFolders((current) => current.filter(f => f.id !== nodeToDelete.id && f.parentFolderId !== nodeToDelete.id));
+    }
+    
+    setNodeToDelete(null);
+  }
+
   function stopTreeRootAction(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
   }
@@ -280,6 +298,12 @@ export function LeftPanel({
           <ChevronIcon className="tree-folder-chevron" size={14} />
           <FolderOpen className="folder-icon" size={15} />
           <span>{folder.name}</span>
+          <div className="file-actions" onClick={(e) => {
+            e.stopPropagation();
+            setNodeToDelete({ id: folder.id, name: folder.name, kind: "virtual_folder" });
+          }}>
+            <Trash2 size={14} />
+          </div>
         </button>
         {!isCollapsed && isCreatingFolder && creatingFolderParentId === folder.id ? renderCreatingFolderRow(depth + 1) : null}
         {!isCollapsed ? childFolders.map((childFolder) => renderFolder(childFolder, depth + 1)) : null}
@@ -308,6 +332,13 @@ export function LeftPanel({
             <ChevronIcon className="tree-folder-chevron" size={14} />
             <FolderOpen className="folder-icon" size={15} />
             <span>{node.name}</span>
+            <div className="file-actions" onClick={(e) => {
+              e.stopPropagation();
+              const fileIds = collectWorkspaceTreeFileIds([node]);
+              setNodeToDelete({ id: node.id, name: node.name, kind: "folder", fileIds });
+            }}>
+              <Trash2 size={14} />
+            </div>
           </button>
           {!isCollapsed ? node.children.map((childNode) => renderTreeNode(childNode, depth + 1)) : null}
         </Fragment>
@@ -328,6 +359,12 @@ export function LeftPanel({
           <FileIcon filename={node.name} />
           <span>{node.name}</span>
           {node.fileItem.analysis ? <Check size={14} /> : <Circle size={9} />}
+          <div className="file-actions" onClick={(e) => {
+            e.stopPropagation();
+            setNodeToDelete({ id: node.id, name: node.name, kind: "file", fileIds: [node.fileItem.id] });
+          }}>
+            <Trash2 size={14} />
+          </div>
         </button>
         {isCreatingFolder && creatingFolderAfterFileId === node.fileItem.id ? renderCreatingFolderRow(depth) : null}
         {workspaceFolders
@@ -438,6 +475,23 @@ export function LeftPanel({
 
         <div className="explorer-spacer" onClick={clearTreeSelection} />
       </aside>
+
+      {nodeToDelete && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-header">
+              确认删除
+            </div>
+            <div className="modal-body">
+              确定要删除 {nodeToDelete.kind === "file" ? "文件" : "文件夹"} "{nodeToDelete.name}" 吗？
+            </div>
+            <div className="modal-footer">
+              <button className="modal-btn cancel-btn" onClick={() => setNodeToDelete(null)}>取消</button>
+              <button className="modal-btn delete-btn" onClick={handleConfirmDelete}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -462,6 +516,20 @@ function collectWorkspaceTreeFolderIds(nodes: WorkspaceTreeNode[]) {
   }
 
   return folderIds;
+}
+
+function collectWorkspaceTreeFileIds(nodes: WorkspaceTreeNode[]) {
+  const fileIds: string[] = [];
+
+  for (const node of nodes) {
+    if (node.kind === "file") {
+      fileIds.push(node.fileItem.id);
+    } else {
+      fileIds.push(...collectWorkspaceTreeFileIds(node.children));
+    }
+  }
+
+  return fileIds;
 }
 
 function buildWorkspaceTree(workspaceFiles: WorkspaceFile[], workspaceName: string) {
