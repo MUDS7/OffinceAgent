@@ -29,6 +29,16 @@ struct DeepSeekMessage {
     content: String,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextEditAgentRequest {
+    file_path: String,
+    start: usize,
+    end: usize,
+    selected_text: String,
+    instruction: String,
+}
+
 #[derive(serde::Serialize)]
 struct DeepSeekChatRequest {
     model: String,
@@ -57,6 +67,7 @@ struct DeepSeekStreamChoice {
 #[derive(serde::Deserialize)]
 struct DeepSeekStreamDelta {
     content: Option<String>,
+    #[serde(rename = "reasoning_content")]
     reasoning_content: Option<String>,
 }
 
@@ -88,11 +99,15 @@ fn get_document_service_status() -> ServiceStatus {
 async fn chat_with_deepseek(
     app: AppHandle,
     model: Option<String>,
-    messages: Vec<DeepSeekMessage>,
+    messages: Option<Vec<DeepSeekMessage>>,
+    text_edit_request: Option<TextEditAgentRequest>,
     stream_id: String,
 ) -> Result<(), String> {
     let api_key = read_deepseek_api_key()?;
-    let messages = normalize_deepseek_messages(messages)?;
+    let messages = match text_edit_request {
+        Some(request) => build_text_edit_messages(request)?,
+        None => normalize_deepseek_messages(messages.unwrap_or_default())?,
+    };
     let model = normalize_deepseek_model(model.as_deref());
     let payload = DeepSeekChatRequest {
         model: model.clone(),
@@ -175,9 +190,7 @@ fn handle_deepseek_sse_line(app: &AppHandle, stream_id: &str, line: &str) -> Res
         .map_err(|error| format!("Failed to parse DeepSeek stream chunk: {error}"))?;
 
     for choice in chunk.choices {
-        if let Some(reasoning_content) = choice.delta.reasoning_content {
-            emit_deepseek_stream_event(app, stream_id, "delta", Some(reasoning_content), None)?;
-        }
+        let _reasoning_content = choice.delta.reasoning_content;
 
         if let Some(content) = choice.delta.content {
             emit_deepseek_stream_event(app, stream_id, "delta", Some(content), None)?;
@@ -276,6 +289,39 @@ fn normalize_deepseek_messages(
     }
 
     Ok(normalized)
+}
+
+fn build_text_edit_messages(request: TextEditAgentRequest) -> Result<Vec<DeepSeekMessage>, String> {
+    let file_path = request.file_path.trim();
+    let instruction = request.instruction.trim();
+
+    if file_path.is_empty() {
+        return Err("Text edit agent requires filePath".to_string());
+    }
+
+    if request.start > request.end {
+        return Err("Text edit agent start cannot be greater than end".to_string());
+    }
+
+    if instruction.is_empty() {
+        return Err("Text edit agent requires instruction".to_string());
+    }
+
+    let content = if request.selected_text.trim().is_empty() {
+        format!(
+            "你是文本修改助手。\n\n请根据用户要求生成需要新增的文本。\n\n用户要求：\n{instruction}\n\n只返回新增的文本，不要解释。"
+        )
+    } else {
+        format!(
+            "你是文本修改助手。\n\n请根据用户要求修改选中文本。\n\n用户要求：\n{instruction}\n\n选中文本：\n<<<\n{}\n>>>\n\n只返回修改后的文本，不要解释。",
+            request.selected_text
+        )
+    };
+
+    Ok(vec![DeepSeekMessage {
+        role: "user".to_string(),
+        content,
+    }])
 }
 
 fn normalize_deepseek_model(model: Option<&str>) -> String {

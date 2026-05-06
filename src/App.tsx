@@ -52,9 +52,29 @@ type DeepSeekApiMessage = {
 
 type DocumentSelectionContext = {
   fileId: string;
+  filePath: string;
   filename: string;
   sourceType: "pdf" | "text";
+  start?: number;
+  end?: number;
   text: string;
+};
+
+type TextEditAgentRequest = {
+  filePath: string;
+  start: number;
+  end: number;
+  selectedText: string;
+  instruction: string;
+};
+
+type AgentTextEditResult = {
+  id: string;
+  fileId: string;
+  start: number;
+  end: number;
+  replacementText: string;
+  insertOnNextLine: boolean;
 };
 
 type DeepSeekStreamEvent = {
@@ -92,6 +112,7 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [documentSelection, setDocumentSelection] = useState<DocumentSelectionContext | null>(null);
+  const [pendingAgentTextEdit, setPendingAgentTextEdit] = useState<AgentTextEditResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
@@ -110,6 +131,7 @@ function App() {
             id: selectedWorkspaceFile.id,
             filename: selectedWorkspaceFile.file.name,
             file: selectedWorkspaceFile.file,
+            diskPath: selectedWorkspaceFile.diskPath,
           }
         : null,
     [selectedWorkspaceFile],
@@ -521,7 +543,17 @@ function App() {
     const userMessage: ChatMessage = { id: `user-${now}`, role: "user", text };
     const assistantMessage: ChatMessage = { id: assistantMessageId, role: "assistant", text: "" };
     const nextMessages = [...chatMessages, userMessage];
-    const apiMessages = buildDeepSeekMessages(nextMessages, documentSelection);
+    const textEditRequest = buildTextEditAgentRequest(text, documentSelection);
+    const textEditTarget =
+      textEditRequest && documentSelection
+        ? {
+            fileId: documentSelection.fileId,
+            start: textEditRequest.start,
+            end: textEditRequest.end,
+            insertOnNextLine: !textEditRequest.selectedText.trim(),
+          }
+        : null;
+    const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
 
     setChatMessages([...nextMessages, assistantMessage]);
     setDraftMessage("");
@@ -529,6 +561,22 @@ function App() {
     setErrorMessage("");
 
     let unlisten: (() => void) | null = null;
+    let assistantText = "";
+    let hasAppliedAgentText = false;
+
+    function applyAgentTextResult() {
+      if (!textEditTarget || hasAppliedAgentText || !assistantText.trim()) return;
+
+      hasAppliedAgentText = true;
+      setPendingAgentTextEdit({
+        id: `agent-edit-${now}`,
+        fileId: textEditTarget.fileId,
+        start: textEditTarget.start,
+        end: textEditTarget.end,
+        replacementText: assistantText,
+        insertOnNextLine: textEditTarget.insertOnNextLine,
+      });
+    }
 
     try {
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
@@ -536,11 +584,17 @@ function App() {
         if (payload.stream_id !== streamId) return;
 
         if (payload.kind === "delta" && payload.content) {
+          assistantText += payload.content;
           setChatMessages((current) =>
             current.map((message) =>
               message.id === assistantMessageId ? { ...message, text: message.text + payload.content } : message,
             ),
           );
+          return;
+        }
+
+        if (payload.kind === "done") {
+          applyAgentTextResult();
           return;
         }
 
@@ -560,7 +614,10 @@ function App() {
         model,
         streamId,
         messages: apiMessages,
+        textEditRequest,
       });
+
+      applyAgentTextResult();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setErrorMessage(message);
@@ -721,8 +778,10 @@ function App() {
           activeFile={activePreviewFile}
           errorMessage={errorMessage}
           isChecking={isChecking}
+          pendingAgentTextEdit={pendingAgentTextEdit}
           previewTabs={openPreviewTabs}
           unsavedText={unsavedContents[selectedFileId]}
+          onAgentTextEditApplied={() => setPendingAgentTextEdit(null)}
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
           onSelectionContextChange={setDocumentSelection}
@@ -785,6 +844,26 @@ function normalizePanelWidth(width: number, minWidth: number) {
   if (width <= minWidth - HIDE_DRAG_DISTANCE) return 0;
   if (width === 0) return 0;
   return Math.max(minWidth, width);
+}
+
+function buildTextEditAgentRequest(
+  instruction: string,
+  documentSelection: DocumentSelectionContext | null,
+): TextEditAgentRequest | null {
+  if (documentSelection?.sourceType !== "text") {
+    return null;
+  }
+
+  const start = documentSelection.start ?? 0;
+  const end = documentSelection.end ?? start + documentSelection.text.length;
+
+  return {
+    filePath: documentSelection.filePath,
+    start,
+    end,
+    selectedText: documentSelection.text,
+    instruction,
+  };
 }
 
 function buildDeepSeekMessages(

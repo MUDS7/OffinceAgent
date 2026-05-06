@@ -11,8 +11,10 @@ export function CenterPane({
   activeFile,
   errorMessage,
   isChecking,
+  pendingAgentTextEdit,
   previewTabs,
   unsavedText,
+  onAgentTextEditApplied,
   onClosePreviewTab,
   onRefreshStatus,
   onSelectionContextChange,
@@ -60,7 +62,9 @@ export function CenterPane({
       return (
         <TextFilePreview
           activeFile={activeFile}
+          pendingAgentTextEdit={pendingAgentTextEdit}
           unsavedText={unsavedText}
+          onAgentTextEditApplied={onAgentTextEditApplied}
           onSelectionContextChange={onSelectionContextChange}
           onUpdateTextFile={onUpdateTextFile}
           onSaveTextFile={onSaveTextFile}

@@ -9,13 +9,26 @@ export type PreviewFile = {
   id: string;
   filename: string;
   file: File;
+  diskPath?: string;
 };
 
 export type DocumentSelectionContext = {
   fileId: string;
+  filePath: string;
   filename: string;
   sourceType: "pdf" | "text";
+  start?: number;
+  end?: number;
   text: string;
+};
+
+export type AgentTextEditResult = {
+  id: string;
+  fileId: string;
+  start: number;
+  end: number;
+  replacementText: string;
+  insertOnNextLine: boolean;
 };
 
 export type CenterPaneProps = {
@@ -23,8 +36,10 @@ export type CenterPaneProps = {
   activeFile: PreviewFile | null;
   errorMessage: string;
   isChecking: boolean;
+  pendingAgentTextEdit: AgentTextEditResult | null;
   previewTabs: PreviewTab[];
   unsavedText?: string;
+  onAgentTextEditApplied: () => void;
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;

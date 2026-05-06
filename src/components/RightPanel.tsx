@@ -19,8 +19,11 @@ type ChatMessage = {
 
 type DocumentSelectionContext = {
   fileId: string;
+  filePath: string;
   filename: string;
   sourceType: "pdf" | "text";
+  start?: number;
+  end?: number;
   text: string;
 };
 
@@ -79,7 +82,7 @@ export function RightPanel({
       <div className="codex-top">
         <div className="codex-tabs">
           <button className="active" type="button">
-            Chat
+            Agent
           </button>
         </div>
         <div className="codex-window-actions">
@@ -109,7 +112,7 @@ export function RightPanel({
       </div>
 
       <div className="composer-wrap">
-        {documentSelection ? (
+        {documentSelection?.text.trim() ? (
           <div className="selection-context-pill" title={documentSelection.text}>
             <FileTextIcon sourceType={documentSelection.sourceType} />
             <span>

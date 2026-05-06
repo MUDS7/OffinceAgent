@@ -834,6 +834,8 @@ body.is-resizing-layout * {
 }
 
 .preview-text-editor {
+  position: relative;
+  z-index: 1;
   display: block;
   width: 100%;
   height: 100%;
@@ -845,7 +847,7 @@ body.is-resizing-layout * {
   outline: none;
   caret-color: #1f6feb;
   color: #111111;
-  background: #ffffff;
+  background: transparent;
   font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
   font-size: 15px;
   font-weight: 600;
@@ -853,6 +855,53 @@ body.is-resizing-layout * {
   tab-size: 2;
   white-space: pre;
   overflow: auto;
+}
+
+.text-editor-stack {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.text-selection-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.text-editor-stack.focused .text-selection-overlay {
+  opacity: 0;
+}
+
+.text-selection-mirror {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 23px 26px 80px 0;
+  color: transparent;
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.72;
+  pointer-events: none;
+  tab-size: 2;
+  white-space: pre;
+  will-change: transform;
+}
+
+.text-selection-mirror mark {
+  padding: 0;
+  border-radius: 2px;
+  color: transparent;
+  background: rgba(31, 111, 235, 0.22);
 }
 
 .preview-text-editor::selection {

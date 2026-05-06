@@ -29,6 +29,7 @@ export function publishPdfSelection(
     lastPublishedSelectionRef.current = selectedText;
     onSelectionContextChange({
       fileId: activeFile.id,
+      filePath: activeFile.diskPath ?? activeFile.filename,
       filename: activeFile.filename,
       sourceType: "pdf",
       text: selectedText,

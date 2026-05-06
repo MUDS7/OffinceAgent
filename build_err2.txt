@@ -1,0 +1,8 @@
+﻿cargo :    Compiling office-agent v0.1.0 (E:\ai\OfficeAgent\src-tauri)
+At line:1 char:1
++ cargo build 2>&1 | Out-File -FilePath "..\build_err2.txt" -Encoding u ...
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling of...gent\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.57s
