@@ -15,6 +15,8 @@ type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
+  reasoningText?: string;
+  contentTone?: "default" | "file-edit";
 };
 
 type DocumentSelectionContext = {
@@ -100,7 +102,7 @@ export function RightPanel({
           <div className="floating-history" ref={historyRef}>
             {chatMessages.map((message) => (
               <article className={`chat-message ${message.role}`} key={message.id}>
-                <p>{message.text}</p>
+                <ChatMessageContent message={message} />
               </article>
             ))}
           </div>
@@ -191,6 +193,24 @@ export function RightPanel({
         </div>
       </div>
     </aside>
+  );
+}
+
+function ChatMessageContent({ message }: { message: ChatMessage }) {
+  const isAssistant = message.role === "assistant";
+  const hasReasoning = Boolean(message.reasoningText?.trim());
+  const hasText = Boolean(message.text.trim());
+
+  if (!isAssistant) {
+    return <p>{message.text}</p>;
+  }
+
+  return (
+    <div className="assistant-message-content">
+      {hasReasoning ? <p className="assistant-reasoning">{message.reasoningText}</p> : null}
+      {hasText ? <p className={message.contentTone === "file-edit" ? "assistant-file-edit" : undefined}>{message.text}</p> : null}
+      {!hasReasoning && !hasText ? <p className="assistant-placeholder" /> : null}
+    </div>
   );
 }
 

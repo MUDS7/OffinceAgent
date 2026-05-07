@@ -43,6 +43,8 @@ type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
+  reasoningText?: string;
+  contentTone?: "default" | "file-edit";
 };
 
 type DeepSeekApiMessage = {
@@ -83,7 +85,7 @@ type AgentTextEditResult = {
 
 type DeepSeekStreamEvent = {
   stream_id: string;
-  kind: "start" | "delta" | "done" | "error";
+  kind: "start" | "reasoning" | "delta" | "done" | "error";
   content?: string;
   error?: string;
 };
@@ -590,10 +592,28 @@ function App() {
             }
           : null;
       const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
+      const assistantContentTone = textEditRequest ? "file-edit" : "default";
+
+      setChatMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessageId ? { ...message, contentTone: assistantContentTone } : message,
+        ),
+      );
 
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
+
+        if (payload.kind === "reasoning" && payload.content) {
+          setChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, reasoningText: `${message.reasoningText ?? ""}${payload.content}` }
+                : message,
+            ),
+          );
+          return;
+        }
 
         if (payload.kind === "delta" && payload.content) {
           assistantText += payload.content;
@@ -888,6 +908,10 @@ async function classifyTextSelectionIntent(
     return "answer";
   }
 
+  if (isExplicitTextEditInstruction(instruction)) {
+    return "edit";
+  }
+
   let result: TextSelectionIntentResult;
   try {
     result = await invoke<TextSelectionIntentResult>("classify_text_selection_intent", {
@@ -905,6 +929,34 @@ async function classifyTextSelectionIntent(
   }
 
   return result.intent === "edit" ? "edit" : "answer";
+}
+
+function isExplicitTextEditInstruction(instruction: string) {
+  const normalizedInstruction = instruction.trim().toLowerCase();
+  const compactInstruction = normalizedInstruction.replace(/\s+/g, "");
+
+  if (!compactInstruction) {
+    return false;
+  }
+
+  const explicitEditPatterns = [
+    /^(帮我|请|麻烦|能否|可以)?(写|生成|新增|添加|插入|补充|改写|重写|修改|替换|删除|格式化)/,
+    /^(帮我|请|麻烦|能否|可以)?(写一个|写一条|写一下)/,
+    /把.+(改成|改为|替换成|删除|格式化|翻译成|转换成|转成)/,
+    /(帮我写|请写|写一个|写一条|写一下|改成|改为|替换成|翻译成|转换成|转成)/,
+  ];
+  const commandContextKeywords = ["命令", "linux", "shell", "bash", "脚本", "cmd", "powershell"];
+
+  if (explicitEditPatterns.some((pattern) => pattern.test(compactInstruction))) {
+    return true;
+  }
+
+  return (
+    commandContextKeywords.some((keyword) => compactInstruction.includes(keyword)) &&
+    (compactInstruction.includes("同样功能") ||
+      compactInstruction.includes("等价") ||
+      compactInstruction.includes("一样功能"))
+  );
 }
 
 function buildDeepSeekMessages(

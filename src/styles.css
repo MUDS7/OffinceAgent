@@ -1058,9 +1058,9 @@ body.is-resizing-layout * {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
   min-height: 0;
-  padding: 18px 20px 22px;
+  padding: 20px 16px 24px;
   overflow: auto;
 }
 
@@ -1077,28 +1077,54 @@ body.is-resizing-layout * {
   justify-content: flex-end;
 }
 
-.chat-message p {
+.chat-message > p,
+.assistant-message-content {
   max-width: min(100%, 38rem);
+}
+
+.chat-message > p,
+.assistant-message-content p {
   margin: 0;
+  font-size: 15px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-message.user > p {
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 18px;
+  color: #1f1f1f;
+  background: #f2f2f2;
+}
+
+.assistant-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: #111111;
+}
+
+.assistant-message-content p {
+  color: #111111;
+}
+
+.assistant-message-content .assistant-file-edit {
+  color: #767676;
+}
+
+.assistant-placeholder::after {
+  color: #9a9a9a;
+  content: "Thinking...";
+}
+
+.chat-message:not(.user) > p {
   padding: 10px 12px;
   border: 1px solid #e2e2e2;
   border-radius: 8px;
   color: #5d5d5d;
   background: #ffffff;
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.chat-message.assistant p:empty::after {
-  color: #a0a0a0;
-  content: "Thinking...";
-}
-
-.chat-message.user p {
-  border-color: #d7e5f4;
-  background: #eef6ff;
 }
 
 .composer-wrap {
