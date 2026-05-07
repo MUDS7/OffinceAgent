@@ -8,6 +8,14 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.excel_commands import (
+    ExcelCommandsResponse,
+    ExcelExecuteRequest,
+    ExcelExecuteResponse,
+    execute_excel_command,
+    get_excel_commands,
+)
+
 
 app = FastAPI(title="OfficeAgent Document Service", version="0.1.0")
 app.add_middleware(
@@ -54,6 +62,16 @@ async def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
         text_preview=text[:4000] if text else "",
         warnings=warnings,
     )
+
+
+@app.get("/excel/commands", response_model=ExcelCommandsResponse)
+def list_excel_commands() -> ExcelCommandsResponse:
+    return get_excel_commands()
+
+
+@app.post("/excel/execute", response_model=ExcelExecuteResponse)
+def run_excel_command(request: ExcelExecuteRequest) -> ExcelExecuteResponse:
+    return execute_excel_command(request)
 
 
 def extract_text(filename: str, extension: str, content: bytes, warnings: list[str]) -> str:
