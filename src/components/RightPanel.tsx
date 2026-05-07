@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import type { KeyboardEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 type ChatMessage = {
   id: string;
@@ -60,7 +60,12 @@ export function RightPanel({
   const [selectedModel, setSelectedModel] = useState("deepseek-v4-flash");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModelLabel = modelOptions.find((option) => option.id === selectedModel)?.label ?? modelOptions[0].label;
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea();
+  }, [draftMessage]);
 
   useEffect(() => {
     const historyElement = historyRef.current;
@@ -69,8 +74,39 @@ export function RightPanel({
     historyElement.scrollTop = historyElement.scrollHeight;
   }, [chatMessages]);
 
+  function resizeComposerTextarea() {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+
+    const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight);
+    const nextHeight = Number.isFinite(maxHeight) ? Math.min(textarea.scrollHeight, maxHeight) : textarea.scrollHeight;
+
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > nextHeight ? "auto" : "hidden";
+  }
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+
+    if (event.altKey) {
+      event.preventDefault();
+
+      const textarea = event.currentTarget;
+      const selectionStart = textarea.selectionStart;
+      const selectionEnd = textarea.selectionEnd;
+      const nextMessage = `${draftMessage.slice(0, selectionStart)}\n${draftMessage.slice(selectionEnd)}`;
+      const nextCursorPosition = selectionStart + 1;
+
+      onDraftMessageChange(nextMessage);
+      requestAnimationFrame(() => {
+        textarea.setSelectionRange(nextCursorPosition, nextCursorPosition);
+      });
+      return;
+    }
+
+    if (event.shiftKey) return;
 
     event.preventDefault();
     onSendMessage(selectedModel);
@@ -125,6 +161,7 @@ export function RightPanel({
         ) : null}
         <div className="chat-input">
           <textarea
+            ref={composerTextareaRef}
             value={draftMessage}
             placeholder="Ask Agent anything. Type @ to mention files."
             rows={3}

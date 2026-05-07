@@ -1375,10 +1375,12 @@ body.is-resizing-spreadsheet.row-resize * {
   display: block;
   width: 100%;
   min-width: 0;
-  height: 56px;
+  min-height: 56px;
+  max-height: 220px;
   resize: none;
   border: 0;
   outline: none;
+  overflow-y: hidden;
   padding: 0;
   color: #3f3f3f;
   background: transparent;
