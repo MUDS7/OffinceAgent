@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Share2 } from "lucide-react";
+import "./TopBar.css";
 
 type AgentInfo = {
   name: string;

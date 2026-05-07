@@ -23,6 +23,7 @@ import {
   Table2,
   Trash2,
 } from "lucide-react";
+import "./LeftPanel.css";
 
 type WorkspaceFile = {
   id: string;

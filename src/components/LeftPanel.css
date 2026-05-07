@@ -1,0 +1,351 @@
+.activity-bar {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  border-right: 1px solid #dadada;
+  background: #2b2b2b;
+}
+
+.activity-top,
+.activity-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.activity-top {
+  padding-top: 9px;
+}
+
+.activity-bottom {
+  padding-bottom: 9px;
+}
+
+.activity-button {
+  display: grid;
+  width: 57px;
+  height: 57px;
+  place-items: center;
+  border-left: 2px solid transparent;
+  color: #a6a6a6;
+  background: transparent;
+  cursor: pointer;
+}
+
+.activity-button:hover {
+  color: #e7e7e7;
+}
+
+.activity-button.active {
+  border-left-color: #ffffff;
+  color: #ffffff;
+}
+
+.explorer-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid #e5e5e5;
+  background: #f4f4f4;
+}
+
+.explorer-panel.collapsed,
+.codex-pane.collapsed {
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 45px;
+  color: #666666;
+  font-size: 14px;
+}
+
+.explorer-heading {
+  padding: 0 16px 0 24px;
+}
+
+.tree-section {
+  padding: 4px 0 8px;
+}
+
+.tree-root,
+.file-row,
+.empty-tree-action,
+.collapsed-section {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  min-height: 27px;
+  color: #5f5f5f;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1;
+  text-align: left;
+}
+
+.tree-root {
+  padding: 0 10px 0 7px;
+  color: #606060;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tree-root:hover {
+  background: #e9e9e9;
+}
+
+.tree-root > svg:first-child {
+  order: 0;
+  flex: 0 0 auto;
+}
+
+.tree-root > span {
+  order: 1;
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-actions {
+  order: 2;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.tree-action-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border-radius: 4px;
+  color: #424242;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tree-action-button:hover {
+  background: #e1e1e1;
+}
+
+.tree-action-button:focus-visible {
+  outline: 1px solid #4b89dc;
+  outline-offset: -1px;
+}
+
+.file-list {
+  display: grid;
+  gap: 0;
+  margin-top: 2px;
+}
+
+.file-row {
+  padding: 0 12px 0 25px;
+  cursor: pointer;
+}
+
+.creating-file-row {
+  cursor: default;
+}
+
+.folder-tree-row {
+  cursor: pointer;
+}
+
+.tree-folder-chevron {
+  flex: 0 0 auto;
+  color: #737373;
+}
+
+.creating-file-row input {
+  min-width: 0;
+  height: 21px;
+  flex: 1;
+  padding: 1px 5px;
+  border: 1px solid #4b89dc;
+  border-radius: 2px;
+  outline: none;
+  color: #4f4f4f;
+  background: #ffffff;
+  font-size: 15px;
+  line-height: 19px;
+}
+
+.folder-row {
+  padding-left: 18px;
+}
+
+.folder-icon {
+  color: #d0a34a;
+}
+
+.file-row span {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-row svg:last-child {
+  flex: 0 0 auto;
+}
+
+.file-row:hover,
+.empty-tree-action:hover,
+.collapsed-section:hover {
+  background: #e9e9e9;
+}
+
+.file-row.selected {
+  color: #4f4f4f;
+  background: #e5e5f0;
+}
+
+.json-icon {
+  color: #bb9849;
+}
+
+.ts-icon {
+  color: #2a77bf;
+}
+
+.html-icon {
+  color: #d0733b;
+}
+
+.git-icon {
+  color: #3f6b8f;
+}
+
+.md-icon {
+  color: #5483b6;
+}
+
+.empty-tree-action {
+  min-height: 32px;
+  padding: 0 16px 0 22px;
+  color: #4c78a8;
+  cursor: pointer;
+}
+
+.explorer-spacer {
+  flex: 1;
+}
+
+.collapsed-section {
+  min-height: 28px;
+  padding: 0 10px;
+  border-top: 1px solid #dfdfdf;
+  color: #666666;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.file-row .file-actions {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: #7d7d7d;
+  margin-left: auto;
+}
+
+.file-row:hover .file-actions {
+  display: flex;
+}
+
+.file-row .file-actions:hover {
+  background: #d4d4d4;
+  color: #c74c4c;
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.modal-content {
+  width: 320px;
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  font-family: inherit;
+}
+
+.modal-header {
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  color: #333333;
+  border-bottom: 1px solid #eeeeee;
+  background: #fafafa;
+}
+
+.modal-body {
+  padding: 20px 16px;
+  font-size: 13px;
+  color: #555555;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fafafa;
+  border-top: 1px solid #eeeeee;
+}
+
+.modal-btn {
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.modal-btn.cancel-btn {
+  background: #ffffff;
+  border-color: #d1d1d1;
+  color: #5f5f5f;
+}
+
+.modal-btn.cancel-btn:hover {
+  background: #f0f0f0;
+}
+
+.modal-btn.delete-btn {
+  background: #d32f2f;
+  color: #ffffff;
+}
+
+.modal-btn.delete-btn:hover {
+  background: #b71c1c;
+}

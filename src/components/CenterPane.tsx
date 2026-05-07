@@ -6,6 +6,7 @@ import { SpreadsheetPreview } from "./center-pane/SpreadsheetPreview";
 import { TextFilePreview } from "./center-pane/TextFilePreview";
 import type { CenterPaneProps } from "./center-pane/types";
 import { getFileExtension, isEditableTextFile, isSpreadsheetExtension } from "./center-pane/filePreviewUtils";
+import "./CenterPane.css";
 
 export function CenterPane({
   activeFilename,

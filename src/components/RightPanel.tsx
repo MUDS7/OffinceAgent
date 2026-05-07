@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import "./RightPanel.css";
 
 type ChatMessage = {
   id: string;
