@@ -12,6 +12,7 @@ pub(crate) struct TextEditAgentRequest {
     pub(super) end: usize,
     pub(super) selected_text: String,
     pub(super) instruction: String,
+    pub(super) operation: String,
 }
 
 #[derive(serde::Deserialize)]

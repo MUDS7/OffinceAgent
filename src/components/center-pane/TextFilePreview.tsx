@@ -330,8 +330,8 @@ export function TextFilePreview({
 function applyAgentTextEdit(text: string, edit: AgentTextEditResult) {
   const normalizedReplacementText = normalizeEditorLineEndings(edit.replacementText);
 
-  if (edit.insertOnNextLine) {
-    const insertionIndex = getNextLineInsertionIndex(text, edit.start);
+  if (edit.operation === "insert_after_selection") {
+    const insertionIndex = getNextLineInsertionIndex(text, edit.end);
     const insertionText = formatNextLineInsertion(text, insertionIndex, normalizedReplacementText);
     const nextText = text.slice(0, insertionIndex) + insertionText + text.slice(insertionIndex);
 

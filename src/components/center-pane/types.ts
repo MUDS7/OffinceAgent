@@ -28,7 +28,7 @@ export type AgentTextEditResult = {
   start: number;
   end: number;
   replacementText: string;
-  insertOnNextLine: boolean;
+  operation: "replace_selection" | "insert_after_selection";
 };
 
 export type CenterPaneProps = {

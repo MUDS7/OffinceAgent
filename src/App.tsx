@@ -68,10 +68,19 @@ type TextEditAgentRequest = {
   end: number;
   selectedText: string;
   instruction: string;
+  operation: TextEditOperation;
 };
 
+type TextSelectionIntentAction =
+  | "answer_only"
+  | "replace_selection"
+  | "insert_after_selection"
+  | "ask_confirm";
+
+type TextEditOperation = Extract<TextSelectionIntentAction, "replace_selection" | "insert_after_selection">;
+
 type TextSelectionIntentResult = {
-  intent: "answer" | "edit";
+  intent: TextSelectionIntentAction;
 };
 
 type AgentTextEditResult = {
@@ -80,7 +89,7 @@ type AgentTextEditResult = {
   start: number;
   end: number;
   replacementText: string;
-  insertOnNextLine: boolean;
+  operation: TextEditOperation;
 };
 
 type DeepSeekStreamEvent = {
@@ -562,25 +571,47 @@ function App() {
       fileId: string;
       start: number;
       end: number;
-      insertOnNextLine: boolean;
+      operation: TextEditOperation;
     } | null = null;
 
     function applyAgentTextResult() {
-      if (!textEditTarget || hasAppliedAgentText || !assistantText.trim()) return;
+      if (!textEditTarget || hasAppliedAgentText) return;
+      const editText = extractAgentTextEditPayload(assistantText);
+      if (textEditTarget.operation === "insert_after_selection" && !editText.length) return;
 
       hasAppliedAgentText = true;
+      const statusText = getTextEditStatusMessage(textEditTarget.operation, editText);
+      setChatMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessageId && !message.text ? { ...message, text: statusText } : message,
+        ),
+      );
       setPendingAgentTextEdit({
         id: `agent-edit-${now}`,
         fileId: textEditTarget.fileId,
         start: textEditTarget.start,
         end: textEditTarget.end,
-        replacementText: assistantText,
-        insertOnNextLine: textEditTarget.insertOnNextLine,
+        replacementText: editText,
+        operation: textEditTarget.operation,
       });
     }
 
     try {
       const intent = await classifyTextSelectionIntent(model, text, documentSelection);
+      if (intent === "ask_confirm") {
+        setChatMessages((current) =>
+          current.map((message) =>
+            message.id === assistantMessageId
+              ? {
+                  ...message,
+                  text: "需要先确认一下：你希望我替换当前选区、在选区后新增，还是删除某一段内容？确认后我再修改文件。",
+                }
+              : message,
+          ),
+        );
+        return;
+      }
+
       const textEditRequest = buildTextEditAgentRequest(text, documentSelection, intent);
       textEditTarget =
         textEditRequest && documentSelection
@@ -588,7 +619,7 @@ function App() {
               fileId: documentSelection.fileId,
               start: textEditRequest.start,
               end: textEditRequest.end,
-              insertOnNextLine: !textEditRequest.selectedText.trim(),
+              operation: textEditRequest.operation,
             }
           : null;
       const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
@@ -605,6 +636,8 @@ function App() {
         if (payload.stream_id !== streamId) return;
 
         if (payload.kind === "reasoning" && payload.content) {
+          if (textEditTarget) return;
+
           setChatMessages((current) =>
             current.map((message) =>
               message.id === assistantMessageId
@@ -617,6 +650,8 @@ function App() {
 
         if (payload.kind === "delta" && payload.content) {
           assistantText += payload.content;
+          if (textEditTarget) return;
+
           setChatMessages((current) =>
             current.map((message) =>
               message.id === assistantMessageId ? { ...message, text: message.text + payload.content } : message,
@@ -881,9 +916,12 @@ function normalizePanelWidth(width: number, minWidth: number) {
 function buildTextEditAgentRequest(
   instruction: string,
   documentSelection: DocumentSelectionContext | null,
-  intent: TextSelectionIntentResult["intent"],
+  intent: TextSelectionIntentAction,
 ): TextEditAgentRequest | null {
-  if (intent !== "edit" || documentSelection?.sourceType !== "text") {
+  if (
+    (intent !== "replace_selection" && intent !== "insert_after_selection") ||
+    documentSelection?.sourceType !== "text"
+  ) {
     return null;
   }
 
@@ -896,6 +934,7 @@ function buildTextEditAgentRequest(
     end,
     selectedText: documentSelection.text,
     instruction,
+    operation: intent,
   };
 }
 
@@ -903,13 +942,9 @@ async function classifyTextSelectionIntent(
   model: string,
   instruction: string,
   documentSelection: DocumentSelectionContext | null,
-): Promise<TextSelectionIntentResult["intent"]> {
+): Promise<TextSelectionIntentAction> {
   if (documentSelection?.sourceType !== "text") {
-    return "answer";
-  }
-
-  if (isExplicitTextEditInstruction(instruction)) {
-    return "edit";
+    return "answer_only";
   }
 
   let result: TextSelectionIntentResult;
@@ -925,10 +960,71 @@ async function classifyTextSelectionIntent(
     });
   } catch (error) {
     console.warn("Text selection intent classification failed; falling back to answer mode.", error);
-    return "answer";
+    return "answer_only";
   }
 
-  return result.intent === "edit" ? "edit" : "answer";
+  return normalizeTextSelectionIntent(result.intent);
+}
+
+function normalizeTextSelectionIntent(intent: string): TextSelectionIntentAction {
+  if (
+    intent === "replace_selection" ||
+    intent === "insert_after_selection" ||
+    intent === "ask_confirm" ||
+    intent === "answer_only"
+  ) {
+    return intent;
+  }
+
+  return "answer_only";
+}
+
+function getTextEditStatusMessage(operation: TextEditOperation, editText: string) {
+  if (operation === "insert_after_selection") {
+    return "\u5df2\u5728\u9009\u533a\u4e0b\u65b9\u65b0\u589e\u5185\u5bb9\u3002";
+  }
+
+  if (!editText.length) {
+    return "\u5df2\u5220\u9664\u9009\u4e2d\u6587\u672c\u3002";
+  }
+
+  return "\u5df2\u66ff\u6362\u9009\u4e2d\u6587\u672c\u3002";
+}
+
+function extractAgentTextEditPayload(text: string) {
+  const normalizedText = text.replace(/\r\n?/g, "\n");
+  const lowerText = normalizedText.toLowerCase();
+  const startTag = "<officeagent_edit>";
+  const endTag = "</officeagent_edit>";
+  const startIndex = lowerText.indexOf(startTag);
+
+  if (startIndex >= 0) {
+    const payloadStart = startIndex + startTag.length;
+    const endIndex = lowerText.indexOf(endTag, payloadStart);
+    const payload = endIndex >= 0 ? normalizedText.slice(payloadStart, endIndex) : normalizedText.slice(payloadStart);
+    return trimEditPayloadWrapperLineBreaks(payload);
+  }
+
+  return stripMarkdownFence(normalizedText.trim());
+}
+
+function trimEditPayloadWrapperLineBreaks(text: string) {
+  let payload = text;
+
+  if (payload.startsWith("\n")) {
+    payload = payload.slice(1);
+  }
+
+  if (payload.endsWith("\n")) {
+    payload = payload.slice(0, -1);
+  }
+
+  return payload;
+}
+
+function stripMarkdownFence(text: string) {
+  const fenceMatch = text.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  return fenceMatch ? fenceMatch[1] : text;
 }
 
 function isExplicitTextEditInstruction(instruction: string) {
