@@ -1205,6 +1205,28 @@ body.is-resizing-spreadsheet.row-resize * {
   color: #777777;
 }
 
+.new-chat-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  color: #777777;
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+
+.new-chat-button:hover {
+  color: #1f6feb;
+  background: rgba(31, 111, 235, 0.1);
+}
+
+
 .task-list {
   display: flex;
   align-items: center;

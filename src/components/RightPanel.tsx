@@ -36,6 +36,7 @@ type RightPanelProps = {
   documentSelection: DocumentSelectionContext | null;
   draftMessage: string;
   isSendingMessage: boolean;
+  onClearChat: () => void;
   onDraftMessageChange: (message: string) => void;
   onOpenFilePicker: () => void;
   onSendMessage: (model: string) => void;
@@ -53,6 +54,7 @@ export function RightPanel({
   documentSelection,
   draftMessage,
   isSendingMessage,
+  onClearChat,
   onDraftMessageChange,
   onOpenFilePicker,
   onSendMessage,
@@ -125,6 +127,15 @@ export function RightPanel({
           </button>
         </div>
         <div className="codex-window-actions">
+          <button
+            className="new-chat-button"
+            type="button"
+            title="新建对话框"
+            aria-label="新建对话框"
+            onClick={onClearChat}
+          >
+            +
+          </button>
           <Maximize2 size={17} />
           <X size={18} />
         </div>

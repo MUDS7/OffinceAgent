@@ -981,6 +981,7 @@ function App() {
           draftMessage={draftMessage}
           documentSelection={documentSelection}
           isSendingMessage={isSendingMessage}
+          onClearChat={() => setChatMessages([])}
           onDraftMessageChange={setDraftMessage}
           onOpenFilePicker={openFilePicker}
           onSendMessage={sendMessage}
