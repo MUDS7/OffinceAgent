@@ -52,6 +52,51 @@ type DeepSeekApiMessage = {
   content: string;
 };
 
+type ExcelCommandName =
+  | "set_cell"
+  | "set_range"
+  | "insert_row"
+  | "insert_column"
+  | "delete_row"
+  | "split_column"
+  | "fill_empty_cells"
+  | "summarize_by_column"
+  | "generate_report";
+
+type ExcelCommandSpec = {
+  command: ExcelCommandName;
+  category: "basic" | "advanced";
+  description: string;
+  required_args: string[];
+  optional_args: string[];
+};
+
+type ExcelCommandsResponse = {
+  basic: ExcelCommandSpec[];
+  advanced: ExcelCommandSpec[];
+};
+
+type ExcelAgentPlan = {
+  action: "excel_execute" | "answer_only" | "ask_confirm";
+  command?: ExcelCommandName;
+  sheet?: string | null;
+  output_path?: string | null;
+  args?: Record<string, unknown>;
+  message?: string;
+};
+
+type ExcelExecuteResponse = {
+  command: ExcelCommandName;
+  category: "basic" | "advanced";
+  file_path: string;
+  output_path: string;
+  sheet?: string | null;
+  rows_affected: number;
+  cells_affected: number;
+  summary: string;
+  data?: Record<string, unknown>[] | null;
+};
+
 type DocumentSelectionContext = {
   fileId: string;
   filePath: string;
@@ -107,6 +152,53 @@ const HIDE_DRAG_DISTANCE = 48;
 const MAX_SELECTION_CONTEXT_CHARS = 12000;
 const DOCUMENT_EXTENSIONS = ["txt", "md", "csv", "json", "pdf", "xlsx", "xls"];
 const BINARY_PREVIEW_EXTENSIONS = new Set(["pdf", "xlsx", "xls"]);
+const EXCEL_AGENT_SYSTEM_PROMPT = [
+  "You are OfficeAgent's Excel operation planner.",
+  "The application will execute Excel operations locally after reading your JSON. You must not claim that you directly edited the file.",
+  "Return only one JSON object. Do not wrap it in Markdown. Do not include explanations outside JSON.",
+  "Required JSON shape:",
+  "{",
+  '  "action": "excel_execute" | "answer_only" | "ask_confirm",',
+  '  "command": "set_cell" | "set_range" | "insert_row" | "insert_column" | "delete_row" | "split_column" | "fill_empty_cells" | "summarize_by_column" | "generate_report",',
+  '  "sheet": "worksheet name or null",',
+  '  "output_path": "optional output .xlsx path or null",',
+  '  "args": { "command-specific arguments": "values" },',
+  '  "message": "short user-facing Chinese message"',
+  "}",
+  "Use action=excel_execute only when the user's requested file change is clear and maps to one supported command.",
+  "Use action=answer_only for questions, explanations, or analysis that should not modify the workbook.",
+  "Use action=ask_confirm when the target sheet/range/value/action is ambiguous or unsafe.",
+  "Do not invent file paths. The application supplies file_path separately.",
+  "For set_cell use args.cell and args.value.",
+  "For set_range use args.values plus args.start_cell or args.range.",
+  "Row indexes are 1-based, matching the row numbers shown in Excel.",
+  "For insert_row use args.index when the exact insertion row is known, or args.before_row / args.after_row when the user says before/after a row.",
+  "For insert_row with a current selection, you may use args.range from the selection Range line plus args.position of before, after, or middle.",
+  'For insert_row when the user says "在中间插入一行" or "insert a row in the middle" without an exact row, use args.position="middle" and args.amount=1.',
+  "For insert_row optional args.amount defaults to 1; optional args.values writes values into the inserted rows.",
+  "For insert_column use args.index or args.column when the exact insertion column is known. Column indexes may be 1-based numbers or letters like B.",
+  "For insert_column use args.before_column / args.after_column when the user says before/after or left/right of a column.",
+  "For insert_column with a current selection, you may use args.range from the selection Range line plus args.position of before, after, or middle.",
+  'For insert_column when the user says "在中间插入一列" or "insert a column in the middle" without an exact column, use args.position="middle" and args.amount=1.',
+  "For insert_column optional args.amount defaults to 1; optional args.values writes values into the inserted columns.",
+  "For delete_row use args.index and optional args.amount.",
+  "For split_column, split one source column into adjacent columns. Use args.range from the selected Range line when available, or args.source_column/args.column plus optional args.start_row and args.end_row.",
+  "For split_column by separator, use args.delimiter such as space, comma, -, /, or a literal character. For splitting every character, use args.mode=\"characters\" and do not use delimiter.",
+  "For split_column optional args.target_cell or args.target_column controls where output starts; default starts at the source column. Use args.insert_columns=true only when the user asks to insert columns instead of overwriting adjacent cells.",
+  "For fill_empty_cells use optional args.columns, args.fill_value, args.method where method is value, forward, or backward.",
+  "For summarize_by_column and generate_report use args.group_by and optional args.aggregations.",
+].join("\n");
+const SUPPORTED_EXCEL_COMMANDS = new Set<ExcelCommandName>([
+  "set_cell",
+  "set_range",
+  "insert_row",
+  "insert_column",
+  "delete_row",
+  "split_column",
+  "fill_empty_cells",
+  "summarize_by_column",
+  "generate_report",
+]);
 
 type ResizeTarget = "explorer" | "codex";
 
@@ -544,6 +636,148 @@ function App() {
     }
   }
 
+  async function handleSpreadsheetAgentCommand(
+    model: string,
+    instruction: string,
+    nextMessages: ChatMessage[],
+    assistantMessageId: string,
+    streamId: string,
+  ) {
+    const targetFile = selectedWorkspaceFile;
+    if (!targetFile) return;
+
+    if (!targetFile.diskPath) {
+      updateAssistantMessage(assistantMessageId, "需要先通过桌面端文件选择器打开这个 Excel 文件，才能拿到真实磁盘路径并执行写入。");
+      return;
+    }
+
+    if (!targetFile.file.name.toLowerCase().endsWith(".xlsx")) {
+      updateAssistantMessage(assistantMessageId, "当前 Excel 命令执行器只支持 .xlsx 文件，请先另存为 .xlsx 后再操作。");
+      return;
+    }
+
+    let unlisten: (() => void) | null = null;
+    let assistantText = "";
+    let streamError = "";
+    const selectionText = documentSelection?.sourceType === "spreadsheet" ? documentSelection.text : "";
+    const selectionSheetName = parseSpreadsheetSelectionSheet(selectionText);
+    let commandSpecs: ExcelCommandsResponse | null = null;
+
+    try {
+      commandSpecs = await fetchExcelCommandSpecs();
+      const messages = buildExcelAgentMessages({
+        commandSpecs,
+        filename: targetFile.file.name,
+        instruction,
+        selectionText,
+        chatMessages: nextMessages,
+      });
+
+      unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
+        const payload = event.payload;
+        if (payload.stream_id !== streamId) return;
+
+        if (payload.kind === "delta" && payload.content) {
+          assistantText += payload.content;
+        }
+
+        if (payload.kind === "error" && payload.error) {
+          streamError = payload.error;
+        }
+      });
+
+      await invoke("chat_with_deepseek", {
+        model,
+        streamId,
+        messages,
+        textEditRequest: null,
+      });
+
+      if (streamError) {
+        throw new Error(streamError);
+      }
+    } finally {
+      unlisten?.();
+    }
+
+    const plan = parseExcelAgentPlan(assistantText);
+    if (!plan.sheet && selectionSheetName) {
+      plan.sheet = selectionSheetName;
+    }
+
+    if (plan.action === "answer_only" || plan.action === "ask_confirm") {
+      updateAssistantMessage(assistantMessageId, plan.message || stripMarkdownFence(assistantText.trim()) || "需要你再补充一下目标范围或操作内容。");
+      return;
+    }
+
+    const command = normalizeExcelCommandName(plan.command);
+    if (!command) {
+      updateAssistantMessage(assistantMessageId, "模型没有返回可执行的 Excel 命令，我没有改动文件。");
+      return;
+    }
+
+    if (commandSpecs && !isExcelCommandAvailable(command, commandSpecs)) {
+      updateAssistantMessage(assistantMessageId, buildUnavailableExcelCommandMessage(command));
+      return;
+    }
+
+    const executionResult = await executeExcelPlan({
+      command,
+      filePath: targetFile.diskPath,
+      plan,
+    });
+    await refreshExcelWorkspaceFile(targetFile, executionResult.output_path);
+
+    updateAssistantMessage(
+      assistantMessageId,
+      buildExcelExecutionStatus(plan, executionResult),
+    );
+  }
+
+  function updateAssistantMessage(assistantMessageId: string, text: string) {
+    setChatMessages((current) =>
+      current.map((message) => (message.id === assistantMessageId ? { ...message, text } : message)),
+    );
+  }
+
+  async function refreshExcelWorkspaceFile(targetFile: WorkspaceFile, outputPath: string) {
+    if (!canUseTauriEvents()) return;
+
+    try {
+      const content = new Uint8Array(await invoke<number[]>("read_file_bytes", { path: outputPath }));
+      const filename = outputPath.replace(/\\/g, "/").split("/").pop() ?? targetFile.file.name;
+      const refreshedFile = new File([content], filename, {
+        type: getFileMimeType(filename),
+        lastModified: Date.now(),
+      });
+
+      setWorkspaceFiles((current) => {
+        const existingOutputFile = current.find((item) => item.diskPath === outputPath);
+        if (existingOutputFile) {
+          return current.map((item) =>
+            item.id === existingOutputFile.id ? { ...item, file: refreshedFile, analysis: null } : item,
+          );
+        }
+
+        if (targetFile.diskPath === outputPath) {
+          return current.map((item) =>
+            item.id === targetFile.id ? { ...item, file: refreshedFile, analysis: null } : item,
+          );
+        }
+
+        const nextFile = {
+          id: `${outputPath}-${refreshedFile.lastModified}`,
+          file: refreshedFile,
+          diskPath: outputPath,
+          analysis: null,
+        };
+        return [...current, nextFile];
+      });
+    } catch (error) {
+      console.warn("Failed to refresh Excel preview after command execution.", error);
+    }
+  }
+
   async function sendMessage(model: string) {
     const text = draftMessage.trim();
     if (!text || isSendingMessage) return;
@@ -603,6 +837,11 @@ function App() {
     }
 
     try {
+      if (shouldUseSpreadsheetAgent(selectedWorkspaceFile)) {
+        await handleSpreadsheetAgentCommand(model, text, nextMessages, assistantMessageId, streamId);
+        return;
+      }
+
       const intent = await classifyTextSelectionIntent(model, text, documentSelection);
       if (intent === "ask_confirm") {
         setChatMessages((current) =>
@@ -983,6 +1222,196 @@ function normalizeTextSelectionIntent(intent: string): TextSelectionIntentAction
   }
 
   return "answer_only";
+}
+
+function shouldUseSpreadsheetAgent(selectedWorkspaceFile: WorkspaceFile | null) {
+  const filename = selectedWorkspaceFile?.file.name.toLowerCase() ?? "";
+
+  return filename.endsWith(".xlsx") || filename.endsWith(".xls");
+}
+
+async function fetchExcelCommandSpecs() {
+  const response = await fetch(`${DOCUMENT_SERVICE_URL}/excel/commands`);
+  if (!response.ok) {
+    throw new Error(`Excel command service returned ${response.status}`);
+  }
+
+  return (await response.json()) as ExcelCommandsResponse;
+}
+
+function getExcelCommandNames(commandSpecs: ExcelCommandsResponse) {
+  return new Set([...commandSpecs.basic, ...commandSpecs.advanced].map((spec) => spec.command));
+}
+
+function isExcelCommandAvailable(command: ExcelCommandName, commandSpecs: ExcelCommandsResponse) {
+  return getExcelCommandNames(commandSpecs).has(command);
+}
+
+function buildUnavailableExcelCommandMessage(command: ExcelCommandName) {
+  return [
+    `当前文档服务还没有开放 ${command} 命令，我没有改动文件。`,
+    "请重启 OfficeAgent 或文档服务后再试；如果是已打包版本，需要重新打包后使用新版服务。",
+  ].join("\n");
+}
+
+function buildExcelAgentMessages({
+  commandSpecs,
+  filename,
+  instruction,
+  selectionText,
+  chatMessages,
+}: {
+  commandSpecs: ExcelCommandsResponse;
+  filename: string;
+  instruction: string;
+  selectionText: string;
+  chatMessages: ChatMessage[];
+}): DeepSeekApiMessage[] {
+  const commandNames = [...getExcelCommandNames(commandSpecs)].join(", ");
+  const commands = [...commandSpecs.basic, ...commandSpecs.advanced]
+    .map((spec) => {
+      const requiredArgs = spec.required_args.length ? spec.required_args.join(", ") : "none";
+      const optionalArgs = spec.optional_args.length ? spec.optional_args.join(", ") : "none";
+
+      return `- ${spec.command}: ${spec.description} Required args: ${requiredArgs}. Optional args: ${optionalArgs}.`;
+    })
+    .join("\n");
+  const recentConversation = chatMessages
+    .slice(-6)
+    .map((message) => `${message.role}: ${message.text}`)
+    .join("\n");
+
+  return [
+    {
+      role: "system",
+      content: [
+        EXCEL_AGENT_SYSTEM_PROMPT,
+        `Only choose one of these currently available commands for action=excel_execute: ${commandNames}.`,
+        "If the user asks for an unavailable Excel operation, use action=ask_confirm and explain briefly in Chinese that the current document service needs to be restarted or updated.",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `Workbook filename: ${filename}`,
+        "",
+        "Supported commands:",
+        commands,
+        "",
+        selectionText.trim()
+          ? `Current spreadsheet selection:\n<<<\n${truncateSelectionContext(selectionText)}\n>>>`
+          : "Current spreadsheet selection: none",
+        "",
+        "Recent conversation:",
+        recentConversation,
+        "",
+        "User request:",
+        `<<<\n${instruction}\n>>>`,
+      ].join("\n"),
+    },
+  ];
+}
+
+function parseExcelAgentPlan(content: string): ExcelAgentPlan {
+  const trimmedContent = stripMarkdownFence(content.trim());
+  const directParse = tryParseExcelAgentPlan(trimmedContent);
+  if (directParse) return directParse;
+
+  const startIndex = trimmedContent.indexOf("{");
+  const endIndex = trimmedContent.lastIndexOf("}");
+  if (startIndex >= 0 && endIndex > startIndex) {
+    const extracted = trimmedContent.slice(startIndex, endIndex + 1);
+    const extractedParse = tryParseExcelAgentPlan(extracted);
+    if (extractedParse) return extractedParse;
+  }
+
+  throw new Error("Excel agent did not return valid JSON.");
+}
+
+function tryParseExcelAgentPlan(content: string): ExcelAgentPlan | null {
+  try {
+    const value = JSON.parse(content) as Partial<ExcelAgentPlan>;
+    if (
+      value.action === "excel_execute" ||
+      value.action === "answer_only" ||
+      value.action === "ask_confirm"
+    ) {
+      return {
+        action: value.action,
+        command: normalizeExcelCommandName(value.command),
+        sheet: typeof value.sheet === "string" ? value.sheet : null,
+        output_path: typeof value.output_path === "string" ? value.output_path : null,
+        args: isPlainObject(value.args) ? value.args : {},
+        message: typeof value.message === "string" ? value.message : "",
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeExcelCommandName(command: unknown): ExcelCommandName | undefined {
+  if (typeof command !== "string") return undefined;
+  if (SUPPORTED_EXCEL_COMMANDS.has(command as ExcelCommandName)) return command as ExcelCommandName;
+
+  return undefined;
+}
+
+function parseSpreadsheetSelectionSheet(selectionText: string) {
+  const firstLine = selectionText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.toLowerCase().startsWith("sheet:"));
+
+  return firstLine ? firstLine.slice("sheet:".length).trim() : "";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function executeExcelPlan({
+  command,
+  filePath,
+  plan,
+}: {
+  command: ExcelCommandName;
+  filePath: string;
+  plan: ExcelAgentPlan;
+}) {
+  const response = await fetch(`${DOCUMENT_SERVICE_URL}/excel/execute`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      command,
+      file_path: filePath,
+      sheet: plan.sheet || undefined,
+      output_path: plan.output_path || undefined,
+      args: plan.args ?? {},
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Excel command failed (${response.status}): ${errorText}`);
+  }
+
+  return (await response.json()) as ExcelExecuteResponse;
+}
+
+function buildExcelExecutionStatus(plan: ExcelAgentPlan, result: ExcelExecuteResponse) {
+  const details = [
+    plan.message?.trim(),
+    result.summary,
+    `影响行数：${result.rows_affected}，影响单元格：${result.cells_affected}`,
+    `输出文件：${result.output_path}`,
+  ].filter(Boolean);
+
+  return details.join("\n");
 }
 
 function getTextEditStatusMessage(operation: TextEditOperation, editText: string) {
