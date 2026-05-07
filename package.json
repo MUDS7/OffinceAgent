@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm run tauri:dev",
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "dev:frontend": "vite --host 127.0.0.1",
     "dev:python": "python services/document-service/run.py",
     "tauri:dev": "tauri dev",

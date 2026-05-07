@@ -1,0 +1,180 @@
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  ChatMessage,
+  DeepSeekApiMessage,
+  DocumentSelectionContext,
+  TextEditAgentRequest,
+  TextEditOperation,
+  TextSelectionIntentAction,
+  TextSelectionIntentResult,
+  WorkspaceFile,
+} from "../types";
+import { MAX_SELECTION_CONTEXT_CHARS } from "../constants";
+
+// ─── DeepSeek message building ────────────────────────────────────────────────
+
+export function buildDeepSeekMessages(
+  chatMessages: ChatMessage[],
+  documentSelection: DocumentSelectionContext | null,
+): DeepSeekApiMessage[] {
+  const messages = chatMessages.map((message) => ({
+    role: message.role,
+    content: message.text,
+  }));
+
+  if (!documentSelection?.text.trim()) {
+    return messages;
+  }
+
+  const rawSelectionText = documentSelection.text.trim();
+  const selectionText = truncateSelectionContext(rawSelectionText);
+  const isTruncated = rawSelectionText.length > MAX_SELECTION_CONTEXT_CHARS;
+  const contextMessage: DeepSeekApiMessage = {
+    role: "system",
+    content: [
+      "你是 OfficeAgent。用户正在针对文件预览页中选中的片段提问。",
+      "请优先依据这个选中片段回答；如果问题需要片段以外的信息，请明确说明依据不足。",
+      `文件名：${documentSelection.filename}`,
+      `文件类型：${getSelectionSourceTypeLabel(documentSelection.sourceType)}`,
+      `选中片段${isTruncated ? "（已截断）" : ""}：`,
+      selectionText,
+    ].join("\n"),
+  };
+
+  return [contextMessage, ...messages];
+}
+
+export function truncateSelectionContext(text: string): string {
+  const trimmedText = text.trim();
+  const context = trimmedText.slice(0, MAX_SELECTION_CONTEXT_CHARS);
+  return context.length < trimmedText.length ? `${context}\n...[selection truncated]` : context;
+}
+
+function getSelectionSourceTypeLabel(sourceType: DocumentSelectionContext["sourceType"]): string {
+  if (sourceType === "pdf") return "PDF";
+  if (sourceType === "spreadsheet") return "Excel";
+  return "文本";
+}
+
+// ─── Text-edit intent classification ─────────────────────────────────────────
+
+export async function classifyTextSelectionIntent(
+  model: string,
+  instruction: string,
+  documentSelection: DocumentSelectionContext | null,
+): Promise<TextSelectionIntentAction> {
+  if (documentSelection?.sourceType !== "text") {
+    return "answer_only";
+  }
+
+  let result: TextSelectionIntentResult;
+  try {
+    result = await invoke<TextSelectionIntentResult>("classify_text_selection_intent", {
+      model,
+      request: {
+        filePath: documentSelection.filePath,
+        filename: documentSelection.filename,
+        selectedText: documentSelection.text,
+        instruction,
+      },
+    });
+  } catch (error) {
+    console.warn("Text selection intent classification failed; falling back to answer mode.", error);
+    return "answer_only";
+  }
+
+  return normalizeTextSelectionIntent(result.intent);
+}
+
+function normalizeTextSelectionIntent(intent: string): TextSelectionIntentAction {
+  if (
+    intent === "replace_selection" ||
+    intent === "insert_after_selection" ||
+    intent === "ask_confirm" ||
+    intent === "answer_only"
+  ) {
+    return intent;
+  }
+  return "answer_only";
+}
+
+// ─── Text-edit request building ───────────────────────────────────────────────
+
+export function buildTextEditAgentRequest(
+  instruction: string,
+  documentSelection: DocumentSelectionContext | null,
+  intent: TextSelectionIntentAction,
+): TextEditAgentRequest | null {
+  if (
+    (intent !== "replace_selection" && intent !== "insert_after_selection") ||
+    documentSelection?.sourceType !== "text"
+  ) {
+    return null;
+  }
+
+  const start = documentSelection.start ?? 0;
+  const end = documentSelection.end ?? start + documentSelection.text.length;
+
+  return {
+    filePath: documentSelection.filePath,
+    start,
+    end,
+    selectedText: documentSelection.text,
+    instruction,
+    operation: intent,
+  };
+}
+
+// ─── Spreadsheet agent helpers ────────────────────────────────────────────────
+
+export function shouldUseSpreadsheetAgent(selectedWorkspaceFile: WorkspaceFile | null): boolean {
+  const filename = selectedWorkspaceFile?.file.name.toLowerCase() ?? "";
+  return filename.endsWith(".xlsx") || filename.endsWith(".xls");
+}
+
+// ─── Agent text-edit result handling ─────────────────────────────────────────
+
+export function getTextEditStatusMessage(
+  operation: TextEditOperation,
+  editText: string,
+): string {
+  if (operation === "insert_after_selection") {
+    return "已在选区下方新增内容。";
+  }
+  if (!editText.length) {
+    return "已删除选中文本。";
+  }
+  return "已替换选中文本。";
+}
+
+export function extractAgentTextEditPayload(text: string): string {
+  const normalizedText = text.replace(/\r\n?/g, "\n");
+  const lowerText = normalizedText.toLowerCase();
+  const startTag = "<officeagent_edit>";
+  const endTag = "</officeagent_edit>";
+  const startIndex = lowerText.indexOf(startTag);
+
+  if (startIndex >= 0) {
+    const payloadStart = startIndex + startTag.length;
+    const endIndex = lowerText.indexOf(endTag, payloadStart);
+    const payload =
+      endIndex >= 0
+        ? normalizedText.slice(payloadStart, endIndex)
+        : normalizedText.slice(payloadStart);
+    return trimEditPayloadWrapperLineBreaks(payload);
+  }
+
+  return stripMarkdownFence(normalizedText.trim());
+}
+
+function trimEditPayloadWrapperLineBreaks(text: string): string {
+  let payload = text;
+  if (payload.startsWith("\n")) payload = payload.slice(1);
+  if (payload.endsWith("\n")) payload = payload.slice(0, -1);
+  return payload;
+}
+
+export function stripMarkdownFence(text: string): string {
+  const fenceMatch = text.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  return fenceMatch ? fenceMatch[1] : text;
+}
