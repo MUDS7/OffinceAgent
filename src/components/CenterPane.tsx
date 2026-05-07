@@ -31,11 +31,13 @@ export function CenterPane({
   return (
     <section className="preview-pane" aria-label="文件预览" onPointerDown={handlePreviewPanePointerDown}>
       <PreviewHeader
+        activeFileId={activeFile?.id}
         activeFilename={activeFilename}
         isChecking={isChecking}
         previewTabs={previewTabs}
         onClosePreviewTab={onClosePreviewTab}
         onRefreshStatus={onRefreshStatus}
+        onSaveActiveFile={onSaveTextFile}
         onSelectPreviewTab={onSelectPreviewTab}
       />
 
@@ -79,7 +81,13 @@ export function CenterPane({
     }
 
     if (isSpreadsheetPreview) {
-      return <SpreadsheetPreview activeFile={activeFile} onSelectionContextChange={onSelectionContextChange} />;
+      return (
+        <SpreadsheetPreview
+          activeFile={activeFile}
+          onSaveFile={onSaveTextFile}
+          onSelectionContextChange={onSelectionContextChange}
+        />
+      );
     }
 
     return (

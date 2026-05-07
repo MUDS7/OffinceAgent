@@ -19,6 +19,7 @@ fn main() {
             deepseek::chat_with_deepseek,
             deepseek::classify_text_selection_intent,
             file_system::save_file_to_disk,
+            file_system::save_file_bytes,
             file_system::read_file_text,
             file_system::read_file_bytes,
             file_system::list_dir_files

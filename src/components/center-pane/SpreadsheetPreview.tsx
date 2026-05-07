@@ -7,6 +7,7 @@ import type { DocumentSelectionContext, PreviewFile } from "./types";
 
 type SpreadsheetPreviewProps = {
   activeFile: PreviewFile;
+  onSaveFile: (fileId: string) => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
 };
 
@@ -47,7 +48,7 @@ const MIN_ROW_HEIGHT = 22;
 const MAX_ROW_HEIGHT = 180;
 const UI_SCALE_FALLBACK = 0.8;
 
-export function SpreadsheetPreview({ activeFile, onSelectionContextChange }: SpreadsheetPreviewProps) {
+export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextChange }: SpreadsheetPreviewProps) {
   const [previewState, setPreviewState] = useState<{
     error: string;
     isLoading: boolean;
@@ -148,6 +149,20 @@ export function SpreadsheetPreview({ activeFile, onSelectionContextChange }: Spr
       window.removeEventListener("pointercancel", stopDrag);
     };
   }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        onSaveFile(activeFile.id);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeFile.id, onSaveFile]);
 
   const normalizedSelection = useMemo(
     () => (selectionRange ? normalizeSelectionRange(selectionRange) : null),

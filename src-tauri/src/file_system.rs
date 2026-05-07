@@ -8,6 +8,11 @@ pub(crate) fn save_file_to_disk(path: String, content: String) -> Result<(), Str
 }
 
 #[tauri::command]
+pub(crate) fn save_file_bytes(path: String, content: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|error| format!("Failed to save file bytes: {error}"))
+}
+
+#[tauri::command]
 pub(crate) fn read_file_text(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))
 }

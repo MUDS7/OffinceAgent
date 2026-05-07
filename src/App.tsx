@@ -90,6 +90,8 @@ type ExcelExecuteResponse = {
   category: "basic" | "advanced";
   file_path: string;
   output_path: string;
+  workbook_base64?: string | null;
+  saved_to_disk?: boolean;
   sheet?: string | null;
   rows_affected: number;
   cells_affected: number;
@@ -489,23 +491,13 @@ function App() {
     });
   }
 
-  async function saveTextFile(fileId: string) {
+  async function saveWorkspaceFile(fileId: string) {
     const currentItem = workspaceFiles.find((item) => item.id === fileId);
     if (!currentItem) return;
 
-    // Use unsaved (dirty) content if available; otherwise read the file's current content
-    // so that Ctrl+S works even on unmodified files.
     const unsavedText = unsavedContents[fileId];
-    let textToSave: string;
-    if (unsavedText !== undefined) {
-      textToSave = unsavedText;
-    } else {
-      try {
-        textToSave = await currentItem.file.text();
-      } catch {
-        return;
-      }
-    }
+    const fileExtension = currentItem.file.name.split(".").pop()?.toLowerCase() ?? "";
+    const isTextSave = unsavedText !== undefined || !BINARY_PREVIEW_EXTENSIONS.has(fileExtension);
 
     // Prefer the persisted diskPath over the transient file.path property.
     let filePath: string | undefined = currentItem.diskPath;
@@ -532,8 +524,17 @@ function App() {
       return;
     }
 
+    let savedContent: BlobPart = currentItem.file;
     try {
-      await invoke("save_file_to_disk", { path: filePath, content: textToSave });
+      if (isTextSave) {
+        const textToSave = unsavedText ?? (await currentItem.file.text());
+        savedContent = textToSave;
+        await invoke("save_file_to_disk", { path: filePath, content: textToSave });
+      } else {
+        const bytesToSave = Array.from(new Uint8Array(await currentItem.file.arrayBuffer()));
+        savedContent = new Uint8Array(bytesToSave);
+        await invoke("save_file_bytes", { path: filePath, content: bytesToSave });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setErrorMessage(`保存文件到磁盘失败: ${message}`);
@@ -547,7 +548,7 @@ function App() {
       wsFiles.map((item) => {
         if (item.id !== fileId) return item;
 
-        const file = new File([textToSave], item.file.name, {
+        const file = new File([savedContent], item.file.name, {
           type: item.file.type || getFileMimeType(item.file.name),
           lastModified: Date.now(),
         });
@@ -726,7 +727,7 @@ function App() {
       filePath: targetFile.diskPath,
       plan,
     });
-    await refreshExcelWorkspaceFile(targetFile, executionResult.output_path);
+    await refreshExcelWorkspaceFile(targetFile, executionResult);
 
     updateAssistantMessage(
       assistantMessageId,
@@ -740,38 +741,51 @@ function App() {
     );
   }
 
-  async function refreshExcelWorkspaceFile(targetFile: WorkspaceFile, outputPath: string) {
-    if (!canUseTauriEvents()) return;
+  async function refreshExcelWorkspaceFile(targetFile: WorkspaceFile, result: ExcelExecuteResponse) {
+    const outputPath = result.output_path;
 
     try {
-      const content = new Uint8Array(await invoke<number[]>("read_file_bytes", { path: outputPath }));
+      const content = result.workbook_base64
+        ? decodeBase64Bytes(result.workbook_base64)
+        : new Uint8Array(await invoke<number[]>("read_file_bytes", { path: outputPath }));
       const filename = outputPath.replace(/\\/g, "/").split("/").pop() ?? targetFile.file.name;
       const refreshedFile = new File([content], filename, {
         type: getFileMimeType(filename),
         lastModified: Date.now(),
       });
+      const nextDiskPath = result.saved_to_disk || outputPath === targetFile.diskPath ? outputPath : undefined;
+      const nextFileId = `${outputPath}-${refreshedFile.lastModified}`;
+      const dirtyFileIdsToMark = new Set<string>([targetFile.id]);
 
       setWorkspaceFiles((current) => {
         const existingOutputFile = current.find((item) => item.diskPath === outputPath);
         if (existingOutputFile) {
+          dirtyFileIdsToMark.add(existingOutputFile.id);
           return current.map((item) =>
             item.id === existingOutputFile.id ? { ...item, file: refreshedFile, analysis: null } : item,
           );
         }
 
         if (targetFile.diskPath === outputPath) {
+          dirtyFileIdsToMark.add(targetFile.id);
           return current.map((item) =>
             item.id === targetFile.id ? { ...item, file: refreshedFile, analysis: null } : item,
           );
         }
 
+        dirtyFileIdsToMark.add(nextFileId);
         const nextFile = {
-          id: `${outputPath}-${refreshedFile.lastModified}`,
+          id: nextFileId,
           file: refreshedFile,
-          diskPath: outputPath,
+          diskPath: nextDiskPath,
           analysis: null,
         };
         return [...current, nextFile];
+      });
+      setDirtyFileIds((current) => {
+        const next = new Set(current);
+        dirtyFileIdsToMark.forEach((id) => next.add(id));
+        return [...next];
       });
     } catch (error) {
       console.warn("Failed to refresh Excel preview after command execution.", error);
@@ -1099,7 +1113,7 @@ function App() {
           onSelectionContextChange={setDocumentSelection}
           onSelectPreviewTab={setSelectedFileId}
           onUpdateTextFile={updateTextFile}
-          onSaveTextFile={saveTextFile}
+          onSaveTextFile={saveWorkspaceFile}
         />
 
         <div
@@ -1391,6 +1405,7 @@ async function executeExcelPlan({
       file_path: filePath,
       sheet: plan.sheet || undefined,
       output_path: plan.output_path || undefined,
+      save_to_disk: false,
       args: plan.args ?? {},
     }),
   });
@@ -1407,6 +1422,9 @@ function buildExcelExecutionStatus(plan: ExcelAgentPlan, result: ExcelExecuteRes
   const details = [
     plan.message?.trim(),
     result.summary,
+    result.saved_to_disk
+      ? `已保存到：${result.output_path}`
+      : "已更新预览，尚未保存；请按 Ctrl+S 或点击保存按钮写入磁盘。",
     `影响行数：${result.rows_affected}，影响单元格：${result.cells_affected}`,
     `输出文件：${result.output_path}`,
   ].filter(Boolean);
@@ -1549,6 +1567,15 @@ function getFileMimeType(filename: string) {
   if (extension === "ts" || extension === "tsx") return "text/typescript";
 
   return "text/plain";
+}
+
+function decodeBase64Bytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function getFileRelativePath(file: File) {

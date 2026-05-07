@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base64 import b64encode
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
@@ -49,6 +51,7 @@ class ExcelExecuteRequest(BaseModel):
     path: str | None = None
     sheet: str | None = None
     output_path: str | None = None
+    save_to_disk: bool = False
     args: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -57,6 +60,8 @@ class ExcelExecuteResponse(BaseModel):
     category: ExcelCommandCategory
     file_path: str
     output_path: str
+    workbook_base64: str | None = None
+    saved_to_disk: bool = False
     sheet: str | None = None
     rows_affected: int = 0
     cells_affected: int = 0
@@ -156,7 +161,7 @@ def get_excel_commands() -> ExcelCommandsResponse:
 
 def execute_excel_command(request: ExcelExecuteRequest) -> ExcelExecuteResponse:
     source_path = _resolve_source_path(request)
-    output_path = _resolve_output_path(source_path, request.output_path)
+    output_path = _resolve_output_path(source_path, request.output_path, request.save_to_disk)
     _ensure_xlsx(source_path)
 
     if request.command == "set_cell":
@@ -187,12 +192,12 @@ def _set_cell(request: ExcelExecuteRequest, source_path: Path, output_path: Path
     workbook = load_workbook(source_path)
     worksheet = _select_sheet(workbook, request.sheet)
     worksheet[cell] = value
-    workbook.save(output_path)
 
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         cells_affected=1,
         summary=f"Set {worksheet.title}!{cell}.",
@@ -211,13 +216,13 @@ def _set_range(request: ExcelExecuteRequest, source_path: Path, output_path: Pat
             worksheet.cell(row=start_row + row_offset, column=start_column + column_offset, value=value)
             cells_affected += 1
 
-    workbook.save(output_path)
     end_cell = f"{get_column_letter(start_column + max(len(row) for row in values) - 1)}{start_row + len(values) - 1}"
 
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         cells_affected=cells_affected,
         summary=f"Set range {worksheet.title}!{get_column_letter(start_column)}{start_row}:{end_cell}.",
@@ -240,11 +245,11 @@ def _insert_row(request: ExcelExecuteRequest, source_path: Path, output_path: Pa
                 worksheet.cell(row=index + row_offset, column=1 + column_offset, value=value)
                 cells_affected += 1
 
-    workbook.save(output_path)
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         rows_affected=amount,
         cells_affected=cells_affected,
@@ -268,11 +273,11 @@ def _insert_column(request: ExcelExecuteRequest, source_path: Path, output_path:
                 worksheet.cell(row=1 + row_offset, column=index + column_offset, value=value)
                 cells_affected += 1
 
-    workbook.save(output_path)
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         rows_affected=amount,
         cells_affected=cells_affected,
@@ -487,12 +492,12 @@ def _delete_row(request: ExcelExecuteRequest, source_path: Path, output_path: Pa
     workbook = load_workbook(source_path)
     worksheet = _select_sheet(workbook, request.sheet)
     worksheet.delete_rows(index, amount)
-    workbook.save(output_path)
 
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         rows_affected=amount,
         summary=f"Deleted {amount} row(s) at {worksheet.title}!{index}.",
@@ -532,12 +537,12 @@ def _split_column(request: ExcelExecuteRequest, source_path: Path, output_path: 
             worksheet.cell(row=target_row + row_offset, column=target_column + column_offset, value=value)
             cells_affected += 1
 
-    workbook.save(output_path)
     end_cell = f"{get_column_letter(target_column + max_width - 1)}{target_row + len(split_rows) - 1}"
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         rows_affected=len(split_rows),
         cells_affected=cells_affected,
@@ -581,11 +586,11 @@ def _fill_empty_cells(request: ExcelExecuteRequest, source_path: Path, output_pa
                     pending_blank_cells = []
                 previous_value = cell.value
 
-    workbook.save(output_path)
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         worksheet.title,
         cells_affected=cells_affected,
         summary=f"Filled {cells_affected} empty cell(s) in {worksheet.title}.",
@@ -598,19 +603,17 @@ def _summarize_by_column(request: ExcelExecuteRequest, source_path: Path, output
     dataframe = _read_sheet_dataframe(source_path, request.sheet)
     summary = _build_summary_dataframe(dataframe, group_by, request.args.get("aggregations"))
 
-    writer_kwargs: dict[str, Any] = {"engine": "openpyxl", "mode": "a" if output_path == source_path else "w"}
-    if output_path == source_path:
-        writer_kwargs["if_sheet_exists"] = "replace"
+    workbook = load_workbook(source_path)
+    if output_sheet in workbook.sheetnames:
+        del workbook[output_sheet]
+    worksheet = workbook.create_sheet(output_sheet)
+    _write_dataframe_to_worksheet(summary, worksheet)
 
-    with pd.ExcelWriter(output_path, **writer_kwargs) as writer:
-        if output_path != source_path:
-            dataframe.to_excel(writer, sheet_name=request.sheet or "Data", index=False)
-        summary.to_excel(writer, sheet_name=output_sheet, index=False)
-
-    return _response(
+    return _finish_openpyxl_response(
         request,
         source_path,
         output_path,
+        workbook,
         output_sheet,
         rows_affected=len(summary),
         summary=f"Created summary sheet '{output_sheet}' grouped by '{group_by}'.",
@@ -627,7 +630,14 @@ def _generate_report(request: ExcelExecuteRequest, source_path: Path, output_pat
     dataframe = _read_sheet_dataframe(source_path, request.sheet)
     summary = _build_summary_dataframe(dataframe, group_by, request.args.get("aggregations"))
 
-    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    workbook_base64: str | None = None
+    writer_target: Path | BytesIO
+    if request.save_to_disk:
+        writer_target = output_path
+    else:
+        writer_target = BytesIO()
+
+    with pd.ExcelWriter(writer_target, engine="xlsxwriter") as writer:
         summary.to_excel(writer, sheet_name="Summary", startrow=2, index=False)
         workbook = writer.book
         worksheet = writer.sheets["Summary"]
@@ -643,6 +653,9 @@ def _generate_report(request: ExcelExecuteRequest, source_path: Path, output_pat
         worksheet.freeze_panes(3, 0)
         worksheet.autofilter(2, 0, 2 + len(summary), max(len(summary.columns) - 1, 0))
 
+    if not request.save_to_disk:
+        workbook_base64 = _encode_bytes(writer_target.getvalue())
+
     return _response(
         request,
         source_path,
@@ -651,6 +664,8 @@ def _generate_report(request: ExcelExecuteRequest, source_path: Path, output_pat
         rows_affected=len(summary),
         summary=f"Generated report workbook grouped by '{group_by}'.",
         data=_json_records(summary),
+        workbook_base64=workbook_base64,
+        saved_to_disk=request.save_to_disk,
     )
 
 
@@ -667,12 +682,13 @@ def _resolve_source_path(request: ExcelExecuteRequest) -> Path:
     return path
 
 
-def _resolve_output_path(source_path: Path, output_path: str | None) -> Path:
+def _resolve_output_path(source_path: Path, output_path: str | None, save_to_disk: bool) -> Path:
     if not output_path:
         return source_path
 
     resolved = Path(output_path).expanduser().resolve()
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if save_to_disk:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved
 
 
@@ -914,8 +930,74 @@ def _json_records(dataframe: pd.DataFrame) -> list[dict[str, Any]]:
     return dataframe.where(pd.notnull(dataframe), None).to_dict(orient="records")
 
 
+def _write_dataframe_to_worksheet(dataframe: pd.DataFrame, worksheet: Any) -> None:
+    for column_index, column_name in enumerate(dataframe.columns, start=1):
+        worksheet.cell(row=1, column=column_index, value=str(column_name))
+
+    for row_index, row_values in enumerate(dataframe.itertuples(index=False, name=None), start=2):
+        for column_index, value in enumerate(row_values, start=1):
+            worksheet.cell(row=row_index, column=column_index, value=_excel_cell_value(value))
+
+
+def _excel_cell_value(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            return value
+    return value
+
+
 def _command_category(command: ExcelCommandName) -> ExcelCommandCategory:
     return "basic" if command in BASIC_EXCEL_COMMANDS else "advanced"
+
+
+def _finish_openpyxl_response(
+    request: ExcelExecuteRequest,
+    source_path: Path,
+    output_path: Path,
+    workbook: Any,
+    sheet: str | None,
+    *,
+    rows_affected: int = 0,
+    cells_affected: int = 0,
+    summary: str,
+    data: list[dict[str, Any]] | None = None,
+) -> ExcelExecuteResponse:
+    workbook_base64 = _save_openpyxl_workbook(workbook, output_path, request.save_to_disk)
+    return _response(
+        request,
+        source_path,
+        output_path,
+        sheet,
+        rows_affected=rows_affected,
+        cells_affected=cells_affected,
+        summary=summary,
+        data=data,
+        workbook_base64=workbook_base64,
+        saved_to_disk=request.save_to_disk,
+    )
+
+
+def _save_openpyxl_workbook(workbook: Any, output_path: Path, save_to_disk: bool) -> str | None:
+    try:
+        if save_to_disk:
+            workbook.save(output_path)
+            return None
+
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return _encode_bytes(buffer.getvalue())
+    finally:
+        workbook.close()
+
+
+def _encode_bytes(content: bytes) -> str:
+    return b64encode(content).decode("ascii")
 
 
 def _response(
@@ -928,12 +1010,16 @@ def _response(
     cells_affected: int = 0,
     summary: str,
     data: list[dict[str, Any]] | None = None,
+    workbook_base64: str | None = None,
+    saved_to_disk: bool = False,
 ) -> ExcelExecuteResponse:
     return ExcelExecuteResponse(
         command=request.command,
         category=_command_category(request.command),
         file_path=str(source_path),
         output_path=str(output_path),
+        workbook_base64=workbook_base64,
+        saved_to_disk=saved_to_disk,
         sheet=sheet,
         rows_affected=rows_affected,
         cells_affected=cells_affected,

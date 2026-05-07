@@ -672,6 +672,26 @@ body.is-resizing-spreadsheet.row-resize * {
   cursor: pointer;
 }
 
+.editor-action-button {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.editor-action-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.editor-action-button:not(:disabled):hover {
+  color: #222222;
+}
+
 .error-line {
   grid-row: 2;
   display: flex;

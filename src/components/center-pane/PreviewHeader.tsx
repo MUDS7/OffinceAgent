@@ -6,6 +6,7 @@ import {
   MoreHorizontal,
   RefreshCw,
   RotateCcw,
+  Save,
   SplitSquareVertical,
   X,
 } from "lucide-react";
@@ -13,20 +14,24 @@ import { EditorTabIcon } from "./filePreviewUtils";
 import type { PreviewTab } from "./types";
 
 type PreviewHeaderProps = {
+  activeFileId?: string;
   activeFilename: string;
   isChecking: boolean;
   previewTabs: PreviewTab[];
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
+  onSaveActiveFile: (fileId: string) => void;
   onSelectPreviewTab: (fileId: string) => void;
 };
 
 export function PreviewHeader({
+  activeFileId,
   activeFilename,
   isChecking,
   previewTabs,
   onClosePreviewTab,
   onRefreshStatus,
+  onSaveActiveFile,
   onSelectPreviewTab,
 }: PreviewHeaderProps) {
   return (
@@ -74,6 +79,17 @@ export function PreviewHeader({
       </div>
       <div className="editor-actions">
         <Bot size={20} />
+        <button
+          className="editor-action-button"
+          type="button"
+          title="保存"
+          disabled={!activeFileId}
+          onClick={() => {
+            if (activeFileId) onSaveActiveFile(activeFileId);
+          }}
+        >
+          <Save size={18} />
+        </button>
         <Copy size={19} />
         <RotateCcw size={19} />
         <RefreshCw className={isChecking ? "spin" : ""} size={19} onClick={onRefreshStatus} />
