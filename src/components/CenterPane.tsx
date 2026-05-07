@@ -2,9 +2,10 @@ import { FileWarning, Info, XCircle } from "lucide-react";
 import type { PointerEvent } from "react";
 import { PreviewHeader } from "./center-pane/PreviewHeader";
 import { PdfTextPreview } from "./center-pane/PdfTextPreview";
+import { SpreadsheetPreview } from "./center-pane/SpreadsheetPreview";
 import { TextFilePreview } from "./center-pane/TextFilePreview";
 import type { CenterPaneProps } from "./center-pane/types";
-import { getFileExtension, isEditableTextFile } from "./center-pane/filePreviewUtils";
+import { getFileExtension, isEditableTextFile, isSpreadsheetExtension } from "./center-pane/filePreviewUtils";
 
 export function CenterPane({
   activeFilename,
@@ -25,6 +26,7 @@ export function CenterPane({
   const activeExtension = getFileExtension(activeFile?.filename ?? "");
   const isTextPreview = isEditableTextFile(activeFile?.file, activeExtension);
   const isPdfPreview = activeExtension === "pdf";
+  const isSpreadsheetPreview = isSpreadsheetExtension(activeExtension);
 
   return (
     <section className="preview-pane" aria-label="文件预览" onPointerDown={handlePreviewPanePointerDown}>
@@ -76,6 +78,10 @@ export function CenterPane({
       return <PdfTextPreview activeFile={activeFile} onSelectionContextChange={onSelectionContextChange} />;
     }
 
+    if (isSpreadsheetPreview) {
+      return <SpreadsheetPreview activeFile={activeFile} onSelectionContextChange={onSelectionContextChange} />;
+    }
+
     return (
       <div className="editor-content preview-empty">
         <FileWarning size={30} />
@@ -88,7 +94,7 @@ export function CenterPane({
     const target = event.target;
 
     if (!(target instanceof Element)) return;
-    if (target.closest(".preview-text-editor, .pdf-viewer-shell")) return;
+    if (target.closest(".preview-text-editor, .pdf-viewer-shell, .spreadsheet-preview")) return;
 
     onSelectionContextChange(null);
   }

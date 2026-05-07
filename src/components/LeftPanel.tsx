@@ -20,6 +20,7 @@ import {
   Search,
   Settings,
   SquareMinus,
+  Table2,
   Trash2,
 } from "lucide-react";
 
@@ -500,6 +501,7 @@ function FileIcon({ filename }: { filename: string }) {
   if (filename.endsWith(".json")) return <Braces className="json-icon" size={15} />;
   if (filename.endsWith(".ts") || filename.endsWith(".tsx")) return <Code2 className="ts-icon" size={15} />;
   if (filename.endsWith(".html")) return <Code2 className="html-icon" size={15} />;
+  if (filename.endsWith(".xlsx") || filename.endsWith(".xls")) return <Table2 className="spreadsheet-tab-icon" size={15} />;
   if (filename === ".gitignore") return <GitBranch className="git-icon" size={15} />;
   if (!filename) return <FolderOpen className="md-icon" size={15} />;
   return <FileText className="md-icon" size={15} />;

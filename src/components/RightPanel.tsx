@@ -6,6 +6,7 @@ import {
   Maximize2,
   Paperclip,
   Sparkles,
+  Table2,
   X,
 } from "lucide-react";
 import type { KeyboardEvent } from "react";
@@ -23,7 +24,7 @@ type DocumentSelectionContext = {
   fileId: string;
   filePath: string;
   filename: string;
-  sourceType: "pdf" | "text";
+  sourceType: "pdf" | "spreadsheet" | "text";
   start?: number;
   end?: number;
   text: string;
@@ -215,5 +216,7 @@ function ChatMessageContent({ message }: { message: ChatMessage }) {
 }
 
 function FileTextIcon({ sourceType }: { sourceType: DocumentSelectionContext["sourceType"] }) {
+  if (sourceType === "spreadsheet") return <Table2 size={15} />;
+
   return sourceType === "pdf" ? <Paperclip size={15} /> : <Sparkles size={15} />;
 }

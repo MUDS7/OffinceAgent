@@ -1,4 +1,4 @@
-import { Atom, Braces, Code2, FileText, Hash } from "lucide-react";
+import { Atom, Braces, Code2, FileText, Hash, Table2 } from "lucide-react";
 
 export function EditorTabIcon({ filename }: { filename: string }) {
   const extension = getFileExtension(filename);
@@ -6,9 +6,14 @@ export function EditorTabIcon({ filename }: { filename: string }) {
   if (extension === "css") return <Hash className="css-tab-icon" size={16} />;
   if (extension === "tsx" || extension === "jsx") return <Atom className="react-tab-icon" size={16} />;
   if (extension === "json") return <Braces className="json-tab-icon" size={16} />;
+  if (isSpreadsheetExtension(extension)) return <Table2 className="spreadsheet-tab-icon" size={16} />;
   if (extension === "ts" || extension === "js" || extension === "html") return <Code2 className="code-tab-icon" size={16} />;
 
   return <FileText className="file-tab-icon" size={16} />;
+}
+
+export function isSpreadsheetExtension(extension: string) {
+  return extension === "xlsx" || extension === "xls";
 }
 
 export function getFileExtension(filename: string) {

@@ -56,7 +56,7 @@ type DocumentSelectionContext = {
   fileId: string;
   filePath: string;
   filename: string;
-  sourceType: "pdf" | "text";
+  sourceType: "pdf" | "spreadsheet" | "text";
   start?: number;
   end?: number;
   text: string;
@@ -105,6 +105,8 @@ const MIN_EXPLORER_WIDTH = 240;
 const MIN_CODEX_WIDTH = 340;
 const HIDE_DRAG_DISTANCE = 48;
 const MAX_SELECTION_CONTEXT_CHARS = 12000;
+const DOCUMENT_EXTENSIONS = ["txt", "md", "csv", "json", "pdf", "xlsx", "xls"];
+const BINARY_PREVIEW_EXTENSIONS = new Set(["pdf", "xlsx", "xls"]);
 
 type ResizeTarget = "explorer" | "codex";
 
@@ -204,7 +206,7 @@ function App() {
         const { open } = await import("@tauri-apps/plugin-dialog");
         const selected = await open({
           multiple: true,
-          filters: [{ name: "Documents", extensions: ["txt", "md", "csv", "json", "pdf"] }],
+          filters: [{ name: "Documents", extensions: DOCUMENT_EXTENSIONS }],
         });
         if (!selected) return;
         const paths = Array.isArray(selected) ? selected : [selected];
@@ -242,9 +244,11 @@ function App() {
     for (const filePath of filePaths) {
       const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
       const extension = filename.split(".").pop()?.toLowerCase() ?? "";
-      const isPdf = extension === "pdf";
+      const isBinaryPreview = BINARY_PREVIEW_EXTENSIONS.has(extension);
       try {
-        const content = isPdf ? "" : await invoke<string>("read_file_text", { path: filePath });
+        const content = isBinaryPreview
+          ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
+          : await invoke<string>("read_file_text", { path: filePath });
         const file = new File([content], filename, {
           type: getFileMimeType(filename),
           lastModified: Date.now(),
@@ -272,7 +276,7 @@ function App() {
     try {
       const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
       const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
-      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf)$/i.test(p));
+      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf|xlsx|xls)$/i.test(p));
       if (!supported.length) {
         setErrorMessage("该文件夹中没有支持的文件类型");
         return;
@@ -281,9 +285,11 @@ function App() {
       for (const filePath of supported) {
         const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
         const extension = filename.split(".").pop()?.toLowerCase() ?? "";
-        const isPdf = extension === "pdf";
+        const isBinaryPreview = BINARY_PREVIEW_EXTENSIONS.has(extension);
         try {
-          const content = isPdf ? "" : await invoke<string>("read_file_text", { path: filePath });
+          const content = isBinaryPreview
+            ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
+            : await invoke<string>("read_file_text", { path: filePath });
           const relativePath = normalizeFilePath(filePath.replace(folderPath, rootName));
           const file = new File([content], filename, {
             type: getFileMimeType(filename),
@@ -797,7 +803,7 @@ function App() {
         className="hidden-file-input"
         type="file"
         multiple
-        accept=".txt,.md,.csv,.json,.pdf,.docx"
+        accept=".txt,.md,.csv,.json,.pdf,.xlsx,.xls,.docx"
         onChange={(event) => handleFileSelection(event.target.files)}
       />
       <input
@@ -1077,7 +1083,7 @@ function buildDeepSeekMessages(
       "你是 OfficeAgent。用户正在针对文件预览页中选中的片段提问。",
       "请优先依据这个选中片段回答；如果问题需要片段以外的信息，请明确说明依据不足。",
       `文件名：${documentSelection.filename}`,
-      `文件类型：${documentSelection.sourceType === "pdf" ? "PDF" : "文本"}`,
+      `文件类型：${getSelectionSourceTypeLabel(documentSelection.sourceType)}`,
       `选中片段${isTruncated ? "（已截断）" : ""}：`,
       selectionText,
     ].join("\n"),
@@ -1093,11 +1099,20 @@ function truncateSelectionContext(text: string) {
   return context.length < trimmedText.length ? `${context}\n...[selection truncated]` : context;
 }
 
+function getSelectionSourceTypeLabel(sourceType: DocumentSelectionContext["sourceType"]) {
+  if (sourceType === "pdf") return "PDF";
+  if (sourceType === "spreadsheet") return "Excel";
+
+  return "文本";
+}
+
 function getFileMimeType(filename: string) {
   const extension = filename.split(".").pop()?.toLowerCase();
 
   if (extension === "json") return "application/json";
   if (extension === "pdf") return "application/pdf";
+  if (extension === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (extension === "xls") return "application/vnd.ms-excel";
   if (extension === "txt") return "text/plain";
   if (extension === "md") return "text/markdown";
   if (extension === "csv") return "text/csv";

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf"];
+const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf", "xlsx", "xls"];
 
 #[tauri::command]
 pub(crate) fn save_file_to_disk(path: String, content: String) -> Result<(), String> {
@@ -10,6 +10,11 @@ pub(crate) fn save_file_to_disk(path: String, content: String) -> Result<(), Str
 #[tauri::command]
 pub(crate) fn read_file_text(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))
+}
+
+#[tauri::command]
+pub(crate) fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|error| format!("Failed to read file bytes: {error}"))
 }
 
 #[tauri::command]

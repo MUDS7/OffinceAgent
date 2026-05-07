@@ -282,6 +282,21 @@ body.is-resizing-layout * {
   user-select: none !important;
 }
 
+body.is-resizing-spreadsheet,
+body.is-resizing-spreadsheet * {
+  user-select: none !important;
+}
+
+body.is-resizing-spreadsheet.col-resize,
+body.is-resizing-spreadsheet.col-resize * {
+  cursor: col-resize !important;
+}
+
+body.is-resizing-spreadsheet.row-resize,
+body.is-resizing-spreadsheet.row-resize * {
+  cursor: row-resize !important;
+}
+
 .activity-bar {
   display: flex;
   min-height: 0;
@@ -640,6 +655,10 @@ body.is-resizing-layout * {
   color: #777777;
 }
 
+.spreadsheet-tab-icon {
+  color: #2f855a;
+}
+
 .editor-actions {
   display: flex;
   align-items: center;
@@ -803,6 +822,192 @@ body.is-resizing-layout * {
   inset: 0;
   min-height: 220px;
   pointer-events: none;
+}
+
+.spreadsheet-preview {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background: #ffffff;
+}
+
+.spreadsheet-toolbar {
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 39px;
+  padding: 0 12px;
+  border-bottom: 1px solid #e6e6e6;
+  background: #f8f8f8;
+}
+
+.spreadsheet-sheet-tabs {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.spreadsheet-sheet-tab {
+  flex: 0 0 auto;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 12px;
+  overflow: hidden;
+  border-bottom: 2px solid transparent;
+  color: #5d6570;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spreadsheet-sheet-tab:hover {
+  background: #eeeeee;
+}
+
+.spreadsheet-sheet-tab.active {
+  border-bottom-color: #2f855a;
+  color: #1f1f1f;
+  background: #ffffff;
+}
+
+.spreadsheet-range-summary {
+  max-width: 240px;
+  overflow: hidden;
+  color: #6c737f;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spreadsheet-limit-note {
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 31px;
+  padding: 0 13px;
+  border-bottom: 1px solid #eadfbf;
+  color: #6f5a24;
+  background: #fff9e8;
+  font-size: 13px;
+}
+
+.spreadsheet-grid-shell {
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: #ffffff;
+}
+
+.spreadsheet-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 100%;
+  table-layout: fixed;
+  color: #202124;
+  font-size: 13px;
+}
+
+.spreadsheet-row-header-col {
+  width: 54px;
+  min-width: 54px;
+}
+
+.spreadsheet-corner,
+.spreadsheet-column-header,
+.spreadsheet-row-header {
+  position: sticky;
+  z-index: 2;
+  height: 28px;
+  border-right: 1px solid #dadce0;
+  border-bottom: 1px solid #dadce0;
+  color: #5f6368;
+  background: #f8f9fa;
+  font-weight: 600;
+  user-select: none;
+}
+
+.spreadsheet-corner {
+  top: 0;
+  left: 0;
+  z-index: 4;
+  width: 54px;
+  min-width: 54px;
+}
+
+.spreadsheet-column-header {
+  top: 0;
+  width: 132px;
+  min-width: 48px;
+  text-align: center;
+}
+
+.spreadsheet-row-header {
+  left: 0;
+  z-index: 3;
+  width: 54px;
+  min-width: 54px;
+  padding: 0 8px;
+  text-align: right;
+}
+
+.spreadsheet-column-resizer,
+.spreadsheet-row-resizer {
+  position: absolute;
+  z-index: 5;
+  background: transparent;
+  touch-action: none;
+}
+
+.spreadsheet-column-resizer {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+}
+
+.spreadsheet-row-resizer {
+  right: 0;
+  bottom: -4px;
+  left: 0;
+  height: 8px;
+  cursor: row-resize;
+}
+
+.spreadsheet-column-resizer:hover,
+.spreadsheet-row-resizer:hover {
+  background: rgba(47, 128, 237, 0.18);
+}
+
+.spreadsheet-cell {
+  width: 132px;
+  height: 28px;
+  padding: 4px 8px;
+  overflow: hidden;
+  border-right: 1px solid #eceff1;
+  border-bottom: 1px solid #eceff1;
+  background: #ffffff;
+  cursor: cell;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.spreadsheet-cell:hover {
+  background: #f6fbff;
+}
+
+.spreadsheet-cell.selected {
+  outline: 1px solid #2f80ed;
+  outline-offset: -1px;
+  background: rgba(47, 128, 237, 0.14);
 }
 
 .text-editor-layout {

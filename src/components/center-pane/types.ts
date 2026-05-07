@@ -16,7 +16,7 @@ export type DocumentSelectionContext = {
   fileId: string;
   filePath: string;
   filename: string;
-  sourceType: "pdf" | "text";
+  sourceType: "pdf" | "spreadsheet" | "text";
   start?: number;
   end?: number;
   text: string;
