@@ -27,6 +27,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "resources": {
+      "../services/document-service/app": "document-service/app",
+      "../services/document-service/run.py": "document-service/run.py",
+      "../services/document-service/requirements.txt": "document-service/requirements.txt",
+      "../services/document-service/pyproject.toml": "document-service/pyproject.toml",
+      "../services/document-service/.packages": "document-service/.packages"
+    }
   }
 }

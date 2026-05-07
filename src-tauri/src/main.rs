@@ -9,6 +9,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            document_service::setup_document_service(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             agent::get_agent_info,
             document_service::get_document_service_status,
