@@ -1,4 +1,4 @@
-import { AlertTriangle, RefreshCw, XCircle } from "lucide-react";
+import { AlertTriangle, Check, RefreshCw, XCircle } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -76,6 +76,11 @@ export function SpreadsheetPreview({
   const [selectionRange, setSelectionRange] = useState<SelectionRange | null>(null);
   const [dragAnchor, setDragAnchor] = useState<{ row: number; col: number } | null>(null);
   const [editingCell, setEditingCell] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ type: "col" | "row"; x: number; y: number; index: number } | null>(null);
+  const [insertLeftAmount, setInsertLeftAmount] = useState(1);
+  const [insertRightAmount, setInsertRightAmount] = useState(1);
+  const [insertTopAmount, setInsertTopAmount] = useState(1);
+  const [insertBottomAmount, setInsertBottomAmount] = useState(1);
   const activeSheet = previewState.sheets[activeSheetIndex] ?? null;
   const activeSheetKey = activeSheet?.name ?? "";
   const activeColumnWidths = activeSheet ? columnWidthsBySheet[activeSheetKey] ?? {} : {};
@@ -275,6 +280,15 @@ export function SpreadsheetPreview({
                   key={column}
                   style={getColumnStyle(activeSheet.columnIndexes[index])}
                   onPointerDown={(event) => handleColumnHeaderPointerDown(index, event)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({
+                      type: "col",
+                      x: event.clientX / getUiScale(),
+                      y: event.clientY / getUiScale(),
+                      index: activeSheet.columnIndexes[index],
+                    });
+                  }}
                 >
                   {column}
                   <span
@@ -296,6 +310,15 @@ export function SpreadsheetPreview({
                   scope="row"
                   style={{ height: getRowHeight(activeSheet.rowStart + rowIndex) }}
                   onPointerDown={(event) => handleRowHeaderPointerDown(rowIndex, event)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({
+                      type: "row",
+                      x: event.clientX / getUiScale(),
+                      y: event.clientY / getUiScale(),
+                      index: activeSheet.rowStart + rowIndex,
+                    });
+                  }}
                 >
                   {activeSheet.rowStart + rowIndex + 1}
                   <span
@@ -385,8 +408,324 @@ export function SpreadsheetPreview({
           </tbody>
         </table>
       </div>
+      {contextMenu && (
+        <>
+          <div
+            className="spreadsheet-context-menu-backdrop"
+            style={{ position: "fixed", inset: 0, zIndex: 999 }}
+            onPointerDown={() => setContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenu(null);
+            }}
+          />
+          <div
+            className="spreadsheet-context-menu"
+            style={{
+              position: "fixed",
+              left: contextMenu.x + 10,
+              top: contextMenu.y + 10,
+              zIndex: 1000,
+              backgroundColor: "var(--bg-surface, #ffffff)",
+              border: "1px solid var(--border-color, #e5e7eb)",
+              borderRadius: "8px",
+              padding: "6px",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              fontSize: "13px",
+              color: "var(--text-primary, #374151)",
+            }}
+          >
+            {contextMenu.type === "col" ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M14 4H18C18.5523 4 19 4.44772 19 5V19C19 19.5523 18.5523 20 18 20H14C13.4477 20 13 19.5523 13 19V5C13 4.44772 13.4477 4 14 4Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M16 4V20" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M6 4H10C10.5523 4 11 4.44772 11 5V9C11 9.5523 10.5523 10 10 10H6C5.4477 10 5 9.5523 5 9V5C5 4.44772 5.4477 4 6 4Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M8 12V20M8 20L5 17M8 20L11 17" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={{ userSelect: "none" }}>在左侧插入列(I)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={insertLeftAmount}
+                      onChange={(e) => setInsertLeftAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    />
+                    <button
+                      onClick={() => {
+                        handleInsertColumns(contextMenu.index, insertLeftAmount, "left");
+                        setContextMenu(null);
+                      }}
+                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
+                    >
+                      <Check size={18} strokeWidth={1.5} />
+                    </button>
+                  </div>
+                </div>
+                
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M6 4H10C10.5523 4 11 4.44772 11 5V19C11 19.5523 10.5523 20 10 20H6C5.4477 20 5 19.5523 5 19V5C5 4.44772 5.4477 4 6 4Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M8 4V20" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M14 4H18C18.5523 4 19 4.44772 19 5V9C19 9.5523 18.5523 10 18 10H14C13.4477 10 13 9.5523 13 9V5C13 4.44772 13.4477 4 14 4Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M16 12V20M16 20L13 17M16 20L19 17" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={{ userSelect: "none" }}>在右侧插入列(R)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={insertRightAmount}
+                      onChange={(e) => setInsertRightAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    />
+                    <button
+                      onClick={() => {
+                        handleInsertColumns(contextMenu.index, insertRightAmount, "right");
+                        setContextMenu(null);
+                      }}
+                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
+                    >
+                      <Check size={18} strokeWidth={1.5} />
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M4 14V18C4 18.5523 4.44772 19 5 19H19C19.5523 19 20 18.5523 20 18V14C20 13.4477 19.5523 13 19 13H5C4.44772 13 4 13.4477 4 14Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M4 16H20" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M4 6V10C4 10.5523 4.44772 11 5 11H9C9.5523 11 10 10.5523 10 10V6C10 5.4477 9.5523 5 9 5H5C4.44772 5 4 5.4477 4 6Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M12 8H20M20 8L17 5M20 8L17 11" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={{ userSelect: "none" }}>在上方插入行(A)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={insertTopAmount}
+                      onChange={(e) => setInsertTopAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    />
+                    <button
+                      onClick={() => {
+                        handleInsertRows(contextMenu.index, insertTopAmount, "above");
+                        setContextMenu(null);
+                      }}
+                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
+                    >
+                      <Check size={18} strokeWidth={1.5} />
+                    </button>
+                  </div>
+                </div>
+                
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M4 6V10C4 10.5523 4.44772 11 5 11H19C19.5523 11 20 10.5523 20 10V6C20 5.4477 19.5523 5 19 5H5C4.44772 5 4 5.4477 4 6Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M4 8H20" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M4 14V18C4 18.5523 4.44772 19 5 19H9C9.5523 19 10 18.5523 10 18V14C10 13.4477 9.5523 13 9 13H5C4.44772 13 4 13.4477 4 14Z" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M12 16H20M20 16L17 13M20 16L17 19" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    <span style={{ userSelect: "none" }}>在下方插入行(B)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={insertBottomAmount}
+                      onChange={(e) => setInsertBottomAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    />
+                    <button
+                      onClick={() => {
+                        handleInsertRows(contextMenu.index, insertBottomAmount, "below");
+                        setContextMenu(null);
+                      }}
+                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
+                    >
+                      <Check size={18} strokeWidth={1.5} />
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
+
+  function handleInsertColumns(targetColIndex: number, amount: number, direction: "left" | "right") {
+    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
+    const worksheet = previewState.workbook.Sheets[activeSheet.name];
+    if (!worksheet) return;
+
+    const insertAtCol = direction === "left" ? targetColIndex : targetColIndex + 1;
+    const newWorksheet: any = {};
+
+    for (const key in worksheet) {
+      if (key.startsWith("!")) {
+        newWorksheet[key] = worksheet[key];
+        continue;
+      }
+      const cellPos = previewState.xlsx.utils.decode_cell(key);
+      let newCol = cellPos.c;
+      if (cellPos.c >= insertAtCol) {
+        newCol += amount;
+      }
+      const newKey = previewState.xlsx.utils.encode_cell({ c: newCol, r: cellPos.r });
+      newWorksheet[newKey] = worksheet[key];
+    }
+
+    if (worksheet["!ref"]) {
+      const range = previewState.xlsx.utils.decode_range(worksheet["!ref"]);
+      const newRange = {
+        s: { c: range.s.c, r: range.s.r },
+        e: { c: range.e.c + amount, r: range.e.r },
+      };
+      newWorksheet["!ref"] = previewState.xlsx.utils.encode_range(newRange);
+    }
+
+    if (worksheet["!cols"]) {
+      const newCols = [];
+      for (let i = 0; i < worksheet["!cols"].length; i++) {
+        if (worksheet["!cols"][i]) {
+          if (i < insertAtCol) {
+            newCols[i] = worksheet["!cols"][i];
+          } else {
+            newCols[i + amount] = worksheet["!cols"][i];
+          }
+        }
+      }
+      newWorksheet["!cols"] = newCols;
+    }
+
+    previewState.workbook.Sheets[activeSheet.name] = newWorksheet;
+    const nextSheet = buildSheetPreview(activeSheet.name, newWorksheet, previewState.xlsx);
+
+    setColumnWidthsBySheet((current) => {
+      const sheetWidths = current[activeSheet.name] || {};
+      const newSheetWidths: Record<number, number> = {};
+      for (const colStr in sheetWidths) {
+        const col = parseInt(colStr, 10);
+        if (col < insertAtCol) {
+          newSheetWidths[col] = sheetWidths[col];
+        } else {
+          newSheetWidths[col + amount] = sheetWidths[col];
+        }
+      }
+      return {
+        ...current,
+        [activeSheet.name]: newSheetWidths,
+      };
+    });
+
+    setPreviewState((current) => ({
+      ...current,
+      sheets: current.sheets.map((s) => (s.name === activeSheet.name ? nextSheet : s)),
+    }));
+    
+    setSelectionRange(null);
+    setEditingCell(null);
+    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+  }
+
+  function handleInsertRows(targetRowIndex: number, amount: number, direction: "above" | "below") {
+    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
+    const worksheet = previewState.workbook.Sheets[activeSheet.name];
+    if (!worksheet) return;
+
+    const insertAtRow = direction === "above" ? targetRowIndex : targetRowIndex + 1;
+    const newWorksheet: any = {};
+
+    for (const key in worksheet) {
+      if (key.startsWith("!")) {
+        newWorksheet[key] = worksheet[key];
+        continue;
+      }
+      const cellPos = previewState.xlsx.utils.decode_cell(key);
+      let newRow = cellPos.r;
+      if (cellPos.r >= insertAtRow) {
+        newRow += amount;
+      }
+      const newKey = previewState.xlsx.utils.encode_cell({ c: cellPos.c, r: newRow });
+      newWorksheet[newKey] = worksheet[key];
+    }
+
+    if (worksheet["!ref"]) {
+      const range = previewState.xlsx.utils.decode_range(worksheet["!ref"]);
+      const newRange = {
+        s: { c: range.s.c, r: range.s.r },
+        e: { c: range.e.c, r: range.e.r + amount },
+      };
+      newWorksheet["!ref"] = previewState.xlsx.utils.encode_range(newRange);
+    }
+
+    if (worksheet["!rows"]) {
+      const newRows = [];
+      for (let i = 0; i < worksheet["!rows"].length; i++) {
+        if (worksheet["!rows"][i]) {
+          if (i < insertAtRow) {
+            newRows[i] = worksheet["!rows"][i];
+          } else {
+            newRows[i + amount] = worksheet["!rows"][i];
+          }
+        }
+      }
+      newWorksheet["!rows"] = newRows;
+    }
+
+    previewState.workbook.Sheets[activeSheet.name] = newWorksheet;
+    const nextSheet = buildSheetPreview(activeSheet.name, newWorksheet, previewState.xlsx);
+
+    setRowHeightsBySheet((current) => {
+      const sheetHeights = current[activeSheet.name] || {};
+      const newSheetHeights: Record<number, number> = {};
+      for (const rowStr in sheetHeights) {
+        const row = parseInt(rowStr, 10);
+        if (row < insertAtRow) {
+          newSheetHeights[row] = sheetHeights[row];
+        } else {
+          newSheetHeights[row + amount] = sheetHeights[row];
+        }
+      }
+      return {
+        ...current,
+        [activeSheet.name]: newSheetHeights,
+      };
+    });
+
+    setPreviewState((current) => ({
+      ...current,
+      sheets: current.sheets.map((s) => (s.name === activeSheet.name ? nextSheet : s)),
+    }));
+    
+    setSelectionRange(null);
+    setEditingCell(null);
+    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+  }
 
   function updateCellValue(cell: SpreadsheetCell, value: string) {
     if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
@@ -474,6 +813,7 @@ export function SpreadsheetPreview({
   }
 
   function handleColumnHeaderPointerDown(index: number, event: ReactPointerEvent<HTMLTableCellElement>) {
+    if (event.button !== 0) return;
     if (!(event.target instanceof Element)) return;
     if (event.target.closest(".spreadsheet-column-resizer")) return;
 
@@ -506,6 +846,7 @@ export function SpreadsheetPreview({
   }
 
   function handleRowHeaderPointerDown(rowIndex: number, event: ReactPointerEvent<HTMLTableCellElement>) {
+    if (event.button !== 0) return;
     if (!(event.target instanceof Element)) return;
     if (event.target.closest(".spreadsheet-row-resizer")) return;
 
