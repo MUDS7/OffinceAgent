@@ -116,7 +116,7 @@ def get_excel_commands() -> ExcelCommandsResponse:
             ExcelCommandSpec(
                 command="split_column",
                 category="basic",
-                description="Split cell text from one column or selected range into adjacent columns by delimiter or by character.",
+                description="Split cell text from one column or selected range into adjacent columns by delimiter, character, fixed positions, or row-specific fixed positions.",
                 optional_args=[
                     "range",
                     "source_column",
@@ -128,6 +128,13 @@ def get_excel_commands() -> ExcelCommandsResponse:
                     "target_column",
                     "delimiter",
                     "mode",
+                    "positions",
+                    "widths",
+                    "split_at",
+                    "positions_by_row",
+                    "widths_by_row",
+                    "row_positions",
+                    "row_widths",
                     "max_splits",
                     "trim",
                     "insert_columns",
@@ -511,13 +518,25 @@ def _split_column(request: ExcelExecuteRequest, source_path: Path, output_path: 
     target_row, target_column = _split_target_start(request.args, start_row, source_column)
     split_mode = str(request.args.get("mode", "delimiter")).strip().lower()
     delimiter = request.args.get("delimiter")
+    fixed_split_positions = _fixed_split_positions(request.args, split_mode)
+    row_split_positions = _row_fixed_split_positions(request.args, start_row, end_row)
     max_splits = _optional_non_negative_int(request.args.get("max_splits"), "max_splits")
     trim_parts = _truthy(request.args.get("trim"))
 
     split_rows: list[list[Any]] = []
     for row_index in range(start_row, end_row + 1):
         source_value = worksheet.cell(row=row_index, column=source_column).value
-        split_rows.append(_split_cell_value(source_value, split_mode, delimiter, max_splits, trim_parts))
+        row_fixed_split_positions = row_split_positions.get(row_index, fixed_split_positions)
+        split_rows.append(
+            _split_cell_value(
+                source_value,
+                split_mode,
+                delimiter,
+                max_splits,
+                trim_parts,
+                row_fixed_split_positions,
+            )
+        )
 
     max_width = max((len(row) for row in split_rows), default=0)
     if max_width == 0:
@@ -782,12 +801,20 @@ def _split_cell_value(
     delimiter: Any,
     max_splits: int | None,
     trim_parts: bool,
+    fixed_split_positions: list[int] | None = None,
 ) -> list[Any]:
     text = "" if value is None else str(value)
     if split_mode in ("character", "characters", "char", "chars", "each_character", "每字符", "按字符", "字符"):
         parts = list(text) if text else [""]
         if max_splits is not None and len(parts) > max_splits + 1:
             parts = parts[:max_splits] + ["".join(parts[max_splits:])]
+    elif _is_fixed_split_mode(split_mode):
+        if fixed_split_positions is None:
+            raise HTTPException(
+                status_code=400,
+                detail="args.positions, args.split_at, or args.widths is required for fixed position split mode",
+            )
+        parts = _split_text_at_positions(text, fixed_split_positions)
     else:
         normalized_delimiter = _normalize_delimiter(delimiter)
         if normalized_delimiter == "":
@@ -797,6 +824,215 @@ def _split_cell_value(
     if trim_parts:
         return [part.strip() if isinstance(part, str) else part for part in parts]
     return parts
+
+
+def _is_fixed_split_mode(split_mode: str) -> bool:
+    return split_mode in (
+        "fixed",
+        "fixed_width",
+        "fixed_widths",
+        "fixed_position",
+        "fixed_positions",
+        "position",
+        "positions",
+        "slice",
+        "slices",
+    )
+
+
+def _fixed_split_positions(args: dict[str, Any], split_mode: str) -> list[int] | None:
+    raw_positions = _first_present_arg(
+        args,
+        (
+            "positions",
+            "split_positions",
+            "fixed_positions",
+            "split_at",
+            "cut_positions",
+        ),
+    )
+    if raw_positions not in (None, ""):
+        return _normalize_positive_int_list(raw_positions, "positions")
+
+    raw_widths = _first_present_arg(args, ("widths", "fixed_widths", "column_widths"))
+    if raw_widths not in (None, ""):
+        widths = _normalize_positive_int_list(raw_widths, "widths", require_increasing=False)
+        return _positions_from_widths(widths)
+
+    if _is_fixed_split_mode(split_mode):
+        return None
+    return None
+
+
+def _row_fixed_split_positions(args: dict[str, Any], start_row: int, end_row: int) -> dict[int, list[int]]:
+    raw_positions = _first_present_arg(
+        args,
+        (
+            "positions_by_row",
+            "split_positions_by_row",
+            "fixed_positions_by_row",
+            "row_positions",
+        ),
+    )
+    if raw_positions not in (None, ""):
+        return _normalize_row_split_positions(raw_positions, "positions_by_row", start_row, end_row)
+
+    raw_widths = _first_present_arg(
+        args,
+        (
+            "widths_by_row",
+            "fixed_widths_by_row",
+            "row_widths",
+        ),
+    )
+    if raw_widths not in (None, ""):
+        return _normalize_row_split_positions(raw_widths, "widths_by_row", start_row, end_row, value_is_widths=True)
+
+    return {}
+
+
+def _normalize_row_split_positions(
+    value: Any,
+    name: str,
+    start_row: int,
+    end_row: int,
+    *,
+    value_is_widths: bool = False,
+) -> dict[int, list[int]]:
+    row_count = end_row - start_row + 1
+    positions_by_row: dict[int, list[int]] = {}
+
+    if isinstance(value, dict):
+        for raw_row, raw_positions in value.items():
+            row_index = _row_index_key(raw_row, name)
+            _ensure_row_in_split_range(row_index, start_row, end_row, name)
+            positions_by_row[row_index] = _normalize_position_or_widths_value(
+                raw_positions,
+                f"{name}.{raw_row}",
+                value_is_widths=value_is_widths,
+            )
+        return positions_by_row
+
+    if isinstance(value, list):
+        object_rows = [item for item in value if isinstance(item, dict) and "row" in item]
+        if object_rows:
+            if len(object_rows) != len(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"args.{name} row-object form cannot be mixed with aligned list items",
+                )
+            for item in object_rows:
+                row_index = _positive_int(item.get("row"), f"{name}[].row")
+                _ensure_row_in_split_range(row_index, start_row, end_row, name)
+                raw_positions = _row_split_item_value(item, value_is_widths)
+                positions_by_row[row_index] = _normalize_position_or_widths_value(
+                    raw_positions,
+                    f"{name}[]",
+                    value_is_widths=value_is_widths,
+                )
+            return positions_by_row
+
+        if len(value) != row_count:
+            raise HTTPException(
+                status_code=400,
+                detail=f"args.{name} must contain exactly {row_count} item(s) for the selected source rows",
+            )
+        for offset, raw_positions in enumerate(value):
+            if raw_positions in (None, ""):
+                continue
+            positions_by_row[start_row + offset] = _normalize_position_or_widths_value(
+                raw_positions,
+                f"{name}[{offset}]",
+                value_is_widths=value_is_widths,
+            )
+        return positions_by_row
+
+    raise HTTPException(status_code=400, detail=f"args.{name} must be a list or an object keyed by row number")
+
+
+def _row_index_key(value: Any, name: str) -> int:
+    if isinstance(value, int):
+        return _positive_int(value, name)
+
+    text = str(value).strip().lower()
+    if text.startswith("row_"):
+        text = text[4:]
+    elif text.startswith("row"):
+        text = text[3:].strip("_ ")
+    return _positive_int(text, name)
+
+
+def _ensure_row_in_split_range(row_index: int, start_row: int, end_row: int, name: str) -> None:
+    if row_index < start_row or row_index > end_row:
+        raise HTTPException(
+            status_code=400,
+            detail=f"args.{name} row {row_index} is outside the source range {start_row}:{end_row}",
+        )
+
+
+def _row_split_item_value(item: dict[str, Any], value_is_widths: bool) -> Any:
+    if value_is_widths:
+        return _first_present_arg(item, ("widths", "fixed_widths", "value"))
+    return _first_present_arg(item, ("positions", "split_at", "value"))
+
+
+def _normalize_position_or_widths_value(value: Any, name: str, *, value_is_widths: bool) -> list[int]:
+    if value_is_widths:
+        widths = _normalize_positive_int_list(value, name, require_increasing=False)
+        return _positions_from_widths(widths)
+    return _normalize_positive_int_list(value, name)
+
+
+def _first_present_arg(args: dict[str, Any], names: tuple[str, ...]) -> Any:
+    for name in names:
+        if name in args:
+            return args[name]
+    return None
+
+
+def _normalize_positive_int_list(value: Any, name: str, require_increasing: bool = True) -> list[int]:
+    if isinstance(value, int):
+        raw_items = [value]
+    elif isinstance(value, str):
+        raw_items = [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raise HTTPException(status_code=400, detail=f"args.{name} must be an integer or a list of integers")
+
+    if not raw_items:
+        raise HTTPException(status_code=400, detail=f"args.{name} cannot be empty")
+
+    numbers: list[int] = []
+    for index, item in enumerate(raw_items):
+        numbers.append(_positive_int(item, f"{name}[{index}]"))
+
+    if require_increasing:
+        previous = 0
+        for number in numbers:
+            if number <= previous:
+                raise HTTPException(status_code=400, detail=f"args.{name} must be strictly increasing")
+            previous = number
+    return numbers
+
+
+def _positions_from_widths(widths: list[int]) -> list[int]:
+    positions: list[int] = []
+    current_position = 0
+    for width in widths:
+        current_position += width
+        positions.append(current_position)
+    return positions
+
+
+def _split_text_at_positions(text: str, positions: list[int]) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    for position in positions:
+        parts.append(text[start:position])
+        start = position
+    parts.append(text[start:])
+    return parts or [""]
 
 
 def _normalize_delimiter(value: Any) -> str:
