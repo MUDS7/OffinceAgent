@@ -11,6 +11,7 @@ pub(crate) struct TextEditAgentRequest {
     pub(super) start: usize,
     pub(super) end: usize,
     pub(super) selected_text: String,
+    pub(super) file_context: Option<String>,
     pub(super) instruction: String,
     pub(super) operation: String,
 }
@@ -21,6 +22,7 @@ pub(crate) struct TextSelectionIntentRequest {
     pub(super) file_path: String,
     pub(super) filename: String,
     pub(super) selected_text: String,
+    pub(super) file_context: Option<String>,
     pub(super) instruction: String,
 }
 

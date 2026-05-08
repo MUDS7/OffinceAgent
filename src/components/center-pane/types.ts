@@ -44,6 +44,7 @@ export type CenterPaneProps = {
   onRefreshStatus: () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onSelectPreviewTab: (fileId: string) => void;
+  onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
   onSaveTextFile: (fileId: string) => void;
 };

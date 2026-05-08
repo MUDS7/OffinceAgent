@@ -21,6 +21,7 @@ export function CenterPane({
   onRefreshStatus,
   onSelectionContextChange,
   onSelectPreviewTab,
+  onUpdateSpreadsheetFile,
   onUpdateTextFile,
   onSaveTextFile,
 }: CenterPaneProps) {
@@ -87,6 +88,7 @@ export function CenterPane({
           activeFile={activeFile}
           onSaveFile={onSaveTextFile}
           onSelectionContextChange={onSelectionContextChange}
+          onUpdateSpreadsheetFile={onUpdateSpreadsheetFile}
         />
       );
     }

@@ -10,12 +10,14 @@ import type {
   WorkspaceFile,
 } from "../types";
 import { MAX_SELECTION_CONTEXT_CHARS } from "../constants";
+import type { CompressedFileContext } from "./fileContext";
 
 // ─── DeepSeek message building ────────────────────────────────────────────────
 
 export function buildDeepSeekMessages(
   chatMessages: ChatMessage[],
   documentSelection: DocumentSelectionContext | null,
+  fileContext: CompressedFileContext | null = null,
 ): DeepSeekApiMessage[] {
   const messages = chatMessages.map((message) => ({
     role: message.role,
@@ -23,7 +25,29 @@ export function buildDeepSeekMessages(
   }));
 
   if (!documentSelection?.text.trim()) {
-    return messages;
+    if (!fileContext?.content.trim()) {
+      return messages;
+    }
+
+    const contextMessage: DeepSeekApiMessage = {
+      role: "system",
+      content: [
+        "你是 OfficeAgent。用户正在针对当前打开的整个文件提问，但没有选中具体片段。",
+        "请结合压缩后的文件内容和用户问题分析用户意图并回答；如果用户只是提问，不要建议修改文件。",
+        "压缩规则：内容可能省略空白或超长部分；文本行号和 Excel 单元格地址用于定位原文件位置。",
+        fileContext.isTruncated ? "注意：文件上下文已截断，回答时说明可能缺少后续内容。" : "",
+        `文件名：${fileContext.filename}`,
+        `文件类型：${getFileContextTypeLabel(fileContext.fileType)}`,
+        "当前文件压缩上下文：",
+        "<<<",
+        fileContext.content,
+        ">>>",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    };
+
+    return [contextMessage, ...messages];
   }
 
   const rawSelectionText = documentSelection.text.trim();
@@ -56,12 +80,19 @@ function getSelectionSourceTypeLabel(sourceType: DocumentSelectionContext["sourc
   return "文本";
 }
 
+function getFileContextTypeLabel(sourceType: CompressedFileContext["fileType"]): string {
+  if (sourceType === "pdf") return "PDF";
+  if (sourceType === "spreadsheet") return "Excel";
+  return "文本";
+}
+
 // ─── Text-edit intent classification ─────────────────────────────────────────
 
 export async function classifyTextSelectionIntent(
   model: string,
   instruction: string,
   documentSelection: DocumentSelectionContext | null,
+  fileContext: CompressedFileContext | null = null,
 ): Promise<TextSelectionIntentAction> {
   if (documentSelection?.sourceType !== "text") {
     return "answer_only";
@@ -75,6 +106,7 @@ export async function classifyTextSelectionIntent(
         filePath: documentSelection.filePath,
         filename: documentSelection.filename,
         selectedText: documentSelection.text,
+        fileContext: documentSelection.text.trim() ? undefined : fileContext?.content,
         instruction,
       },
     });
@@ -104,6 +136,7 @@ export function buildTextEditAgentRequest(
   instruction: string,
   documentSelection: DocumentSelectionContext | null,
   intent: TextSelectionIntentAction,
+  fileContext: CompressedFileContext | null = null,
 ): TextEditAgentRequest | null {
   if (
     (intent !== "replace_selection" && intent !== "insert_after_selection") ||
@@ -120,6 +153,7 @@ export function buildTextEditAgentRequest(
     start,
     end,
     selectedText: documentSelection.text,
+    fileContext: documentSelection.text.trim() ? undefined : fileContext?.content,
     instruction,
     operation: intent,
   };

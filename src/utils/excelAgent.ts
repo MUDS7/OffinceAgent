@@ -11,6 +11,7 @@ import {
   SUPPORTED_EXCEL_COMMANDS,
 } from "../constants";
 import { truncateSelectionContext } from "./chatMessages";
+import type { CompressedFileContext } from "./fileContext";
 
 // ─── Command spec fetching ────────────────────────────────────────────────────
 
@@ -47,12 +48,14 @@ export function buildExcelAgentMessages({
   filename,
   instruction,
   selectionText,
+  fileContext,
   chatMessages,
 }: {
   commandSpecs: ExcelCommandsResponse;
   filename: string;
   instruction: string;
   selectionText: string;
+  fileContext?: CompressedFileContext | null;
   chatMessages: ChatMessage[];
 }) {
   const commandNames = [...getExcelCommandNames(commandSpecs)].join(", ");
@@ -88,6 +91,20 @@ export function buildExcelAgentMessages({
         selectionText.trim()
           ? `Current spreadsheet selection:\n<<<\n${truncateSelectionContext(selectionText)}\n>>>`
           : "Current spreadsheet selection: none",
+        "",
+        !selectionText.trim() && fileContext?.content.trim()
+          ? [
+              "No cells are selected. Use this compressed workbook context to infer the user's intent and target ranges when possible.",
+              "The context preserves worksheet names, used ranges, row numbers, and cell addresses; empty cells are omitted.",
+              fileContext.isTruncated ? "The workbook context is truncated." : "",
+              "Compressed workbook context:",
+              "<<<",
+              fileContext.content,
+              ">>>",
+            ]
+              .filter(Boolean)
+              .join("\n")
+          : "Compressed workbook context: omitted because a spreadsheet selection is available or no workbook context could be built.",
         "",
         "Recent conversation:",
         recentConversation,

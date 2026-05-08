@@ -1,7 +1,7 @@
 import { AlertTriangle, RefreshCw, XCircle } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
 import type { DocumentSelectionContext, PreviewFile } from "./types";
 
@@ -9,6 +9,7 @@ type SpreadsheetPreviewProps = {
   activeFile: PreviewFile;
   onSaveFile: (fileId: string) => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
+  onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
 };
 
 type SpreadsheetCell = {
@@ -48,21 +49,33 @@ const MIN_ROW_HEIGHT = 22;
 const MAX_ROW_HEIGHT = 180;
 const UI_SCALE_FALLBACK = 0.8;
 
-export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextChange }: SpreadsheetPreviewProps) {
+export function SpreadsheetPreview({
+  activeFile,
+  onSaveFile,
+  onSelectionContextChange,
+  onUpdateSpreadsheetFile,
+}: SpreadsheetPreviewProps) {
+  const lastPublishedFileRef = useRef<File | null>(null);
+  const loadedFileIdRef = useRef("");
   const [previewState, setPreviewState] = useState<{
     error: string;
     isLoading: boolean;
     sheets: SheetPreview[];
+    workbook: XLSXModule.WorkBook | null;
+    xlsx: typeof XLSXModule | null;
   }>({
     error: "",
     isLoading: true,
     sheets: [],
+    workbook: null,
+    xlsx: null,
   });
   const [activeSheetIndex, setActiveSheetIndex] = useState(0);
   const [columnWidthsBySheet, setColumnWidthsBySheet] = useState<SizeMapBySheet>({});
   const [rowHeightsBySheet, setRowHeightsBySheet] = useState<SizeMapBySheet>({});
   const [selectionRange, setSelectionRange] = useState<SelectionRange | null>(null);
   const [dragAnchor, setDragAnchor] = useState<{ row: number; col: number } | null>(null);
+  const [editingCell, setEditingCell] = useState<string | null>(null);
   const activeSheet = previewState.sheets[activeSheetIndex] ?? null;
   const activeSheetKey = activeSheet?.name ?? "";
   const activeColumnWidths = activeSheet ? columnWidthsBySheet[activeSheetKey] ?? {} : {};
@@ -74,14 +87,20 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
     : undefined;
 
   useEffect(() => {
-    let isCancelled = false;
+    if (loadedFileIdRef.current === activeFile.id && lastPublishedFileRef.current === activeFile.file) {
+      return;
+    }
 
-    setPreviewState({ error: "", isLoading: true, sheets: [] });
+    let isCancelled = false;
+    loadedFileIdRef.current = activeFile.id;
+
+    setPreviewState({ error: "", isLoading: true, sheets: [], workbook: null, xlsx: null });
     setActiveSheetIndex(0);
     setColumnWidthsBySheet({});
     setRowHeightsBySheet({});
     setSelectionRange(null);
     onSelectionContextChange(null);
+    setEditingCell(null);
 
     async function loadWorkbook() {
       try {
@@ -100,6 +119,8 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
           error: sheets.length ? "" : "Workbook does not contain visible sheets.",
           isLoading: false,
           sheets,
+          workbook,
+          xlsx: XLSX,
         });
       } catch (error) {
         if (isCancelled) return;
@@ -108,6 +129,8 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
           error: error instanceof Error ? error.message : String(error),
           isLoading: false,
           sheets: [],
+          workbook: null,
+          xlsx: null,
         });
       }
     }
@@ -122,6 +145,7 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
   useEffect(() => {
     setSelectionRange(null);
     onSelectionContextChange(null);
+    setEditingCell(null);
   }, [activeSheetIndex, onSelectionContextChange]);
 
   useEffect(() => {
@@ -223,9 +247,15 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
       <div
         className="spreadsheet-grid-shell"
         onPointerDown={(event) => {
-          if (event.target instanceof Element && event.target.closest(".spreadsheet-cell")) return;
+          if (
+            event.target instanceof Element &&
+            event.target.closest(".spreadsheet-cell, .spreadsheet-column-header, .spreadsheet-row-header")
+          ) {
+            return;
+          }
           setSelectionRange(null);
           onSelectionContextChange(null);
+          setEditingCell(null);
         }}
       >
         <table className="spreadsheet-grid" style={spreadsheetGridStyle}>
@@ -265,6 +295,7 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
                   className="spreadsheet-row-header"
                   scope="row"
                   style={{ height: getRowHeight(activeSheet.rowStart + rowIndex) }}
+                  onPointerDown={(event) => handleRowHeaderPointerDown(rowIndex, event)}
                 >
                   {activeSheet.rowStart + rowIndex + 1}
                   <span
@@ -290,19 +321,34 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
                     }}
                     title={cell.value}
                     onPointerDown={(event) => {
+                      if (event.target instanceof Element && event.target.closest(".spreadsheet-cell-input")) return;
                       event.preventDefault();
-                      const nextRange = {
-                        startRow: cell.row,
-                        startCol: cell.col,
-                        endRow: cell.row,
-                        endCol: cell.col,
-                      };
-                      setDragAnchor({ row: cell.row, col: cell.col });
-                      setSelectionRange(nextRange);
+                      
+                      const isAlreadySelected =
+                        normalizedSelection &&
+                        normalizedSelection.startRow === cell.row &&
+                        normalizedSelection.startCol === cell.col &&
+                        normalizedSelection.endRow === cell.row &&
+                        normalizedSelection.endCol === cell.col;
+
+                      if (isAlreadySelected) {
+                        setEditingCell(cell.address);
+                      } else {
+                        setEditingCell(null);
+                        const nextRange = {
+                          startRow: cell.row,
+                          startCol: cell.col,
+                          endRow: cell.row,
+                          endCol: cell.col,
+                        };
+                        setDragAnchor({ row: cell.row, col: cell.col });
+                        setSelectionRange(nextRange);
+                      }
                     }}
                     onPointerEnter={() => {
                       if (!dragAnchor) return;
 
+                      setEditingCell(null);
                       setSelectionRange({
                         startRow: dragAnchor.row,
                         startCol: dragAnchor.col,
@@ -311,7 +357,27 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
                       });
                     }}
                   >
-                    {cell.value}
+                    <input
+                      className="spreadsheet-cell-input"
+                      aria-label={`${cell.address} cell value`}
+                      spellCheck={false}
+                      value={cell.value}
+                      readOnly={editingCell !== cell.address}
+                      tabIndex={-1}
+                      style={{ pointerEvents: editingCell === cell.address ? "auto" : "none" }}
+                      onChange={(event) => updateCellValue(cell, event.target.value)}
+                      onBlur={() => {
+                        if (editingCell === cell.address) {
+                          setEditingCell(null);
+                        }
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      ref={(el) => {
+                        if (editingCell === cell.address && el && document.activeElement !== el) {
+                          el.focus();
+                        }
+                      }}
+                    />
                   </td>
                 ))}
               </tr>
@@ -321,6 +387,44 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
       </div>
     </div>
   );
+
+  function updateCellValue(cell: SpreadsheetCell, value: string) {
+    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
+
+    const worksheet = previewState.workbook.Sheets[activeSheet.name];
+    if (!worksheet) return;
+
+    setWorksheetCellValue(worksheet, cell.address, value, previewState.xlsx);
+
+    const nextSheets = previewState.sheets.map((sheet) => {
+      if (sheet.name !== activeSheet.name) return sheet;
+
+      return {
+        ...sheet,
+        rows: sheet.rows.map((row) =>
+          row.map((item) => (item.address === cell.address ? { ...item, value } : item)),
+        ),
+      };
+    });
+
+    setPreviewState((current) => ({
+      ...current,
+      sheets: nextSheets,
+    }));
+    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+  }
+
+  function publishWorkbookFile(workbook: XLSXModule.WorkBook, xlsx: typeof XLSXModule) {
+    const bookType: XLSXModule.BookType = activeFile.filename.toLowerCase().endsWith(".xls") ? "xls" : "xlsx";
+    const workbookBytes = xlsx.write(workbook, { bookType, type: "array" }) as ArrayBuffer;
+    const nextFile = new File([workbookBytes], activeFile.filename, {
+      type: activeFile.file.type,
+      lastModified: Date.now(),
+    });
+
+    lastPublishedFileRef.current = nextFile;
+    onUpdateSpreadsheetFile(activeFile.id, nextFile);
+  }
 
   function getColumnWidth(col: number) {
     return activeColumnWidths[col] ?? DEFAULT_COLUMN_WIDTH;
@@ -385,7 +489,56 @@ export function SpreadsheetPreview({ activeFile, onSaveFile, onSelectionContextC
 
     if (isNearLeftEdge && index > 0) {
       startColumnResize(activeSheet.columnIndexes[index - 1], event);
+      return;
     }
+
+    if (activeSheet) {
+      const col = activeSheet.columnIndexes[index];
+      setEditingCell(null);
+      setDragAnchor(null);
+      setSelectionRange({
+        startRow: activeSheet.rowStart,
+        startCol: col,
+        endRow: activeSheet.rowStart + activeSheet.rows.length - 1,
+        endCol: col,
+      });
+    }
+  }
+
+  function handleRowHeaderPointerDown(rowIndex: number, event: ReactPointerEvent<HTMLTableCellElement>) {
+    if (!(event.target instanceof Element)) return;
+    if (event.target.closest(".spreadsheet-row-resizer")) return;
+
+    if (!activeSheet) return;
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const edgeThreshold = 8;
+    const isNearBottomEdge = event.clientY >= bounds.bottom - edgeThreshold;
+    const isNearTopEdge = event.clientY <= bounds.top + edgeThreshold;
+
+    const actualRow = activeSheet.rowStart + rowIndex;
+
+    if (isNearBottomEdge) {
+      startRowResize(actualRow, event);
+      return;
+    }
+
+    if (isNearTopEdge && rowIndex > 0) {
+      startRowResize(actualRow - 1, event);
+      return;
+    }
+
+    setEditingCell(null);
+    setDragAnchor(null);
+    const startCol = activeSheet.columnIndexes[0];
+    const endCol = activeSheet.columnIndexes[activeSheet.columnIndexes.length - 1];
+
+    setSelectionRange({
+      startRow: actualRow,
+      startCol: startCol,
+      endRow: actualRow,
+      endCol: endCol,
+    });
   }
 
   function startRowResize(row: number, event: ReactPointerEvent<HTMLElement>) {
@@ -457,6 +610,55 @@ function buildSheetPreview(
     rows,
     rowStart: usedRange.s.r,
   };
+}
+
+function setWorksheetCellValue(
+  sheet: XLSXModule.WorkSheet,
+  address: string,
+  value: string,
+  xlsx: typeof XLSXModule,
+) {
+  const nextCell = createCellObject(value);
+
+  if (nextCell) {
+    sheet[address] = nextCell;
+  } else {
+    delete sheet[address];
+  }
+
+  const point = xlsx.utils.decode_cell(address);
+  const currentRange = sheet["!ref"]
+    ? xlsx.utils.decode_range(sheet["!ref"])
+    : { s: { r: point.r, c: point.c }, e: { r: point.r, c: point.c } };
+
+  sheet["!ref"] = xlsx.utils.encode_range({
+    s: {
+      r: Math.min(currentRange.s.r, point.r),
+      c: Math.min(currentRange.s.c, point.c),
+    },
+    e: {
+      r: Math.max(currentRange.e.r, point.r),
+      c: Math.max(currentRange.e.c, point.c),
+    },
+  });
+}
+
+function createCellObject(value: string): XLSXModule.CellObject | null {
+  if (!value.trim()) return null;
+
+  const trimmedValue = value.trim();
+  if (/^(true|false)$/i.test(trimmedValue)) {
+    return { t: "b", v: /^true$/i.test(trimmedValue) };
+  }
+
+  if (/^[+-]?(?:\d+|\d*\.\d+)(?:e[+-]?\d+)?$/i.test(trimmedValue)) {
+    const numericValue = Number(trimmedValue);
+    if (Number.isFinite(numericValue)) {
+      return { t: "n", v: numericValue };
+    }
+  }
+
+  return { t: "s", v: value };
 }
 
 function startResize(cursorClass: "col-resize" | "row-resize", onMove: (event: PointerEvent) => void) {

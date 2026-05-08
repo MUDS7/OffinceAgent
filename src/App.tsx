@@ -47,6 +47,8 @@ import {
   stripMarkdownFence,
 } from "./utils/chatMessages";
 import { decodeBase64Bytes, getFileMimeType, getFileRelativePath, normalizeFilePath } from "./utils/fileUtils";
+import { buildCompressedFileContext } from "./utils/fileContext";
+import type { CompressedFileContext } from "./utils/fileContext";
 import {
   getInitialLayoutWidths,
   getUiScale,
@@ -338,6 +340,16 @@ function App() {
     });
   }
 
+  function updateSpreadsheetFile(fileId: string, file: File) {
+    setWorkspaceFiles((current) =>
+      current.map((item) => (item.id === fileId ? { ...item, file, analysis: null } : item)),
+    );
+    setDirtyFileIds((current) => {
+      if (current.includes(fileId)) return current;
+      return [...current, fileId];
+    });
+  }
+
   async function saveWorkspaceFile(fileId: string) {
     const currentItem = workspaceFiles.find((item) => item.id === fileId);
     if (!currentItem) return;
@@ -490,19 +502,10 @@ function App() {
     nextMessages: ChatMessage[],
     assistantMessageId: string,
     streamId: string,
+    fileContext: CompressedFileContext | null,
   ) {
     const targetFile = selectedWorkspaceFile;
     if (!targetFile) return;
-
-    if (!targetFile.diskPath) {
-      updateAssistantMessage(assistantMessageId, "需要先通过桌面端文件选择器打开这个 Excel 文件，才能拿到真实磁盘路径并执行写入。");
-      return;
-    }
-
-    if (!targetFile.file.name.toLowerCase().endsWith(".xlsx")) {
-      updateAssistantMessage(assistantMessageId, "当前 Excel 命令执行器只支持 .xlsx 文件，请先另存为 .xlsx 后再操作。");
-      return;
-    }
 
     let unlisten: (() => void) | null = null;
     let assistantText = "";
@@ -518,6 +521,7 @@ function App() {
         filename: targetFile.file.name,
         instruction,
         selectionText,
+        fileContext,
         chatMessages: nextMessages,
       });
 
@@ -555,6 +559,16 @@ function App() {
 
     if (plan.action === "answer_only" || plan.action === "ask_confirm") {
       updateAssistantMessage(assistantMessageId, plan.message || stripMarkdownFence(assistantText.trim()) || "需要你再补充一下目标范围或操作内容。");
+      return;
+    }
+
+    if (!targetFile.file.name.toLowerCase().endsWith(".xlsx")) {
+      updateAssistantMessage(assistantMessageId, "当前 Excel 命令执行器只支持 .xlsx 文件，请先另存为 .xlsx 后再操作。");
+      return;
+    }
+
+    if (!targetFile.diskPath) {
+      updateAssistantMessage(assistantMessageId, "需要先通过桌面端文件选择器打开这个 Excel 文件，才能拿到真实磁盘路径并执行写入。");
       return;
     }
 
@@ -674,6 +688,7 @@ function App() {
       end: number;
       operation: TextEditOperation;
     } | null = null;
+    let fileContext: CompressedFileContext | null = null;
 
     function applyAgentTextResult() {
       if (!textEditTarget || hasAppliedAgentText) return;
@@ -698,12 +713,23 @@ function App() {
     }
 
     try {
+      if (!documentSelection?.text.trim()) {
+        try {
+          fileContext = await buildCompressedFileContext(
+            selectedWorkspaceFile,
+            selectedWorkspaceFile ? unsavedContents[selectedWorkspaceFile.id] : undefined,
+          );
+        } catch (error) {
+          console.warn("Failed to build compressed file context.", error);
+        }
+      }
+
       if (shouldUseSpreadsheetAgent(selectedWorkspaceFile)) {
-        await handleSpreadsheetAgentCommand(model, text, nextMessages, assistantMessageId, streamId);
+        await handleSpreadsheetAgentCommand(model, text, nextMessages, assistantMessageId, streamId, fileContext);
         return;
       }
 
-      const intent = await classifyTextSelectionIntent(model, text, documentSelection);
+      const intent = await classifyTextSelectionIntent(model, text, documentSelection, fileContext);
       if (intent === "ask_confirm") {
         setChatMessages((current) =>
           current.map((message) =>
@@ -718,7 +744,7 @@ function App() {
         return;
       }
 
-      const textEditRequest = buildTextEditAgentRequest(text, documentSelection, intent);
+      const textEditRequest = buildTextEditAgentRequest(text, documentSelection, intent, fileContext);
       textEditTarget =
         textEditRequest && documentSelection
           ? {
@@ -728,7 +754,7 @@ function App() {
               operation: textEditRequest.operation,
             }
           : null;
-      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection);
+      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection, fileContext);
       const assistantContentTone = textEditRequest ? "file-edit" : "default";
 
       setChatMessages((current) =>
@@ -959,6 +985,7 @@ function App() {
           onRefreshStatus={refreshStatus}
           onSelectionContextChange={setDocumentSelection}
           onSelectPreviewTab={setSelectedFileId}
+          onUpdateSpreadsheetFile={updateSpreadsheetFile}
           onUpdateTextFile={updateTextFile}
           onSaveTextFile={saveWorkspaceFile}
         />

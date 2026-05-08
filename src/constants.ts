@@ -6,6 +6,7 @@ export const MIN_EXPLORER_WIDTH = 240;
 export const MIN_CODEX_WIDTH = 340;
 export const HIDE_DRAG_DISTANCE = 48;
 export const MAX_SELECTION_CONTEXT_CHARS = 12000;
+export const MAX_FILE_CONTEXT_CHARS = 30000;
 export const DOCUMENT_EXTENSIONS = ["txt", "md", "csv", "json", "pdf", "xlsx", "xls"];
 export const BINARY_PREVIEW_EXTENSIONS = new Set(["pdf", "xlsx", "xls"]);
 

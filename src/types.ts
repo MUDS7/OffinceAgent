@@ -107,6 +107,7 @@ export type TextEditAgentRequest = {
   start: number;
   end: number;
   selectedText: string;
+  fileContext?: string;
   instruction: string;
   operation: TextEditOperation;
 };
