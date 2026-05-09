@@ -56,42 +56,36 @@ pub(super) fn build_text_edit_messages(
         return Err("Text edit agent requires instruction".to_string());
     }
 
-    let action = if operation == "insert_after_selection" {
-        "insert_after_selection"
-    } else {
-        "replace_selection"
-    };
+    let selected_text_is_empty = request.selected_text.trim().is_empty();
+    let action = operation;
     // 只有编辑器没有选中文本时才附带全文上下文；否则选区本身就是最安全的编辑目标。
-    let file_context_section =
-        if request.selected_text.trim().is_empty() && !file_context.is_empty() {
+    let file_context_section = match (selected_text_is_empty, file_context.is_empty()) {
+        (true, false) => {
             format!(
                 "\nCompressed full file context:\n<<<\n{}\n>>>",
                 truncate_model_context(file_context, 12_000, "file context")
             )
-        } else {
-            String::new()
-        };
+        }
+        _ => String::new(),
+    };
     // 执行器的响应会按标签解析，因此系统消息要约束模型只输出需要写入文件的内容。
     let system_content = format!("{}{}", "You are OfficeAgent's text edit executor. The intent/planning step has already finished in a separate model call. Your only job now is to produce the exact file-edit payload. Never explain your reasoning, never mention the classifier, and never describe the operation. Put the exact text to write between <officeagent_edit> and </officeagent_edit>. Text outside those tags will be ignored.", compression_note);
-    let content = if operation == "insert_after_selection" {
-        format!(
+    let content = match (operation, request.is_full_document, selected_text_is_empty) {
+        ("insert_after_selection", _, _) => format!(
             "Operation: {action}\n\nGenerate the text that should be inserted below the selected text or below the current cursor line. If there is no selected text, use the compressed full file context when it is provided.\n\nRules:\n1. Keep the original selected text unchanged; do not repeat it in the payload.\n2. For requests like \"same function Linux command\", \"equivalent shell/bash command\", or \"相同功能的 linux 命令\", output only the equivalent Linux command text to insert below the selection.\n3. Do not include explanations such as \"considering\", \"because\", \"here is\", \"the command is\", or any notes.\n4. Do not use Markdown fences unless the fences themselves should be written into the file.\n5. Put the exact inserted text inside the edit tags.\n\nRequired output shape:\n<officeagent_edit>\ntext to insert\n</officeagent_edit>\n\nFile path: {file_path}{file_context_section}\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{}\n>>>",
             request.selected_text
-        )
-    } else if request.is_full_document {
-        format!(
+        ),
+        (_, true, _) => format!(
             "Operation: replace_full_document\n\nGenerate the exact complete file content that should replace the current file.\n\nRules:\n1. Return the full updated file, not a patch, explanation, or partial fragment.\n2. Preserve unrelated content unless the user explicitly asks to change it.\n3. If this is a JSON file, output valid JSON for the complete document.\n4. Do not explain or include notes.\n5. Do not use Markdown fences unless the fences themselves should be written into the file.\n6. Put the exact replacement text inside the edit tags.\n\nRequired output shape:\n<officeagent_edit>\ncomplete updated file content\n</officeagent_edit>\n\nFile path: {file_path}\nUser request:\n<<<\n{instruction}\n>>>\nCurrent full file content:\n<<<\n{}\n>>>",
             request.selected_text
-        )
-    } else if request.selected_text.trim().is_empty() {
-        format!(
+        ),
+        (_, _, true) => format!(
             "Operation: {action}\n\nThe user has no selected text. Generate the exact text that should be inserted below the current cursor line. Use the compressed full file context when it is provided, but output only the new text to insert.\n\nRules:\n1. Do not explain.\n2. Do not use Markdown fences unless the fences themselves should be written into the file.\n3. Put the exact new text inside the edit tags.\n\nRequired output shape:\n<officeagent_edit>\ntext to insert\n</officeagent_edit>\n\nFile path: {file_path}{file_context_section}\nUser request:\n<<<\n{instruction}\n>>>"
-        )
-    } else {
-        format!(
+        ),
+        _ => format!(
             "Operation: {action}\n\nGenerate the exact text that should replace the current selection.\n\nRules:\n1. Return the replacement only; do not repeat unrelated surrounding content.\n2. If the user wants to delete the selected text, leave the edit tags empty.\n3. Do not explain or include notes.\n4. Do not use Markdown fences unless the fences themselves should be written into the file.\n5. Put the exact replacement text inside the edit tags.\n\nRequired output shape:\n<officeagent_edit>\nreplacement text\n</officeagent_edit>\n\nFile path: {file_path}\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{}\n>>>",
             request.selected_text
-        )
+        ),
     };
 
     Ok(vec![
@@ -206,27 +200,13 @@ fn truncate_intent_selection_context(text: &str) -> String {
 fn classify_text_file_type(filename: &str) -> &'static str {
     let filename = filename.trim().to_ascii_lowercase();
 
-    if filename.ends_with(".json") {
-        "JSON"
-    } else if filename.ends_with(".md") || filename.ends_with(".markdown") {
-        "Markdown"
-    } else if filename.ends_with(".csv") {
-        "CSV"
-    } else if filename.ends_with(".js")
-        || filename.ends_with(".jsx")
-        || filename.ends_with(".ts")
-        || filename.ends_with(".tsx")
-    {
-        "source code"
-    } else if filename.ends_with(".html")
-        || filename.ends_with(".css")
-        || filename.ends_with(".xml")
-        || filename.ends_with(".yaml")
-        || filename.ends_with(".yml")
-    {
-        "structured text"
-    } else {
-        "plain text"
+    match filename.rsplit_once('.') {
+        Some((_, "json")) => "JSON",
+        Some((_, "md" | "markdown")) => "Markdown",
+        Some((_, "csv")) => "CSV",
+        Some((_, "js" | "jsx" | "ts" | "tsx")) => "source code",
+        Some((_, "html" | "css" | "xml" | "yaml" | "yml")) => "structured text",
+        _ => "plain text",
     }
 }
 
@@ -250,33 +230,28 @@ pub(super) fn parse_text_selection_intent(content: &str) -> &'static str {
         "ask_confirm",
         "answer_only",
     ] {
-        if normalized == intent
-            || normalized.starts_with(intent)
-            || normalized.contains(&format!("\"{intent}\""))
-            || normalized.contains(&format!("'{intent}'"))
-        {
+        if matches_model_action(&normalized, intent) {
             return intent;
         }
     }
 
-    if normalized == "edit"
-        || normalized.starts_with("edit")
-        || normalized.contains("\"edit\"")
-        || normalized.contains("'edit'")
-        || content.trim().starts_with("编辑")
-    {
+    if matches_model_action(&normalized, "edit") || content.trim().starts_with("编辑") {
         return "replace_selection";
     }
 
-    if normalized == "answer"
-        || normalized.starts_with("answer")
-        || normalized.contains("\"answer\"")
-        || normalized.contains("'answer'")
-    {
+    if matches_model_action(&normalized, "answer") {
         return "answer_only";
     }
 
     "answer_only"
+}
+
+/// 判断模型输出是否命中了指定动作名，并兼容带引号或带前缀说明的回答。
+fn matches_model_action(normalized: &str, action: &str) -> bool {
+    normalized == action
+        || normalized.starts_with(action)
+        || normalized.contains(&format!("\"{action}\""))
+        || normalized.contains(&format!("'{action}'"))
 }
 
 /// 将未知编辑操作归一化为默认的替换行为。
