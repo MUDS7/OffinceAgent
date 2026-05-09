@@ -38,6 +38,14 @@ type JsonFoldControl = {
   isCollapsed: boolean;
 };
 
+type JsonFoldPlaceholder = {
+  rangeId: string;
+  start: number;
+  end: number;
+};
+
+const JSON_FOLD_PLACEHOLDER = "...";
+
 export function TextFilePreview({
   activeFile,
   pendingAgentTextEdit,
@@ -330,6 +338,7 @@ export function TextFilePreview({
             value={displayText}
             onBlur={() => setIsTextEditorFocused(false)}
             onChange={(event) => updateTextPreview(event.target.value)}
+            onClick={(event) => expandJsonFoldFromPlaceholderClick(event.currentTarget)}
             onFocus={(event) => {
               setIsTextEditorFocused(true);
               publishTextSelection(event.currentTarget);
@@ -391,6 +400,24 @@ export function TextFilePreview({
         next.add(rangeId);
       }
 
+      return next;
+    });
+  }
+
+  function expandJsonFoldFromPlaceholderClick(textarea: HTMLTextAreaElement) {
+    if (!hasCollapsedJsonFolds || !jsonFoldView) return;
+
+    const cursorPosition = textarea.selectionStart;
+    const placeholder = jsonFoldView.foldPlaceholders.find(
+      (item) => item.start <= cursorPosition && cursorPosition <= item.end,
+    );
+
+    if (!placeholder) return;
+
+    clearTextSelectionHighlight();
+    setCollapsedJsonFoldIds((current) => {
+      const next = new Set(current);
+      next.delete(placeholder.rangeId);
       return next;
     });
   }
@@ -521,11 +548,19 @@ function getJsonFoldRanges(text: string): JsonFoldRange[] {
 
 function buildJsonFoldView(text: string, ranges: JsonFoldRange[], collapsedIds: Set<string>) {
   const collapsedRanges = getVisibleCollapsedJsonRanges(ranges, collapsedIds);
+  const foldPlaceholders: JsonFoldPlaceholder[] = [];
   let foldedText = "";
   let lastIndex = 0;
 
   for (const range of collapsedRanges) {
     foldedText += text.slice(lastIndex, range.openIndex + 1);
+    const placeholderStart = foldedText.length;
+    foldedText += JSON_FOLD_PLACEHOLDER;
+    foldPlaceholders.push({
+      rangeId: range.id,
+      start: placeholderStart,
+      end: foldedText.length,
+    });
     lastIndex = range.closeIndex;
   }
 
@@ -543,6 +578,7 @@ function buildJsonFoldView(text: string, ranges: JsonFoldRange[], collapsedIds: 
   return {
     text: foldedText,
     foldControls,
+    foldPlaceholders,
   };
 }
 
@@ -567,7 +603,7 @@ function isRangeHiddenByCollapsedAncestor(range: JsonFoldRange, collapsedRanges:
 }
 
 function mapOriginalOffsetToFoldedOffset(offset: number, collapsedRanges: JsonFoldRange[]) {
-  let removedCharacterCount = 0;
+  let characterOffsetDelta = 0;
 
   for (const range of collapsedRanges) {
     if (offset <= range.openIndex) {
@@ -575,13 +611,13 @@ function mapOriginalOffsetToFoldedOffset(offset: number, collapsedRanges: JsonFo
     }
 
     if (offset < range.closeIndex) {
-      return range.openIndex + 1 - removedCharacterCount;
+      return range.openIndex + 1 + JSON_FOLD_PLACEHOLDER.length + characterOffsetDelta;
     }
 
-    removedCharacterCount += range.closeIndex - range.openIndex - 1;
+    characterOffsetDelta += JSON_FOLD_PLACEHOLDER.length - (range.closeIndex - range.openIndex - 1);
   }
 
-  return offset - removedCharacterCount;
+  return offset + characterOffsetDelta;
 }
 
 function getLineStarts(text: string) {
@@ -653,6 +689,12 @@ function getJsonSyntaxParts(text: string): JsonSyntaxPart[] {
 
       parts.push({ text: tokenText, className });
       index = token.end;
+      continue;
+    }
+
+    if (text.startsWith(JSON_FOLD_PLACEHOLDER, index)) {
+      parts.push({ text: JSON_FOLD_PLACEHOLDER, className: "json-fold-placeholder" });
+      index += JSON_FOLD_PLACEHOLDER.length;
       continue;
     }
 

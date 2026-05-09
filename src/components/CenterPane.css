@@ -703,6 +703,11 @@
   color: #68707a;
 }
 
+.json-fold-placeholder {
+  color: #9aa1a9;
+  font-weight: 600;
+}
+
 .text-selection-overlay {
   position: absolute;
   inset: 0;
