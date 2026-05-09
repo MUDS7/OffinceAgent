@@ -34,6 +34,25 @@ export type ChatMessage = {
   text: string;
   reasoningText?: string;
   contentTone?: "default" | "file-edit";
+  fileChangeSet?: AgentFileChangeSet;
+};
+
+export type AgentFileChangeSet = {
+  id: string;
+  status: "active" | "undone";
+  changes: AgentFileChange[];
+};
+
+export type AgentFileChange = {
+  id: string;
+  fileId: string;
+  filePath?: string;
+  filename: string;
+  additions: number;
+  deletions: number;
+  beforeText: string;
+  afterText: string;
+  wasDirtyBefore: boolean;
 };
 
 export type DeepSeekApiMessage = {
@@ -131,6 +150,7 @@ export type TextSelectionIntentResult = {
 
 export type AgentTextEditResult = {
   id: string;
+  assistantMessageId: string;
   fileId: string;
   start: number;
   end: number;

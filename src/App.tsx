@@ -13,7 +13,9 @@ import { TopBar } from "./components/TopBar";
 import { BINARY_PREVIEW_EXTENSIONS, DOCUMENT_EXTENSIONS, DOCUMENT_SERVICE_URL } from "./constants";
 import type {
   AgentInfo,
+  AgentFileChange,
   AgentTextEditResult,
+  AgentFileChangeSet,
   AnalyzeResult,
   ChatMessage,
   DeepSeekStreamEvent,
@@ -76,6 +78,9 @@ function App() {
   const [draftMessage, setDraftMessage] = useState("");
   const [documentSelection, setDocumentSelection] = useState<DocumentSelectionContext | null>(null);
   const [pendingAgentTextEdit, setPendingAgentTextEdit] = useState<AgentTextEditResult | null>(null);
+  const [pendingTextRestore, setPendingTextRestore] = useState<{ id: string; fileId: string; text: string } | null>(
+    null,
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
@@ -605,6 +610,131 @@ function App() {
     );
   }
 
+  function attachAgentFileChange(change: {
+    assistantMessageId: string;
+    editId: string;
+    fileId: string;
+    filePath?: string;
+    filename: string;
+    beforeText: string;
+    afterText: string;
+    wasDirtyBefore: boolean;
+  }) {
+    const stats = calculateLineChangeStats(change.beforeText, change.afterText);
+    const fileChange: AgentFileChange = {
+      id: change.editId,
+      fileId: change.fileId,
+      filePath: change.filePath,
+      filename: change.filename,
+      beforeText: change.beforeText,
+      afterText: change.afterText,
+      wasDirtyBefore: change.wasDirtyBefore,
+      additions: stats.additions,
+      deletions: stats.deletions,
+    };
+    const fileChangeSet: AgentFileChangeSet = {
+      id: `change-set-${change.editId}`,
+      status: "active",
+      changes: [fileChange],
+    };
+
+    setPendingAgentTextEdit(null);
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === change.assistantMessageId
+          ? {
+              ...message,
+              fileChangeSet,
+            }
+          : message,
+      ),
+    );
+  }
+
+  async function undoAgentFileChanges(messageId: string) {
+    const changeSet = chatMessages.find((message) => message.id === messageId)?.fileChangeSet;
+    if (!changeSet || changeSet.status !== "active") return;
+
+    setErrorMessage("");
+
+    try {
+      for (const change of changeSet.changes) {
+        if (change.filePath && !change.wasDirtyBefore && canUseTauriEvents()) {
+          await invoke("save_file_to_disk", { path: change.filePath, content: change.beforeText });
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setErrorMessage(`撤销文件改动失败：${message}`);
+      return;
+    }
+
+    setWorkspaceFiles((current) =>
+      current.map((item) => {
+        const change = changeSet.changes.find((candidate) => candidate.fileId === item.id);
+        if (!change || change.wasDirtyBefore) return item;
+
+        const file = new File([change.beforeText], item.file.name, {
+          type: item.file.type || getFileMimeType(item.file.name),
+          lastModified: Date.now(),
+        });
+
+        return { ...item, file, analysis: null };
+      }),
+    );
+
+    setUnsavedContents((current) => {
+      const next = { ...current };
+
+      for (const change of changeSet.changes) {
+        if (change.wasDirtyBefore) {
+          next[change.fileId] = change.beforeText;
+        } else {
+          delete next[change.fileId];
+        }
+      }
+
+      return next;
+    });
+
+    setDirtyFileIds((current) => {
+      const next = new Set(current);
+
+      for (const change of changeSet.changes) {
+        if (change.wasDirtyBefore) {
+          next.add(change.fileId);
+        } else {
+          next.delete(change.fileId);
+        }
+      }
+
+      return [...next];
+    });
+
+    const visibleChange = changeSet.changes.find((change) => change.fileId === selectedFileId);
+    if (visibleChange) {
+      setPendingTextRestore({
+        id: `text-restore-${Date.now()}`,
+        fileId: visibleChange.fileId,
+        text: visibleChange.beforeText,
+      });
+    }
+
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId && message.fileChangeSet
+          ? {
+              ...message,
+              fileChangeSet: {
+                ...message.fileChangeSet,
+                status: "undone",
+              },
+            }
+          : message,
+      ),
+    );
+  }
+
   async function refreshExcelWorkspaceFile(targetFile: WorkspaceFile, result: ExcelExecuteResponse) {
     const outputPath = result.output_path;
 
@@ -722,6 +852,7 @@ function App() {
       );
       setPendingAgentTextEdit({
         id: `agent-edit-${now}`,
+        assistantMessageId,
         fileId: textEditTarget.fileId,
         start: textEditTarget.start,
         end: textEditTarget.end,
@@ -1080,9 +1211,10 @@ function App() {
           errorMessage={errorMessage}
           isChecking={isChecking}
           pendingAgentTextEdit={pendingAgentTextEdit}
+          pendingTextRestore={pendingTextRestore}
           previewTabs={openPreviewTabs}
           unsavedText={unsavedContents[selectedFileId]}
-          onAgentTextEditApplied={() => setPendingAgentTextEdit(null)}
+          onAgentTextEditApplied={attachAgentFileChange}
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
           onSelectionContextChange={setDocumentSelection}
@@ -1113,11 +1245,51 @@ function App() {
           onClearChat={() => setChatMessages([])}
           onDraftMessageChange={setDraftMessage}
           onOpenFilePicker={openFilePicker}
+          onUndoFileChanges={undoAgentFileChanges}
           onSendMessage={sendMessage}
         />
       </section>
     </main>
   );
+}
+
+function calculateLineChangeStats(beforeText: string, afterText: string) {
+  const beforeLines = splitComparableLines(beforeText);
+  const afterLines = splitComparableLines(afterText);
+  let prefixLength = 0;
+
+  while (
+    prefixLength < beforeLines.length &&
+    prefixLength < afterLines.length &&
+    beforeLines[prefixLength] === afterLines[prefixLength]
+  ) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < beforeLines.length - prefixLength &&
+    suffixLength < afterLines.length - prefixLength &&
+    beforeLines[beforeLines.length - 1 - suffixLength] === afterLines[afterLines.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  return {
+    additions: Math.max(0, afterLines.length - prefixLength - suffixLength),
+    deletions: Math.max(0, beforeLines.length - prefixLength - suffixLength),
+  };
+}
+
+function splitComparableLines(text: string) {
+  if (!text.length) return [];
+
+  const normalizedText = text.replace(/\r\n?/g, "\n");
+  const withoutFinalEmptyLine = normalizedText.endsWith("\n")
+    ? normalizedText.slice(0, -1)
+    : normalizedText;
+
+  return withoutFinalEmptyLine.length ? withoutFinalEmptyLine.split("\n") : [];
 }
 
 export default App;

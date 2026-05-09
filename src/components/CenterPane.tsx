@@ -14,6 +14,7 @@ export function CenterPane({
   errorMessage,
   isChecking,
   pendingAgentTextEdit,
+  pendingTextRestore,
   previewTabs,
   unsavedText,
   onAgentTextEditApplied,
@@ -69,6 +70,7 @@ export function CenterPane({
         <TextFilePreview
           activeFile={activeFile}
           pendingAgentTextEdit={pendingAgentTextEdit}
+          pendingTextRestore={pendingTextRestore}
           unsavedText={unsavedText}
           onAgentTextEditApplied={onAgentTextEditApplied}
           onSelectionContextChange={onSelectionContextChange}

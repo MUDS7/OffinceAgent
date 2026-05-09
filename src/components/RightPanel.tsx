@@ -2,34 +2,19 @@ import {
   ArrowUp,
   ChevronDown,
   Check,
+  ChevronRight,
   Hand,
   Maximize2,
   Paperclip,
   Sparkles,
   Table2,
+  Undo2,
   X,
 } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { AgentFileChangeSet, ChatMessage, DocumentSelectionContext } from "../types";
 import "./RightPanel.css";
-
-type ChatMessage = {
-  id: string;
-  role: "assistant" | "user";
-  text: string;
-  reasoningText?: string;
-  contentTone?: "default" | "file-edit";
-};
-
-type DocumentSelectionContext = {
-  fileId: string;
-  filePath: string;
-  filename: string;
-  sourceType: "pdf" | "spreadsheet" | "text";
-  start?: number;
-  end?: number;
-  text: string;
-};
 
 type RightPanelProps = {
   chatMessages: ChatMessage[];
@@ -40,6 +25,7 @@ type RightPanelProps = {
   onClearChat: () => void;
   onDraftMessageChange: (message: string) => void;
   onOpenFilePicker: () => void;
+  onUndoFileChanges: (messageId: string) => void;
   onSendMessage: (model: string) => void;
 };
 
@@ -58,6 +44,7 @@ export function RightPanel({
   onClearChat,
   onDraftMessageChange,
   onOpenFilePicker,
+  onUndoFileChanges,
   onSendMessage,
 }: RightPanelProps) {
   const [selectedModel, setSelectedModel] = useState("deepseek-v4-flash");
@@ -151,7 +138,7 @@ export function RightPanel({
           <div className="floating-history" ref={historyRef}>
             {chatMessages.map((message) => (
               <article className={`chat-message ${message.role}`} key={message.id}>
-                <ChatMessageContent message={message} />
+                <ChatMessageContent message={message} onUndoFileChanges={onUndoFileChanges} />
               </article>
             ))}
           </div>
@@ -246,7 +233,13 @@ export function RightPanel({
   );
 }
 
-function ChatMessageContent({ message }: { message: ChatMessage }) {
+function ChatMessageContent({
+  message,
+  onUndoFileChanges,
+}: {
+  message: ChatMessage;
+  onUndoFileChanges: (messageId: string) => void;
+}) {
   const isAssistant = message.role === "assistant";
   const hasReasoning = Boolean(message.reasoningText?.trim());
   const hasText = Boolean(message.text.trim());
@@ -259,7 +252,70 @@ function ChatMessageContent({ message }: { message: ChatMessage }) {
     <div className="assistant-message-content">
       {hasReasoning ? <p className="assistant-reasoning">{message.reasoningText}</p> : null}
       {hasText ? <p className={message.contentTone === "file-edit" ? "assistant-file-edit" : undefined}>{message.text}</p> : null}
+      {message.fileChangeSet ? (
+        <AgentFileChangeTag
+          changeSet={message.fileChangeSet}
+          onUndo={() => onUndoFileChanges(message.id)}
+        />
+      ) : null}
       {!hasReasoning && !hasText ? <p className="assistant-placeholder" /> : null}
+    </div>
+  );
+}
+
+function AgentFileChangeTag({
+  changeSet,
+  onUndo,
+}: {
+  changeSet: AgentFileChangeSet;
+  onUndo: () => void;
+}) {
+  const [isExpanded, setIsExpanded] = useState(true);
+  const totals = changeSet.changes.reduce(
+    (sum, change) => ({
+      additions: sum.additions + change.additions,
+      deletions: sum.deletions + change.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+  const isUndone = changeSet.status === "undone";
+
+  return (
+    <div className={isUndone ? "agent-file-change-card undone" : "agent-file-change-card"}>
+      <div className="agent-file-change-summary">
+        <button
+          className={isExpanded ? "agent-file-change-toggle expanded" : "agent-file-change-toggle"}
+          type="button"
+          aria-label={isExpanded ? "收起文件改动" : "展开文件改动"}
+          onClick={() => setIsExpanded((current) => !current)}
+        >
+          <ChevronRight size={17} />
+        </button>
+        <span className="agent-file-change-count">{changeSet.changes.length} 个文件已更改</span>
+        {totals.additions ? <span className="agent-file-change-additions">+{totals.additions}</span> : null}
+        {totals.deletions ? <span className="agent-file-change-deletions">-{totals.deletions}</span> : null}
+        <button
+          className="agent-file-change-undo"
+          type="button"
+          disabled={isUndone}
+          onClick={onUndo}
+          title={isUndone ? "已撤销" : "撤销本次文件改动"}
+        >
+          {isUndone ? "已撤销" : "撤销"} <Undo2 size={15} />
+        </button>
+      </div>
+
+      {isExpanded ? (
+        <div className="agent-file-change-files">
+          {changeSet.changes.map((change) => (
+            <div className="agent-file-change-file" key={change.id}>
+              <span title={change.filePath || change.filename}>{change.filePath || change.filename}</span>
+              {change.additions ? <span className="agent-file-change-additions">+{change.additions}</span> : null}
+              {change.deletions ? <span className="agent-file-change-deletions">-{change.deletions}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,13 +1,20 @@
 import { RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getFileExtension } from "./filePreviewUtils";
-import type { AgentTextEditResult, DocumentSelectionContext, PreviewFile } from "./types";
+import type {
+  AgentTextEditResult,
+  AppliedAgentTextEditChange,
+  DocumentSelectionContext,
+  PendingTextRestore,
+  PreviewFile,
+} from "./types";
 
 type TextFilePreviewProps = {
   activeFile: PreviewFile;
   pendingAgentTextEdit: AgentTextEditResult | null;
+  pendingTextRestore: PendingTextRestore | null;
   unsavedText?: string;
-  onAgentTextEditApplied: () => void;
+  onAgentTextEditApplied: (change: AppliedAgentTextEditChange) => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
   onSaveTextFile: (fileId: string) => void;
@@ -49,6 +56,7 @@ const JSON_FOLD_PLACEHOLDER = "...";
 export function TextFilePreview({
   activeFile,
   pendingAgentTextEdit,
+  pendingTextRestore,
   unsavedText,
   onAgentTextEditApplied,
   onSelectionContextChange,
@@ -58,6 +66,7 @@ export function TextFilePreview({
   const textEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const lastTextSelectionRef = useRef("");
   const lastAppliedAgentEditIdRef = useRef("");
+  const lastAppliedTextRestoreIdRef = useRef("");
   const [textPreview, setTextPreview] = useState({
     fileId: "",
     isLoading: false,
@@ -214,6 +223,7 @@ export function TextFilePreview({
     if (textPreview.isLoading || textPreview.error) return;
 
     lastAppliedAgentEditIdRef.current = pendingAgentTextEdit.id;
+    const beforeText = textPreview.text;
     const appliedEdit = applyAgentTextEdit(textPreview.text, pendingAgentTextEdit);
     setCollapsedJsonFoldIds(new Set());
     setTextPreview((current) => ({
@@ -233,7 +243,16 @@ export function TextFilePreview({
     onUpdateTextFile(activeFile.id, appliedEdit.text);
     setTextSelectionHighlight(null);
     onSelectionContextChange(null);
-    onAgentTextEditApplied();
+    onAgentTextEditApplied({
+      assistantMessageId: pendingAgentTextEdit.assistantMessageId,
+      editId: pendingAgentTextEdit.id,
+      fileId: activeFile.id,
+      filePath: activeFile.diskPath,
+      filename: activeFile.filename,
+      beforeText,
+      afterText: appliedEdit.text,
+      wasDirtyBefore: unsavedText !== undefined,
+    });
 
     window.requestAnimationFrame(() => {
       const editor = textEditorRef.current;
@@ -243,6 +262,34 @@ export function TextFilePreview({
       editor.setSelectionRange(appliedEdit.cursorPosition, appliedEdit.cursorPosition);
     });
   }, [pendingAgentTextEdit?.id]);
+
+  useEffect(() => {
+    if (!pendingTextRestore || pendingTextRestore.fileId !== activeFile.id) return;
+    if (lastAppliedTextRestoreIdRef.current === pendingTextRestore.id) return;
+
+    lastAppliedTextRestoreIdRef.current = pendingTextRestore.id;
+    const normalizedText = normalizeEditorLineEndings(pendingTextRestore.text);
+    setCollapsedJsonFoldIds(new Set());
+    setTextSelectionHighlight(null);
+    setTextPreview((current) => ({
+      ...current,
+      fileId: activeFile.id,
+      isLoading: false,
+      text: normalizedText,
+      error: "",
+    }));
+    setHistory([normalizedText]);
+    setHistoryIndex(0);
+    onSelectionContextChange(null);
+
+    window.requestAnimationFrame(() => {
+      const editor = textEditorRef.current;
+      if (!editor) return;
+
+      editor.focus();
+      editor.setSelectionRange(0, 0);
+    });
+  }, [pendingTextRestore?.id]);
 
   if (textPreview.isLoading && textPreview.fileId === activeFile.id) {
     return (
