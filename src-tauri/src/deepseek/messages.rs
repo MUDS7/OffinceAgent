@@ -119,23 +119,11 @@ pub(super) fn build_text_selection_intent_messages(
     }
 
     let selected_text = truncate_intent_selection_context(request.selected_text.trim());
-    // 没有显式选区时，给分类器一份压缩后的文件快照，帮助它区分插入、替换和仅回答。
     let file_context_section =
-        if request.selected_text.trim().is_empty() && !raw_file_context.is_empty() {
-            format!(
-                "\nCompressed full file context:\n<<<\n{}\n>>>",
-                truncate_model_context(raw_file_context, 12_000, "file context")
-            )
-        } else {
-            String::new()
-        };
+        build_intent_file_context_section(request.selected_text.trim(), raw_file_context);
+    let selection_state = describe_intent_selection_state(&selected_text);
     let content = format!(
         "Current open file:\nFilename: {filename}\nFile path: {file_path}\nFile type: {file_type}\nSelection state: {selection_state}\n\nYou are OfficeAgent's file-edit intent classifier. This is the planning step only; a second model call will execute the edit later. The user is typing a request while this file is open, possibly with selected text or a cursor position.\n\nChoose exactly one action:\n- answer_only: The user only asks a question, requests an explanation/summary/analysis/advice, or asks you to judge content. Do not modify the file.\n- replace_selection: The user clearly wants to rewrite, replace, polish, translate, format, delete, or otherwise transform the current selected text. Deleting selected text is replace_selection; the editor will replace the selection with empty content.\n- insert_after_selection: The user clearly wants to add, insert, append, supplement, or generate new content after the current selection or cursor, rather than replacing selected text.\n- ask_confirm: The user may want to modify the file, but the target position, replace-vs-insert choice, deletion range, or written content is unclear enough that editing directly is risky.\n\nRules:\n1. Output only one action name: answer_only, replace_selection, insert_after_selection, or ask_confirm.\n2. Do not explain. Do not output JSON.\n3. The filename and file type above are authoritative context for the user's intent.\n4. Judge from the user request, the current selected text, and the compressed full file context when no text is selected.\n5. If the current filename ends with .json, no text is selected, and the user clearly asks to modify/update/set/configure/add/remove data in the JSON file, choose replace_selection. The app will replace the full JSON document in the next step.\n6. If selected text exists and the user asks for a same-function/equivalent Linux, shell, bash, PowerShell, or command-line command, choose insert_after_selection because the original selection should remain and the new command should be added below it.\n7. If there is no selected text and the user clearly asks to add/insert/append/generate content, usually choose insert_after_selection.\n8. If there is no selected text and the user asks to replace/delete/rewrite 'this', 'here', or 'the selected content' with an unclear range, choose ask_confirm, except for the .json full-document edit case above.\n9. If the user asks 'what does this mean', 'analyze this', 'give advice', or 'is this correct', choose answer_only.\n{file_context_section}\n\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{selected_text}\n>>>",
-        selection_state = if selected_text.trim().is_empty() {
-            "none; cursor-only or whole-file context"
-        } else {
-            "selected text is present"
-        }
     );
 
     Ok(vec![DeepSeekMessage {
@@ -154,31 +142,11 @@ pub(super) fn extract_deepseek_message_content(body: &str) -> Result<String, Str
         .and_then(|choices| choices.as_array())
         .ok_or_else(|| "missing choices array".to_string())?;
 
-    for choice in choices {
-        // 标准聊天补全会把可见回答放在 message.content 中。
-        if let Some(content) = choice
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(value_to_text)
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-        {
-            return Ok(content.to_string());
-        }
-
-        // 部分推理模型可能返回 reasoning_content；这里作为兜底读取，保证调用方仍能拿到文本。
-        if let Some(content) = choice
-            .get("message")
-            .and_then(|message| message.get("reasoning_content"))
-            .and_then(value_to_text)
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-        {
-            return Ok(content.to_string());
-        }
-    }
-
-    Ok(String::new())
+    Ok(choices
+        .iter()
+        .find_map(extract_choice_message_content)
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// 从预期为文本的 JSON 字段中取出字符串值。
@@ -187,6 +155,37 @@ fn value_to_text(value: &serde_json::Value) -> Option<&str> {
         serde_json::Value::String(text) => Some(text.as_str()),
         _ => None,
     }
+}
+
+/// 没有显式选区时，给分类器一份压缩后的文件快照，帮助它区分插入、替换和仅回答。
+fn build_intent_file_context_section(selected_text: &str, raw_file_context: &str) -> String {
+    match (selected_text.is_empty(), raw_file_context.is_empty()) {
+        (true, false) => format!(
+            "\nCompressed full file context:\n<<<\n{}\n>>>",
+            truncate_model_context(raw_file_context, 12_000, "file context")
+        ),
+        _ => String::new(),
+    }
+}
+
+/// 将选区状态转换成分类器提示词里使用的固定描述。
+fn describe_intent_selection_state(selected_text: &str) -> &'static str {
+    match selected_text.trim().is_empty() {
+        true => "none; cursor-only or whole-file context",
+        false => "selected text is present",
+    }
+}
+
+/// 按 DeepSeek 的常见字段顺序，从单个 choice 中提取可用文本。
+fn extract_choice_message_content(choice: &serde_json::Value) -> Option<&str> {
+    let message = choice.get("message")?;
+
+    // 标准聊天补全使用 content；部分推理模型可能返回 reasoning_content。
+    ["content", "reasoning_content"]
+        .into_iter()
+        .find_map(|field| message.get(field).and_then(value_to_text))
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
 }
 
 /// 将选中文本限制在适合意图分类提示词的长度内。
