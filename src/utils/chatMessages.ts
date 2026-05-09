@@ -137,6 +137,7 @@ export function buildTextEditAgentRequest(
   documentSelection: DocumentSelectionContext | null,
   intent: TextSelectionIntentAction,
   fileContext: CompressedFileContext | null = null,
+  fullDocumentText?: string,
 ): TextEditAgentRequest | null {
   if (
     (intent !== "replace_selection" && intent !== "insert_after_selection") ||
@@ -145,15 +146,22 @@ export function buildTextEditAgentRequest(
     return null;
   }
 
-  const start = documentSelection.start ?? 0;
-  const end = documentSelection.end ?? start + documentSelection.text.length;
+  const shouldReplaceFullDocument =
+    intent === "replace_selection" &&
+    !documentSelection.text.trim() &&
+    fullDocumentText !== undefined;
+  const start = shouldReplaceFullDocument ? 0 : documentSelection.start ?? 0;
+  const end = shouldReplaceFullDocument
+    ? fullDocumentText.length
+    : documentSelection.end ?? start + documentSelection.text.length;
 
   return {
     filePath: documentSelection.filePath,
     start,
     end,
-    selectedText: documentSelection.text,
-    fileContext: documentSelection.text.trim() ? undefined : fileContext?.content,
+    selectedText: shouldReplaceFullDocument ? fullDocumentText : documentSelection.text,
+    fileContext: shouldReplaceFullDocument || documentSelection.text.trim() ? undefined : fileContext?.content,
+    isFullDocument: shouldReplaceFullDocument,
     instruction,
     operation: intent,
   };

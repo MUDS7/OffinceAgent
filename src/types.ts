@@ -108,6 +108,7 @@ export type TextEditAgentRequest = {
   end: number;
   selectedText: string;
   fileContext?: string;
+  isFullDocument?: boolean;
   instruction: string;
   operation: TextEditOperation;
 };

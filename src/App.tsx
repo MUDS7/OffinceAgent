@@ -24,6 +24,7 @@ import type {
   ResizeTarget,
   ServiceStatus,
   TextEditOperation,
+  TextSelectionIntentAction,
   WorkspaceFile,
 } from "./types";
 import {
@@ -687,6 +688,7 @@ function App() {
       start: number;
       end: number;
       operation: TextEditOperation;
+      isFullDocument?: boolean;
     } | null = null;
     let fileContext: CompressedFileContext | null = null;
 
@@ -696,7 +698,9 @@ function App() {
       if (textEditTarget.operation === "insert_after_selection" && !editText.length) return;
 
       hasAppliedAgentText = true;
-      const statusText = getTextEditStatusMessage(textEditTarget.operation, editText);
+      const statusText = textEditTarget.isFullDocument
+        ? "已更新当前 JSON 文件。"
+        : getTextEditStatusMessage(textEditTarget.operation, editText);
       setChatMessages((current) =>
         current.map((message) =>
           message.id === assistantMessageId && !message.text ? { ...message, text: statusText } : message,
@@ -729,7 +733,14 @@ function App() {
         return;
       }
 
-      const intent = await classifyTextSelectionIntent(model, text, documentSelection, fileContext);
+      const textSelection = documentSelection ?? buildJsonFileCursorSelection(selectedWorkspaceFile);
+      let fullDocumentText: string | undefined;
+      let intent = await classifyTextSelectionIntent(model, text, textSelection, fileContext);
+      if (shouldUseJsonFullDocumentEdit(selectedWorkspaceFile, textSelection, text, intent)) {
+        fullDocumentText = await readWorkspaceText(selectedWorkspaceFile);
+        intent = "replace_selection";
+      }
+
       if (intent === "ask_confirm") {
         setChatMessages((current) =>
           current.map((message) =>
@@ -744,17 +755,18 @@ function App() {
         return;
       }
 
-      const textEditRequest = buildTextEditAgentRequest(text, documentSelection, intent, fileContext);
+      const textEditRequest = buildTextEditAgentRequest(text, textSelection, intent, fileContext, fullDocumentText);
       textEditTarget =
-        textEditRequest && documentSelection
+        textEditRequest && textSelection
           ? {
-              fileId: documentSelection.fileId,
+              fileId: textSelection.fileId,
               start: textEditRequest.start,
               end: textEditRequest.end,
               operation: textEditRequest.operation,
+              isFullDocument: textEditRequest.isFullDocument,
             }
           : null;
-      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, documentSelection, fileContext);
+      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, textSelection, fileContext);
       const assistantContentTone = textEditRequest ? "file-edit" : "default";
 
       setChatMessages((current) =>
@@ -831,6 +843,79 @@ function App() {
       unlisten?.();
       setIsSendingMessage(false);
     }
+  }
+
+  function buildJsonFileCursorSelection(file: WorkspaceFile | null): DocumentSelectionContext | null {
+    if (!isJsonWorkspaceFile(file)) return null;
+
+    return {
+      fileId: file.id,
+      filePath: file.diskPath ?? file.file.name,
+      filename: file.file.name,
+      sourceType: "text",
+      start: 0,
+      end: 0,
+      text: "",
+    };
+  }
+
+  function shouldUseJsonFullDocumentEdit(
+    file: WorkspaceFile | null,
+    selection: DocumentSelectionContext | null,
+    instruction: string,
+    intent: TextSelectionIntentAction,
+  ) {
+    if (!isJsonWorkspaceFile(file)) return false;
+    if (selection?.sourceType !== "text" || selection.text.trim()) return false;
+    if (intent === "answer_only") return false;
+
+    return intent !== "ask_confirm" || isLikelyJsonEditInstruction(instruction);
+  }
+
+  async function readWorkspaceText(file: WorkspaceFile | null) {
+    if (!file) return "";
+
+    return unsavedContents[file.id] ?? (await file.file.text());
+  }
+
+  function isJsonWorkspaceFile(file: WorkspaceFile | null): file is WorkspaceFile {
+    return file?.file.name.toLowerCase().endsWith(".json") ?? false;
+  }
+
+  function isLikelyJsonEditInstruction(instruction: string) {
+    const normalized = instruction.toLowerCase();
+    const editKeywords = [
+      "修改",
+      "改",
+      "更新",
+      "调整",
+      "修复",
+      "整理",
+      "格式化",
+      "重写",
+      "替换",
+      "删除",
+      "移除",
+      "新增",
+      "添加",
+      "增加",
+      "加",
+      "modify",
+      "edit",
+      "update",
+      "change",
+      "fix",
+      "format",
+      "rewrite",
+      "replace",
+      "delete",
+      "remove",
+      "add",
+      "insert",
+      "append",
+    ];
+
+    return editKeywords.some((keyword) => normalized.includes(keyword));
   }
 
   function startLayoutResize(target: ResizeTarget, event: ReactPointerEvent<HTMLDivElement>) {

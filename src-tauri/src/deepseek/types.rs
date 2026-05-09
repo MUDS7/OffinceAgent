@@ -12,6 +12,8 @@ pub(crate) struct TextEditAgentRequest {
     pub(super) end: usize,
     pub(super) selected_text: String,
     pub(super) file_context: Option<String>,
+    #[serde(default)]
+    pub(super) is_full_document: bool,
     pub(super) instruction: String,
     pub(super) operation: String,
 }
