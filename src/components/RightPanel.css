@@ -213,6 +213,26 @@
   color: #111111;
 }
 
+.assistant-message-content .assistant-reasoning {
+  width: min(100%, 38rem);
+  padding: 10px 12px 10px 14px;
+  border-left: 3px solid #8a8f98;
+  border-radius: 6px;
+  color: #565d66;
+  background: #f6f7f8;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.assistant-message-content .assistant-reasoning::before {
+  display: block;
+  margin-bottom: 6px;
+  color: #30363d;
+  content: "思考过程";
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .assistant-message-content .assistant-file-edit {
   color: #767676;
 }

@@ -30,6 +30,7 @@ type RightPanelProps = {
 };
 
 const modelOptions = [
+  { id: "deepseek-reasoner", label: "DeepSeek Reasoner" },
   { id: "deepseek-v3", label: "DeepSeek V3" },
   { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
   { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
@@ -47,7 +48,7 @@ export function RightPanel({
   onUndoFileChanges,
   onSendMessage,
 }: RightPanelProps) {
-  const [selectedModel, setSelectedModel] = useState("deepseek-v4-flash");
+  const [selectedModel, setSelectedModel] = useState("deepseek-reasoner");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);

@@ -537,6 +537,17 @@ function App() {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
 
+        if (payload.kind === "reasoning" && payload.content) {
+          setChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, reasoningText: `${message.reasoningText ?? ""}${payload.content}` }
+                : message,
+            ),
+          );
+          return;
+        }
+
         if (payload.kind === "delta" && payload.content) {
           assistantText += payload.content;
         }
@@ -928,8 +939,6 @@ function App() {
         if (payload.stream_id !== streamId) return;
 
         if (payload.kind === "reasoning" && payload.content) {
-          if (textEditTarget) return;
-
           setChatMessages((current) =>
             current.map((message) =>
               message.id === assistantMessageId

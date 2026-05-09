@@ -39,6 +39,16 @@ pub(super) struct DeepSeekChatRequest {
     pub(super) model: String,
     pub(super) messages: Vec<DeepSeekMessage>,
     pub(super) stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) thinking: Option<DeepSeekThinking>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct DeepSeekThinking {
+    #[serde(rename = "type")]
+    pub(super) kind: String,
 }
 
 #[derive(Clone, serde::Serialize)]

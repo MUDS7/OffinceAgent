@@ -16,8 +16,8 @@ use self::{
     },
     stream::{emit_deepseek_stream_event, stream_deepseek_response},
     types::{
-        DeepSeekChatRequest, DeepSeekMessage, TextEditAgentRequest, TextSelectionIntentRequest,
-        TextSelectionIntentResult,
+        DeepSeekChatRequest, DeepSeekMessage, DeepSeekThinking, TextEditAgentRequest,
+        TextSelectionIntentRequest, TextSelectionIntentResult,
     },
 };
 
@@ -41,6 +41,10 @@ pub(crate) async fn chat_with_deepseek(
         model: model.clone(),
         messages,
         stream: true,
+        reasoning_effort: should_enable_deepseek_thinking(&model).then(|| "high".to_string()),
+        thinking: should_enable_deepseek_thinking(&model).then(|| DeepSeekThinking {
+            kind: "enabled".to_string(),
+        }),
     };
 
     let client = deepseek_client(Duration::from_secs(90))?;
@@ -90,6 +94,8 @@ pub(crate) async fn classify_text_selection_intent(
         model,
         messages: build_text_selection_intent_messages(request)?,
         stream: false,
+        reasoning_effort: None,
+        thinking: None,
     };
 
     let client = deepseek_client(Duration::from_secs(45))?;
@@ -129,6 +135,10 @@ pub(crate) async fn classify_text_selection_intent(
     Ok(TextSelectionIntentResult {
         intent: parse_text_selection_intent(&content),
     })
+}
+
+fn should_enable_deepseek_thinking(model: &str) -> bool {
+    model == "deepseek-v4-pro"
 }
 
 fn deepseek_client(timeout: Duration) -> Result<reqwest::Client, String> {
