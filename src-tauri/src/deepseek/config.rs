@@ -1,5 +1,6 @@
 use std::env;
 
+/// 从环境变量或 `.env` 文件中读取 DeepSeek API Key。
 pub(super) fn read_deepseek_api_key() -> Result<String, String> {
     load_dotenv_files();
 
@@ -12,6 +13,9 @@ pub(super) fn read_deepseek_api_key() -> Result<String, String> {
         })
 }
 
+/// 加载常见位置的 `.env` 和 `.env.local` 文件。
+///
+/// `dotenvy::dotenv()` 会处理当前工作目录；后续循环额外覆盖开发和打包时常见的父目录。
 fn load_dotenv_files() {
     let _ = dotenvy::dotenv();
 
@@ -24,6 +28,7 @@ fn load_dotenv_files() {
     }
 }
 
+/// 生成可能包含 DeepSeek 配置的目录列表。
 fn dotenv_base_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
 
@@ -43,6 +48,7 @@ fn dotenv_base_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// 归一化前端传入的模型名，兼容历史别名并提供默认模型。
 pub(super) fn normalize_deepseek_model(model: Option<&str>) -> String {
     match model.unwrap_or("deepseek-v4-flash").trim() {
         "" => "deepseek-v4-flash",
@@ -53,6 +59,7 @@ pub(super) fn normalize_deepseek_model(model: Option<&str>) -> String {
     .to_string()
 }
 
+/// 截断过长的上游错误响应，避免把完整错误体塞进前端提示。
 pub(super) fn truncate_error_body(body: &str) -> String {
     const MAX_ERROR_CHARS: usize = 400;
 

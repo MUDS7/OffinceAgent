@@ -1,3 +1,8 @@
+//! DeepSeek 后端适配层。
+//!
+//! 本模块把前端的聊天、文本编辑和意图分类请求转换为 DeepSeek API 调用，
+//! 并将流式响应重新打包成 Tauri 事件。
+
 mod config;
 mod messages;
 mod stream;
@@ -21,9 +26,11 @@ use self::{
     },
 };
 
+/// DeepSeek 兼容 OpenAI Chat Completions 的接口地址。
 const DEEPSEEK_CHAT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 
 #[tauri::command]
+/// Tauri 命令：调用 DeepSeek 聊天接口，并把流式结果通过事件推送给前端。
 pub(crate) async fn chat_with_deepseek(
     app: AppHandle,
     model: Option<String>,
@@ -32,11 +39,13 @@ pub(crate) async fn chat_with_deepseek(
     stream_id: String,
 ) -> Result<(), String> {
     let api_key = read_deepseek_api_key()?;
+    // 文本编辑请求使用专门提示词；普通聊天请求只做角色和空消息归一化。
     let messages = match text_edit_request {
         Some(request) => build_text_edit_messages(request)?,
         None => normalize_deepseek_messages(messages.unwrap_or_default())?,
     };
     let model = normalize_deepseek_model(model.as_deref());
+    // 部分 DeepSeek 模型需要显式开启 thinking/reasoning 参数。
     let payload = DeepSeekChatRequest {
         model: model.clone(),
         messages,
@@ -78,6 +87,7 @@ pub(crate) async fn chat_with_deepseek(
 }
 
 #[tauri::command]
+/// Tauri 命令：在真正改写文件前，先判断用户请求属于回答、替换、插入还是需要确认。
 pub(crate) async fn classify_text_selection_intent(
     model: Option<String>,
     request: TextSelectionIntentRequest,
@@ -125,6 +135,7 @@ pub(crate) async fn classify_text_selection_intent(
         .text()
         .await
         .map_err(|error| format!("Failed to read DeepSeek intent response: {error}"))?;
+    // 非流式分类响应仍然是 Chat Completions 形状，需要从 choices 中取文本。
     let content = extract_deepseek_message_content(&body).map_err(|error| {
         format!(
             "Failed to parse DeepSeek intent response: {error}. Body: {}",
@@ -137,10 +148,12 @@ pub(crate) async fn classify_text_selection_intent(
     })
 }
 
+/// 判断模型是否需要启用 DeepSeek 的思考模式参数。
 fn should_enable_deepseek_thinking(model: &str) -> bool {
     model == "deepseek-v4-pro"
 }
 
+/// 创建带超时的 HTTP 客户端，避免模型调用无限挂起。
 fn deepseek_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(timeout)

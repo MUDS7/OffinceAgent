@@ -1,3 +1,8 @@
+//! DeepSeek 消息和提示词构造逻辑。
+//!
+//! 这里集中处理普通聊天消息归一化、文本编辑执行提示词、编辑意图分类提示词，
+//! 以及 DeepSeek 响应内容的解析。
+
 use super::types::{DeepSeekMessage, TextEditAgentRequest, TextSelectionIntentRequest};
 
 /// 将调用方传入的聊天消息整理成 DeepSeek 兼容的角色格式，并在发送前移除空消息。
