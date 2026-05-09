@@ -107,6 +107,7 @@ pub(super) fn build_text_selection_intent_messages(
     let filename = request.filename.trim();
     let instruction = request.instruction.trim();
     let raw_file_context = request.file_context.as_deref().unwrap_or("").trim();
+    let file_type = classify_text_file_type(filename);
 
     if file_path.is_empty() {
         return Err("Text selection intent classifier requires filePath".to_string());
@@ -127,7 +128,12 @@ pub(super) fn build_text_selection_intent_messages(
             String::new()
         };
     let content = format!(
-        "You are OfficeAgent's file-edit intent classifier. This is the planning step only; a second model call will execute the edit later. The user is typing a request while a text file is open, possibly with selected text or a cursor position.\n\nChoose exactly one action:\n- answer_only: The user only asks a question, requests an explanation/summary/analysis/advice, or asks you to judge content. Do not modify the file.\n- replace_selection: The user clearly wants to rewrite, replace, polish, translate, format, delete, or otherwise transform the current selected text. Deleting selected text is replace_selection; the editor will replace the selection with empty content.\n- insert_after_selection: The user clearly wants to add, insert, append, supplement, or generate new content after the current selection or cursor, rather than replacing selected text.\n- ask_confirm: The user may want to modify the file, but the target position, replace-vs-insert choice, deletion range, or written content is unclear enough that editing directly is risky.\n\nRules:\n1. Output only one action name: answer_only, replace_selection, insert_after_selection, or ask_confirm.\n2. Do not explain. Do not output JSON.\n3. Judge from the user request, the current selected text, and the compressed full file context when no text is selected.\n4. If selected text exists and the user asks for a same-function/equivalent Linux, shell, bash, PowerShell, or command-line command, choose insert_after_selection because the original selection should remain and the new command should be added below it.\n5. If there is no selected text and the user clearly asks to add/insert/append/generate content, usually choose insert_after_selection.\n6. If there is no selected text and the user asks to replace/delete/rewrite 'this', 'here', or 'the selected content' with an unclear range, choose ask_confirm.\n7. If the user asks 'what does this mean', 'analyze this', 'give advice', or 'is this correct', choose answer_only.\n\nFile path: {file_path}\nFilename: {filename}{file_context_section}\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{selected_text}\n>>>"
+        "Current open file:\nFilename: {filename}\nFile path: {file_path}\nFile type: {file_type}\nSelection state: {selection_state}\n\nYou are OfficeAgent's file-edit intent classifier. This is the planning step only; a second model call will execute the edit later. The user is typing a request while this file is open, possibly with selected text or a cursor position.\n\nChoose exactly one action:\n- answer_only: The user only asks a question, requests an explanation/summary/analysis/advice, or asks you to judge content. Do not modify the file.\n- replace_selection: The user clearly wants to rewrite, replace, polish, translate, format, delete, or otherwise transform the current selected text. Deleting selected text is replace_selection; the editor will replace the selection with empty content.\n- insert_after_selection: The user clearly wants to add, insert, append, supplement, or generate new content after the current selection or cursor, rather than replacing selected text.\n- ask_confirm: The user may want to modify the file, but the target position, replace-vs-insert choice, deletion range, or written content is unclear enough that editing directly is risky.\n\nRules:\n1. Output only one action name: answer_only, replace_selection, insert_after_selection, or ask_confirm.\n2. Do not explain. Do not output JSON.\n3. The filename and file type above are authoritative context for the user's intent.\n4. Judge from the user request, the current selected text, and the compressed full file context when no text is selected.\n5. If the current filename ends with .json, no text is selected, and the user clearly asks to modify/update/set/configure/add/remove data in the JSON file, choose replace_selection. The app will replace the full JSON document in the next step.\n6. If selected text exists and the user asks for a same-function/equivalent Linux, shell, bash, PowerShell, or command-line command, choose insert_after_selection because the original selection should remain and the new command should be added below it.\n7. If there is no selected text and the user clearly asks to add/insert/append/generate content, usually choose insert_after_selection.\n8. If there is no selected text and the user asks to replace/delete/rewrite 'this', 'here', or 'the selected content' with an unclear range, choose ask_confirm, except for the .json full-document edit case above.\n9. If the user asks 'what does this mean', 'analyze this', 'give advice', or 'is this correct', choose answer_only.\n{file_context_section}\n\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{selected_text}\n>>>",
+        selection_state = if selected_text.trim().is_empty() {
+            "none; cursor-only or whole-file context"
+        } else {
+            "selected text is present"
+        }
     );
 
     Ok(vec![DeepSeekMessage {
@@ -181,6 +187,33 @@ fn truncate_intent_selection_context(text: &str) -> String {
     const MAX_INTENT_SELECTION_CHARS: usize = 4000;
 
     truncate_model_context(text, MAX_INTENT_SELECTION_CHARS, "selection")
+}
+
+fn classify_text_file_type(filename: &str) -> &'static str {
+    let filename = filename.trim().to_ascii_lowercase();
+
+    if filename.ends_with(".json") {
+        "JSON"
+    } else if filename.ends_with(".md") || filename.ends_with(".markdown") {
+        "Markdown"
+    } else if filename.ends_with(".csv") {
+        "CSV"
+    } else if filename.ends_with(".js")
+        || filename.ends_with(".jsx")
+        || filename.ends_with(".ts")
+        || filename.ends_with(".tsx")
+    {
+        "source code"
+    } else if filename.ends_with(".html")
+        || filename.ends_with(".css")
+        || filename.ends_with(".xml")
+        || filename.ends_with(".yaml")
+        || filename.ends_with(".yml")
+    {
+        "structured text"
+    } else {
+        "plain text"
+    }
 }
 
 fn truncate_model_context(text: &str, max_chars: usize, label: &str) -> String {

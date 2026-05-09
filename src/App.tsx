@@ -889,7 +889,7 @@ function App() {
         return;
       }
 
-      const textSelection = documentSelection ?? buildJsonFileCursorSelection(selectedWorkspaceFile);
+      const textSelection = documentSelection ?? buildTextFileCursorSelection(selectedWorkspaceFile);
       let fullDocumentText: string | undefined;
       let intent = await classifyTextSelectionIntent(model, text, textSelection, fileContext);
       if (shouldUseJsonFullDocumentEdit(selectedWorkspaceFile, textSelection, text, intent)) {
@@ -1002,8 +1002,8 @@ function App() {
     }
   }
 
-  function buildJsonFileCursorSelection(file: WorkspaceFile | null): DocumentSelectionContext | null {
-    if (!isJsonWorkspaceFile(file)) return null;
+  function buildTextFileCursorSelection(file: WorkspaceFile | null): DocumentSelectionContext | null {
+    if (!isTextWorkspaceFile(file)) return null;
 
     return {
       fileId: file.id,
@@ -1039,6 +1039,17 @@ function App() {
     return file?.file.name.toLowerCase().endsWith(".json") ?? false;
   }
 
+  function isTextWorkspaceFile(file: WorkspaceFile | null): file is WorkspaceFile {
+    if (!file) return false;
+
+    const filename = file.file.name.toLowerCase();
+    if (file.file.type.startsWith("text/")) return true;
+
+    return [".txt", ".md", ".csv", ".json", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".xml", ".yaml", ".yml"].some(
+      (extension) => filename.endsWith(extension),
+    );
+  }
+
   function isLikelyJsonEditInstruction(instruction: string) {
     const normalized = instruction.toLowerCase();
     const editKeywords = [
@@ -1051,12 +1062,21 @@ function App() {
       "格式化",
       "重写",
       "替换",
+      "换成",
+      "换为",
+      "改成",
+      "改为",
+      "设为",
+      "设置",
+      "配置",
       "删除",
       "移除",
       "新增",
       "添加",
       "增加",
       "加",
+      "补充",
+      "补上",
       "modify",
       "edit",
       "update",
@@ -1065,6 +1085,8 @@ function App() {
       "format",
       "rewrite",
       "replace",
+      "set",
+      "configure",
       "delete",
       "remove",
       "add",
