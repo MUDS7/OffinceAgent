@@ -224,26 +224,25 @@ fn truncate_model_context(text: &str, max_chars: usize, label: &str) -> String {
 pub(super) fn parse_text_selection_intent(content: &str) -> &'static str {
     let normalized = content.trim().to_ascii_lowercase();
 
-    for intent in [
-        "insert_after_selection",
-        "replace_selection",
-        "ask_confirm",
-        "answer_only",
-    ] {
-        if matches_model_action(&normalized, intent) {
-            return intent;
-        }
-    }
-
-    if matches_model_action(&normalized, "edit") || content.trim().starts_with("编辑") {
-        return "replace_selection";
-    }
-
-    if matches_model_action(&normalized, "answer") {
-        return "answer_only";
-    }
-
-    "answer_only"
+    [
+        ("insert_after_selection", "insert_after_selection"),
+        ("replace_selection", "replace_selection"),
+        ("ask_confirm", "ask_confirm"),
+        ("answer_only", "answer_only"),
+        ("edit", "replace_selection"),
+        ("answer", "answer_only"),
+    ]
+    .into_iter()
+    .find_map(|(model_action, parsed_intent)| {
+        matches_model_action(&normalized, model_action).then_some(parsed_intent)
+    })
+    .or_else(|| {
+        content
+            .trim()
+            .starts_with("编辑")
+            .then_some("replace_selection")
+    })
+    .unwrap_or("answer_only")
 }
 
 /// 判断模型输出是否命中了指定动作名，并兼容带引号或带前缀说明的回答。
