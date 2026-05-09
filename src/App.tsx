@@ -873,7 +873,9 @@ function App() {
     }
 
     try {
-      if (!documentSelection?.text.trim()) {
+      const shouldBuildFileContext =
+        !documentSelection?.text.trim() || documentSelection.sourceType === "text";
+      if (shouldBuildFileContext) {
         try {
           fileContext = await buildCompressedFileContext(
             selectedWorkspaceFile,

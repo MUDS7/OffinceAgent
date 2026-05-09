@@ -155,7 +155,7 @@ export function RightPanel({
           <div className="selection-context-pill" title={documentSelection.text}>
             <FileTextIcon sourceType={documentSelection.sourceType} />
             <span>
-              {documentSelection.filename} · 已选中 {documentSelection.text.length} 字
+              {documentSelection.filename} · 上下文 {documentSelection.text.length} 字
             </span>
           </div>
         ) : null}

@@ -57,8 +57,8 @@ export function buildDeepSeekMessages(
   const contextMessage: DeepSeekApiMessage = {
     role: "system",
     content: [
-      "你是 OfficeAgent。用户正在针对文件预览页中选中的片段提问。",
-      "请优先依据这个选中片段回答；如果问题需要片段以外的信息，请明确说明依据不足。",
+      "你是 OfficeAgent。用户在文件预览页中提供了选中文本作为上下文。",
+      "请结合这个上下文回答；不要默认把选中文本理解为用户唯一关心或想要修改的对象。",
       `文件名：${documentSelection.filename}`,
       `文件类型：${getSelectionSourceTypeLabel(documentSelection.sourceType)}`,
       `选中片段${isTruncated ? "（已截断）" : ""}：`,
@@ -107,7 +107,7 @@ export async function classifyTextSelectionIntent(
         filePath: documentSelection.filePath,
         filename: documentSelection.filename,
         selectedText: documentSelection.text,
-        fileContext: documentSelection.text.trim() ? undefined : fileContext?.content,
+        fileContext: fileContext?.content,
         instruction,
       },
     });

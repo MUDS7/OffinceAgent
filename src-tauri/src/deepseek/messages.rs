@@ -58,7 +58,7 @@ pub(super) fn build_text_edit_messages(
 
     let selected_text_is_empty = request.selected_text.trim().is_empty();
     let action = operation;
-    // 只有编辑器没有选中文本时才附带全文上下文；否则选区本身就是最安全的编辑目标。
+    // 只有编辑器没有选中文本时才附带全文上下文；选中文本只是上下文，是否作为编辑目标由意图分类器明确判断。
     let file_context_section = match (selected_text_is_empty, file_context.is_empty()) {
         (true, false) => {
             format!(
@@ -123,7 +123,7 @@ pub(super) fn build_text_selection_intent_messages(
         build_intent_file_context_section(request.selected_text.trim(), raw_file_context);
     let selection_state = describe_intent_selection_state(&selected_text);
     let content = format!(
-        "Current open file:\nFilename: {filename}\nFile path: {file_path}\nFile type: {file_type}\nSelection state: {selection_state}\n\nYou are OfficeAgent's file-edit intent classifier. This is the planning step only; a second model call will execute the edit later. The user is typing a request while this file is open, possibly with selected text or a cursor position.\n\nChoose exactly one action:\n- answer_only: The user only asks a question, requests an explanation/summary/analysis/advice, or asks you to judge content. Do not modify the file.\n- replace_selection: The user clearly wants to rewrite, replace, polish, translate, format, delete, or otherwise transform the current selected text. Deleting selected text is replace_selection; the editor will replace the selection with empty content.\n- insert_after_selection: The user clearly wants to add, insert, append, supplement, or generate new content after the current selection or cursor, rather than replacing selected text.\n- ask_confirm: The user may want to modify the file, but the target position, replace-vs-insert choice, deletion range, or written content is unclear enough that editing directly is risky.\n\nRules:\n1. Output only one action name: answer_only, replace_selection, insert_after_selection, or ask_confirm.\n2. Do not explain. Do not output JSON.\n3. The filename and file type above are authoritative context for the user's intent.\n4. Judge from the user request, the current selected text, and the compressed full file context when no text is selected.\n5. If the current filename ends with .json, no text is selected, and the user clearly asks to modify/update/set/configure/add/remove data in the JSON file, choose replace_selection. The app will replace the full JSON document in the next step.\n6. If selected text exists and the user asks for a same-function/equivalent Linux, shell, bash, PowerShell, or command-line command, choose insert_after_selection because the original selection should remain and the new command should be added below it.\n7. If there is no selected text and the user clearly asks to add/insert/append/generate content, usually choose insert_after_selection.\n8. If there is no selected text and the user asks to replace/delete/rewrite 'this', 'here', or 'the selected content' with an unclear range, choose ask_confirm, except for the .json full-document edit case above.\n9. If the user asks 'what does this mean', 'analyze this', 'give advice', or 'is this correct', choose answer_only.\n{file_context_section}\n\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{selected_text}\n>>>",
+        "Current open file:\nFilename: {filename}\nFile path: {file_path}\nFile type: {file_type}\nSelection state: {selection_state}\n\nYou are OfficeAgent's file-edit intent classifier. This is the planning step only; a second model call will execute the edit later. The user is typing a request while this file is open, possibly with selected text or a cursor position. Selected text is context first; it is not automatically the edit target.\n\nChoose exactly one action:\n- answer_only: The user only asks a question, requests an explanation/summary/analysis/advice, or asks you to judge content. Do not modify the file.\n- replace_selection: The user explicitly wants to rewrite, replace, polish, translate, format, delete, or otherwise transform the current selected text. Deleting explicitly targeted selected text is replace_selection; the editor will replace the selection with empty content.\n- insert_after_selection: The user clearly wants to add, insert, append, supplement, or generate new content after the current selection or cursor, rather than replacing selected text.\n- ask_confirm: The user may want to modify the file, but the target position, replace-vs-insert choice, deletion range, or written content is unclear enough that editing directly is risky.\n\nRules:\n1. Output only one action name: answer_only, replace_selection, insert_after_selection, or ask_confirm.\n2. Do not explain. Do not output JSON.\n3. The filename and file type above are authoritative context for the user's intent.\n4. Judge from the user request, the current selected text, and the compressed full file context when it is provided. Treat selected text as contextual evidence, not as the edit target by default.\n5. If selected text exists, choose replace_selection only when the request explicitly targets the selection, such as \"selected text\", \"this passage\", \"this selection\", \"highlighted content\", \"translate this\", \"polish these sentences\", or an equivalent phrase.\n6. If selected text exists and the user asks to modify the file but points to another target, or does not clearly say the selection itself should be changed, choose ask_confirm unless the request clearly asks to insert new content after the selection.\n7. If the current filename ends with .json, no text is selected, and the user clearly asks to modify/update/set/configure/add/remove data in the JSON file, choose replace_selection. The app will replace the full JSON document in the next step.\n8. If selected text exists and the user asks for a same-function/equivalent Linux, shell, bash, PowerShell, or command-line command, choose insert_after_selection because the original selection should remain and the new command should be added below it.\n9. If there is no selected text and the user clearly asks to add/insert/append/generate content, usually choose insert_after_selection.\n10. If there is no selected text and the user asks to replace/delete/rewrite 'this', 'here', or 'the selected content' with an unclear range, choose ask_confirm, except for the .json full-document edit case above.\n11. If the user asks 'what does this mean', 'analyze this', 'give advice', or 'is this correct', choose answer_only.\n{file_context_section}\n\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text used as context:\n<<<\n{selected_text}\n>>>",
     );
 
     Ok(vec![DeepSeekMessage {
@@ -157,22 +157,29 @@ fn value_to_text(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
-/// 没有显式选区时，给分类器一份压缩后的文件快照，帮助它区分插入、替换和仅回答。
+/// 给分类器一份压缩后的文件快照，帮助它区分插入、替换、仅回答，以及选区是否只是上下文。
 fn build_intent_file_context_section(selected_text: &str, raw_file_context: &str) -> String {
-    match (selected_text.is_empty(), raw_file_context.is_empty()) {
-        (true, false) => format!(
-            "\nCompressed full file context:\n<<<\n{}\n>>>",
-            truncate_model_context(raw_file_context, 12_000, "file context")
-        ),
-        _ => String::new(),
+    if raw_file_context.is_empty() {
+        return String::new();
     }
+
+    let heading = if selected_text.is_empty() {
+        "Compressed full file context"
+    } else {
+        "Compressed full file context for broader context; selected text is not automatically the edit target"
+    };
+
+    format!(
+        "\n{heading}:\n<<<\n{}\n>>>",
+        truncate_model_context(raw_file_context, 12_000, "file context")
+    )
 }
 
 /// 将选区状态转换成分类器提示词里使用的固定描述。
 fn describe_intent_selection_state(selected_text: &str) -> &'static str {
     match selected_text.trim().is_empty() {
         true => "none; cursor-only or whole-file context",
-        false => "selected text is present",
+        false => "selected text context is present; not automatically the edit target",
     }
 }
 
@@ -228,19 +235,14 @@ pub(super) fn parse_text_selection_intent(content: &str) -> &'static str {
         ("replace_selection", "replace_selection"),
         ("ask_confirm", "ask_confirm"),
         ("answer_only", "answer_only"),
-        ("edit", "replace_selection"),
+        ("edit", "ask_confirm"),
         ("answer", "answer_only"),
     ]
     .into_iter()
     .find_map(|(model_action, parsed_intent)| {
         matches_model_action(&normalized, model_action).then_some(parsed_intent)
     })
-    .or_else(|| {
-        content
-            .trim()
-            .starts_with("编辑")
-            .then_some("replace_selection")
-    })
+    .or_else(|| content.trim().starts_with("编辑").then_some("ask_confirm"))
     .unwrap_or("answer_only")
 }
 
