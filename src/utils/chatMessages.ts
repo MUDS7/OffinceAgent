@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import { MAX_SELECTION_CONTEXT_CHARS } from "../constants";
 import type { CompressedFileContext } from "./fileContext";
+import { compressTextEditPayload } from "./textCompression";
 
 // ─── DeepSeek message building ────────────────────────────────────────────────
 
@@ -150,6 +151,8 @@ export function buildTextEditAgentRequest(
     intent === "replace_selection" &&
     !documentSelection.text.trim() &&
     fullDocumentText !== undefined;
+  const originalSelectedText = shouldReplaceFullDocument ? fullDocumentText : documentSelection.text;
+  const compressedPayload = compressTextEditPayload(documentSelection.filename, originalSelectedText);
   const start = shouldReplaceFullDocument ? 0 : documentSelection.start ?? 0;
   const end = shouldReplaceFullDocument
     ? fullDocumentText.length
@@ -159,9 +162,10 @@ export function buildTextEditAgentRequest(
     filePath: documentSelection.filePath,
     start,
     end,
-    selectedText: shouldReplaceFullDocument ? fullDocumentText : documentSelection.text,
+    selectedText: compressedPayload.text,
     fileContext: shouldReplaceFullDocument || documentSelection.text.trim() ? undefined : fileContext?.content,
     isFullDocument: shouldReplaceFullDocument,
+    contentEncoding: compressedPayload.encoding,
     instruction,
     operation: intent,
   };

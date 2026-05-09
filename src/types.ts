@@ -109,6 +109,7 @@ export type TextEditAgentRequest = {
   selectedText: string;
   fileContext?: string;
   isFullDocument?: boolean;
+  contentEncoding?: "json_minified" | "text_whitespace_compacted";
   instruction: string;
   operation: TextEditOperation;
 };

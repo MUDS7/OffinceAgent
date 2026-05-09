@@ -36,6 +36,9 @@ pub(super) fn build_text_edit_messages(
     let instruction = request.instruction.trim();
     let operation = normalize_text_edit_operation(&request.operation);
     let file_context = request.file_context.as_deref().unwrap_or("").trim();
+    let content_encoding =
+        normalize_text_edit_content_encoding(request.content_encoding.as_deref());
+    let compression_note = build_text_edit_compression_note(content_encoding, operation);
 
     if file_path.is_empty() {
         return Err("Text edit agent requires filePath".to_string());
@@ -63,7 +66,7 @@ pub(super) fn build_text_edit_messages(
         } else {
             String::new()
         };
-    let system_content = "You are OfficeAgent's text edit executor. The intent/planning step has already finished in a separate model call. Your only job now is to produce the exact file-edit payload. Never explain your reasoning, never mention the classifier, and never describe the operation. Put the exact text to write between <officeagent_edit> and </officeagent_edit>. Text outside those tags will be ignored.";
+    let system_content = format!("{}{}", "You are OfficeAgent's text edit executor. The intent/planning step has already finished in a separate model call. Your only job now is to produce the exact file-edit payload. Never explain your reasoning, never mention the classifier, and never describe the operation. Put the exact text to write between <officeagent_edit> and </officeagent_edit>. Text outside those tags will be ignored.", compression_note);
     let content = if operation == "insert_after_selection" {
         format!(
             "Operation: {action}\n\nGenerate the text that should be inserted below the selected text or below the current cursor line. If there is no selected text, use the compressed full file context when it is provided.\n\nRules:\n1. Keep the original selected text unchanged; do not repeat it in the payload.\n2. For requests like \"same function Linux command\", \"equivalent shell/bash command\", or \"相同功能的 linux 命令\", output only the equivalent Linux command text to insert below the selection.\n3. Do not include explanations such as \"considering\", \"because\", \"here is\", \"the command is\", or any notes.\n4. Do not use Markdown fences unless the fences themselves should be written into the file.\n5. Put the exact inserted text inside the edit tags.\n\nRequired output shape:\n<officeagent_edit>\ntext to insert\n</officeagent_edit>\n\nFile path: {file_path}{file_context_section}\nUser request:\n<<<\n{instruction}\n>>>\nCurrent selected text:\n<<<\n{}\n>>>",
@@ -88,7 +91,7 @@ pub(super) fn build_text_edit_messages(
     Ok(vec![
         DeepSeekMessage {
             role: "system".to_string(),
-            content: system_content.to_string(),
+            content: system_content,
         },
         DeepSeekMessage {
             role: "user".to_string(),
@@ -231,5 +234,38 @@ fn normalize_text_edit_operation(operation: &str) -> &'static str {
     match operation.trim().to_ascii_lowercase().as_str() {
         "insert_after_selection" => "insert_after_selection",
         _ => "replace_selection",
+    }
+}
+
+fn normalize_text_edit_content_encoding(encoding: Option<&str>) -> Option<&'static str> {
+    match encoding
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("json_minified") => Some("json_minified"),
+        Some("text_whitespace_compacted") => Some("text_whitespace_compacted"),
+        _ => None,
+    }
+}
+
+fn build_text_edit_compression_note(
+    encoding: Option<&'static str>,
+    operation: &'static str,
+) -> &'static str {
+    match (encoding, operation) {
+        (Some("json_minified"), "insert_after_selection") => {
+            " Whitespace transmission note: the current JSON context was minified before being sent to you. Use it only as context; return the new inserted text in normal file form."
+        }
+        (Some("json_minified"), _) => {
+            " Whitespace transmission note: the current JSON content was minified before being sent to you. Return the edited JSON in the same minified representation; the app will restore the user's formatting after your response."
+        }
+        (Some("text_whitespace_compacted"), "insert_after_selection") => {
+            " Whitespace transmission note: runs of spaces, tabs, and line breaks in the current TXT context were compacted before being sent to you. Use it only as context; return the new inserted text in normal file form."
+        }
+        (Some("text_whitespace_compacted"), _) => {
+            " Whitespace transmission note: runs of spaces, tabs, and line breaks in the current TXT content were compacted before being sent to you. Return the edited content in the same compacted representation; the app will restore whitespace after your response."
+        }
+        _ => "",
     }
 }

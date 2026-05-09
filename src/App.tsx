@@ -50,6 +50,8 @@ import {
 import { decodeBase64Bytes, getFileMimeType, getFileRelativePath, normalizeFilePath } from "./utils/fileUtils";
 import { buildCompressedFileContext } from "./utils/fileContext";
 import type { CompressedFileContext } from "./utils/fileContext";
+import { restoreTextEditPayload } from "./utils/textCompression";
+import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
   getInitialLayoutWidths,
   getUiScale,
@@ -685,16 +687,28 @@ function App() {
     let hasAppliedAgentText = false;
     let textEditTarget: {
       fileId: string;
+      filename: string;
       start: number;
       end: number;
       operation: TextEditOperation;
       isFullDocument?: boolean;
+      originalText: string;
+      contentEncoding?: TextEditContentEncoding;
     } | null = null;
     let fileContext: CompressedFileContext | null = null;
 
     function applyAgentTextResult() {
       if (!textEditTarget || hasAppliedAgentText) return;
-      const editText = extractAgentTextEditPayload(assistantText);
+      const rawEditText = extractAgentTextEditPayload(assistantText);
+      const editText =
+        textEditTarget.operation === "replace_selection"
+          ? restoreTextEditPayload(
+              textEditTarget.filename,
+              rawEditText,
+              textEditTarget.originalText,
+              textEditTarget.contentEncoding,
+            )
+          : rawEditText;
       if (textEditTarget.operation === "insert_after_selection" && !editText.length) return;
 
       hasAppliedAgentText = true;
@@ -760,10 +774,13 @@ function App() {
         textEditRequest && textSelection
           ? {
               fileId: textSelection.fileId,
+              filename: textSelection.filename,
               start: textEditRequest.start,
               end: textEditRequest.end,
               operation: textEditRequest.operation,
               isFullDocument: textEditRequest.isFullDocument,
+              originalText: textEditRequest.isFullDocument ? fullDocumentText ?? "" : textSelection.text,
+              contentEncoding: textEditRequest.contentEncoding,
             }
           : null;
       const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, textSelection, fileContext);
