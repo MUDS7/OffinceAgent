@@ -1,5 +1,6 @@
 use super::types::{DeepSeekMessage, TextEditAgentRequest, TextSelectionIntentRequest};
 
+/// 将调用方传入的聊天消息整理成 DeepSeek 兼容的角色格式，并在发送前移除空消息。
 pub(super) fn normalize_deepseek_messages(
     messages: Vec<DeepSeekMessage>,
 ) -> Result<Vec<DeepSeekMessage>, String> {
@@ -9,10 +10,12 @@ pub(super) fn normalize_deepseek_messages(
             let role = message.role.trim().to_ascii_lowercase();
             let content = message.content.trim().to_string();
 
+            // 空提示词会浪费 token，也可能让上游 API 拒绝原本有效的聊天请求。
             if content.is_empty() {
                 return None;
             }
 
+            // DeepSeek 只接受标准聊天角色；未知角色按用户输入处理，避免调用方传错值导致编辑中断。
             let role = match role.as_str() {
                 "assistant" | "system" | "user" => role,
                 _ => "user".to_string(),
@@ -29,6 +32,7 @@ pub(super) fn normalize_deepseek_messages(
     Ok(normalized)
 }
 
+/// 在意图分类器判定替换或插入之后，构造真正执行文本编辑的提示词。
 pub(super) fn build_text_edit_messages(
     request: TextEditAgentRequest,
 ) -> Result<Vec<DeepSeekMessage>, String> {
@@ -57,6 +61,7 @@ pub(super) fn build_text_edit_messages(
     } else {
         "replace_selection"
     };
+    // 只有编辑器没有选中文本时才附带全文上下文；否则选区本身就是最安全的编辑目标。
     let file_context_section =
         if request.selected_text.trim().is_empty() && !file_context.is_empty() {
             format!(
@@ -66,6 +71,7 @@ pub(super) fn build_text_edit_messages(
         } else {
             String::new()
         };
+    // 执行器的响应会按标签解析，因此系统消息要约束模型只输出需要写入文件的内容。
     let system_content = format!("{}{}", "You are OfficeAgent's text edit executor. The intent/planning step has already finished in a separate model call. Your only job now is to produce the exact file-edit payload. Never explain your reasoning, never mention the classifier, and never describe the operation. Put the exact text to write between <officeagent_edit> and </officeagent_edit>. Text outside those tags will be ignored.", compression_note);
     let content = if operation == "insert_after_selection" {
         format!(
@@ -100,6 +106,7 @@ pub(super) fn build_text_edit_messages(
     ])
 }
 
+/// 在修改任何文件内容前，构造轻量级规划提示词，用于分类用户请求。
 pub(super) fn build_text_selection_intent_messages(
     request: TextSelectionIntentRequest,
 ) -> Result<Vec<DeepSeekMessage>, String> {
@@ -118,6 +125,7 @@ pub(super) fn build_text_selection_intent_messages(
     }
 
     let selected_text = truncate_intent_selection_context(request.selected_text.trim());
+    // 没有显式选区时，给分类器一份压缩后的文件快照，帮助它区分插入、替换和仅回答。
     let file_context_section =
         if request.selected_text.trim().is_empty() && !raw_file_context.is_empty() {
             format!(
@@ -142,6 +150,7 @@ pub(super) fn build_text_selection_intent_messages(
     }])
 }
 
+/// 从 DeepSeek 聊天响应中提取第一个非空文本内容。
 pub(super) fn extract_deepseek_message_content(body: &str) -> Result<String, String> {
     let value = serde_json::from_str::<serde_json::Value>(body)
         .map_err(|error| format!("invalid JSON: {error}"))?;
@@ -152,6 +161,7 @@ pub(super) fn extract_deepseek_message_content(body: &str) -> Result<String, Str
         .ok_or_else(|| "missing choices array".to_string())?;
 
     for choice in choices {
+        // 标准聊天补全会把可见回答放在 message.content 中。
         if let Some(content) = choice
             .get("message")
             .and_then(|message| message.get("content"))
@@ -162,6 +172,7 @@ pub(super) fn extract_deepseek_message_content(body: &str) -> Result<String, Str
             return Ok(content.to_string());
         }
 
+        // 部分推理模型可能返回 reasoning_content；这里作为兜底读取，保证调用方仍能拿到文本。
         if let Some(content) = choice
             .get("message")
             .and_then(|message| message.get("reasoning_content"))
@@ -176,6 +187,7 @@ pub(super) fn extract_deepseek_message_content(body: &str) -> Result<String, Str
     Ok(String::new())
 }
 
+/// 从预期为文本的 JSON 字段中取出字符串值。
 fn value_to_text(value: &serde_json::Value) -> Option<&str> {
     match value {
         serde_json::Value::String(text) => Some(text.as_str()),
@@ -183,12 +195,14 @@ fn value_to_text(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
+/// 将选中文本限制在适合意图分类提示词的长度内。
 fn truncate_intent_selection_context(text: &str) -> String {
     const MAX_INTENT_SELECTION_CHARS: usize = 4000;
 
     truncate_model_context(text, MAX_INTENT_SELECTION_CHARS, "selection")
 }
 
+/// 将文件名映射为粗粒度文本类型，帮助意图分类器更安全地判断替换或插入。
 fn classify_text_file_type(filename: &str) -> &'static str {
     let filename = filename.trim().to_ascii_lowercase();
 
@@ -216,6 +230,7 @@ fn classify_text_file_type(filename: &str) -> &'static str {
     }
 }
 
+/// 按 Unicode 标量值截断提示词上下文，并在内容被截短时追加标记。
 fn truncate_model_context(text: &str, max_chars: usize, label: &str) -> String {
     let truncated = text.chars().take(max_chars).collect::<String>();
     if text.chars().count() > max_chars {
@@ -225,6 +240,7 @@ fn truncate_model_context(text: &str, max_chars: usize, label: &str) -> String {
     }
 }
 
+/// 将分类器响应解析为已知意图动作，并兼容旧提示词格式和带引号的模型输出。
 pub(super) fn parse_text_selection_intent(content: &str) -> &'static str {
     let normalized = content.trim().to_ascii_lowercase();
 
@@ -263,6 +279,7 @@ pub(super) fn parse_text_selection_intent(content: &str) -> &'static str {
     "answer_only"
 }
 
+/// 将未知编辑操作归一化为默认的替换行为。
 fn normalize_text_edit_operation(operation: &str) -> &'static str {
     match operation.trim().to_ascii_lowercase().as_str() {
         "insert_after_selection" => "insert_after_selection",
@@ -270,6 +287,7 @@ fn normalize_text_edit_operation(operation: &str) -> &'static str {
     }
 }
 
+/// 识别发送给模型前应用过的内容编码，以便提示词说明如何保留或还原空白字符。
 fn normalize_text_edit_content_encoding(encoding: Option<&str>) -> Option<&'static str> {
     match encoding
         .map(str::trim)
@@ -282,6 +300,7 @@ fn normalize_text_edit_content_encoding(encoding: Option<&str>) -> Option<&'stat
     }
 }
 
+/// 当上下文在传输前被压缩时，追加面向模型的处理说明。
 fn build_text_edit_compression_note(
     encoding: Option<&'static str>,
     operation: &'static str,
