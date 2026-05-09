@@ -1,5 +1,6 @@
 import { RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getFileExtension } from "./filePreviewUtils";
 import type { AgentTextEditResult, DocumentSelectionContext, PreviewFile } from "./types";
 
 type TextFilePreviewProps = {
@@ -16,6 +17,25 @@ type TextSelectionHighlight = {
   start: number;
   end: number;
   text: string;
+};
+
+type JsonSyntaxPart = {
+  text: string;
+  className?: string;
+};
+
+type JsonFoldRange = {
+  id: string;
+  openIndex: number;
+  closeIndex: number;
+  openLine: number;
+  closeLine: number;
+};
+
+type JsonFoldControl = {
+  rangeId: string;
+  lineIndex: number;
+  isCollapsed: boolean;
 };
 
 export function TextFilePreview({
@@ -39,11 +59,40 @@ export function TextFilePreview({
   const [textScroll, setTextScroll] = useState({ left: 0, top: 0 });
   const [textSelectionHighlight, setTextSelectionHighlight] = useState<TextSelectionHighlight | null>(null);
   const [isTextEditorFocused, setIsTextEditorFocused] = useState(false);
+  const [collapsedJsonFoldIds, setCollapsedJsonFoldIds] = useState<Set<string>>(() => new Set());
   const activeFileId = activeFile.id;
-  const textLines = useMemo(
-    () => (textPreview.text ? textPreview.text.split(/\r?\n/) : [""]),
-    [textPreview.text],
+  const isJsonPreview = getFileExtension(activeFile.filename) === "json";
+  const jsonFoldRanges = useMemo(
+    () => (isJsonPreview ? getJsonFoldRanges(textPreview.text) : []),
+    [isJsonPreview, textPreview.text],
   );
+  const activeCollapsedJsonFoldIds = useMemo(() => {
+    const validRangeIds = new Set(jsonFoldRanges.map((range) => range.id));
+    return new Set([...collapsedJsonFoldIds].filter((rangeId) => validRangeIds.has(rangeId)));
+  }, [collapsedJsonFoldIds, jsonFoldRanges]);
+  const jsonFoldView = useMemo(
+    () => (isJsonPreview ? buildJsonFoldView(textPreview.text, jsonFoldRanges, activeCollapsedJsonFoldIds) : null),
+    [activeCollapsedJsonFoldIds, isJsonPreview, jsonFoldRanges, textPreview.text],
+  );
+  const displayText = jsonFoldView?.text ?? textPreview.text;
+  const textLines = useMemo(
+    () => (displayText ? displayText.split(/\r?\n/) : [""]),
+    [displayText],
+  );
+  const jsonSyntaxParts = useMemo(
+    () => (isJsonPreview ? getJsonSyntaxParts(displayText) : []),
+    [displayText, isJsonPreview],
+  );
+  const jsonFoldControlsByLine = useMemo(() => {
+    const controlsByLine = new Map<number, JsonFoldControl>();
+
+    for (const control of jsonFoldView?.foldControls ?? []) {
+      controlsByLine.set(control.lineIndex, control);
+    }
+
+    return controlsByLine;
+  }, [jsonFoldView]);
+  const hasCollapsedJsonFolds = activeCollapsedJsonFoldIds.size > 0;
 
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -58,6 +107,7 @@ export function TextFilePreview({
     let isCancelled = false;
 
     setTextScroll({ left: 0, top: 0 });
+    setCollapsedJsonFoldIds(new Set());
 
     const initialUnsaved = initialUnsavedTextRef.current;
     if (initialUnsaved !== undefined) {
@@ -103,6 +153,7 @@ export function TextFilePreview({
             const prevIndex = historyIndex - 1;
             const prevText = currHistory[prevIndex];
             setHistoryIndex(prevIndex);
+            setCollapsedJsonFoldIds(new Set());
             setTextPreview((current) => ({
               ...current,
               text: prevText,
@@ -128,6 +179,7 @@ export function TextFilePreview({
   useEffect(() => {
     lastTextSelectionRef.current = "";
     setTextSelectionHighlight(null);
+    setCollapsedJsonFoldIds(new Set());
     onSelectionContextChange(null);
   }, [activeFileId, onSelectionContextChange]);
 
@@ -137,12 +189,25 @@ export function TextFilePreview({
   }, [activeFileId, textPreview.error, textPreview.isLoading]);
 
   useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const editor = textEditorRef.current;
+      if (!editor) return;
+
+      setTextScroll({
+        left: editor.scrollLeft,
+        top: editor.scrollTop,
+      });
+    });
+  }, [displayText]);
+
+  useEffect(() => {
     if (!pendingAgentTextEdit || pendingAgentTextEdit.fileId !== activeFile.id) return;
     if (lastAppliedAgentEditIdRef.current === pendingAgentTextEdit.id) return;
     if (textPreview.isLoading || textPreview.error) return;
 
     lastAppliedAgentEditIdRef.current = pendingAgentTextEdit.id;
     const appliedEdit = applyAgentTextEdit(textPreview.text, pendingAgentTextEdit);
+    setCollapsedJsonFoldIds(new Set());
     setTextPreview((current) => ({
       ...current,
       fileId: activeFile.id,
@@ -198,14 +263,56 @@ export function TextFilePreview({
           clearTextSelectionHighlight();
         }}
       >
-        <div className="line-number-gutter" aria-hidden="true">
+        <div className="line-number-gutter">
           <div className="line-numbers" style={{ transform: `translateY(${-textScroll.top}px)` }}>
-            {textLines.map((_, index) => (
-              <span key={index}>{index + 1}</span>
-            ))}
+            {textLines.map((_, index) => {
+              const foldControl = jsonFoldControlsByLine.get(index);
+
+              return (
+                <span className="line-number-row" key={index}>
+                  {foldControl ? (
+                    <button
+                      className={foldControl.isCollapsed ? "json-fold-toggle collapsed" : "json-fold-toggle"}
+                      type="button"
+                      aria-label={foldControl.isCollapsed ? "Expand JSON block" : "Collapse JSON block"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleJsonFold(foldControl.rangeId);
+                      }}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <span className="json-fold-chevron" />
+                    </button>
+                  ) : (
+                    <span className="json-fold-spacer" aria-hidden="true" />
+                  )}
+                  <span className="line-number-text" aria-hidden="true">
+                    {index + 1}
+                  </span>
+                </span>
+              );
+            })}
           </div>
         </div>
-        <div className={isTextEditorFocused ? "text-editor-stack focused" : "text-editor-stack"}>
+        <div
+          className={[
+            "text-editor-stack",
+            isTextEditorFocused ? "focused" : "",
+            isJsonPreview ? "json-preview-stack" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          {isJsonPreview ? (
+            <pre
+              className="json-syntax-overlay"
+              aria-hidden="true"
+              style={{ transform: `translate(${-textScroll.left}px, ${-textScroll.top}px)` }}
+            >
+              {renderJsonSyntaxHighlight()}
+            </pre>
+          ) : null}
           <div className="text-selection-overlay" aria-hidden="true">
             <pre
               className="text-selection-mirror"
@@ -216,10 +323,11 @@ export function TextFilePreview({
           </div>
           <textarea
             ref={textEditorRef}
-            className="preview-text-editor"
+            className={isJsonPreview ? "preview-text-editor json-text-editor" : "preview-text-editor"}
             aria-label={`${activeFile.filename} text editor`}
+            readOnly={hasCollapsedJsonFolds}
             spellCheck={false}
-            value={textPreview.text}
+            value={displayText}
             onBlur={() => setIsTextEditorFocused(false)}
             onChange={(event) => updateTextPreview(event.target.value)}
             onFocus={(event) => {
@@ -247,9 +355,12 @@ export function TextFilePreview({
   );
 
   function updateTextPreview(nextText: string) {
+    if (hasCollapsedJsonFolds) return;
+
     const normalizedText = normalizeEditorLineEndings(nextText);
 
     clearTextSelectionHighlight();
+    setCollapsedJsonFoldIds(new Set());
 
     setTextPreview((current) => ({
       ...current,
@@ -269,8 +380,29 @@ export function TextFilePreview({
     onUpdateTextFile(activeFile.id, normalizedText);
   }
 
+  function toggleJsonFold(rangeId: string) {
+    clearTextSelectionHighlight();
+    setCollapsedJsonFoldIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(rangeId)) {
+        next.delete(rangeId);
+      } else {
+        next.add(rangeId);
+      }
+
+      return next;
+    });
+  }
+
   function publishTextSelection(textarea: HTMLTextAreaElement | null) {
     if (!textarea) return;
+    if (hasCollapsedJsonFolds) {
+      lastTextSelectionRef.current = "";
+      setTextSelectionHighlight(null);
+      onSelectionContextChange(null);
+      return;
+    }
 
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
@@ -314,17 +446,289 @@ export function TextFilePreview({
       return null;
     }
 
-    const start = clampTextOffset(textSelectionHighlight.start, textPreview.text.length);
-    const end = clampTextOffset(Math.max(textSelectionHighlight.end, start), textPreview.text.length);
+    const start = clampTextOffset(textSelectionHighlight.start, displayText.length);
+    const end = clampTextOffset(Math.max(textSelectionHighlight.end, start), displayText.length);
 
     return (
       <>
-        {textPreview.text.slice(0, start)}
-        <mark>{textPreview.text.slice(start, end)}</mark>
-        {textPreview.text.slice(end) || " "}
+        {displayText.slice(0, start)}
+        <mark>{displayText.slice(start, end)}</mark>
+        {displayText.slice(end) || " "}
       </>
     );
   }
+
+  function renderJsonSyntaxHighlight() {
+    if (!jsonSyntaxParts.length) return " ";
+
+    return jsonSyntaxParts.map((part, index) =>
+      part.className ? (
+        <span className={part.className} key={index}>
+          {part.text}
+        </span>
+      ) : (
+        part.text
+      ),
+    );
+  }
+}
+
+function getJsonFoldRanges(text: string): JsonFoldRange[] {
+  const lineStarts = getLineStarts(text);
+  const ranges: JsonFoldRange[] = [];
+  const stack: Array<{ char: string; index: number; line: number }> = [];
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (char === '"') {
+      index = readJsonStringToken(text, index).end;
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      stack.push({ char, index, line: getLineIndex(index, lineStarts) });
+      index += 1;
+      continue;
+    }
+
+    if (char === "}" || char === "]") {
+      const matchingOpen = char === "}" ? "{" : "[";
+      const matchingIndex = findLastMatchingOpenIndex(stack, matchingOpen);
+
+      if (matchingIndex !== -1) {
+        const open = stack.splice(matchingIndex, 1)[0];
+        const closeLine = getLineIndex(index, lineStarts);
+
+        if (closeLine > open.line) {
+          ranges.push({
+            id: `${open.index}:${index}`,
+            openIndex: open.index,
+            closeIndex: index,
+            openLine: open.line,
+            closeLine,
+          });
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return ranges.sort((left, right) => left.openIndex - right.openIndex || right.closeIndex - left.closeIndex);
+}
+
+function buildJsonFoldView(text: string, ranges: JsonFoldRange[], collapsedIds: Set<string>) {
+  const collapsedRanges = getVisibleCollapsedJsonRanges(ranges, collapsedIds);
+  let foldedText = "";
+  let lastIndex = 0;
+
+  for (const range of collapsedRanges) {
+    foldedText += text.slice(lastIndex, range.openIndex + 1);
+    lastIndex = range.closeIndex;
+  }
+
+  foldedText += text.slice(lastIndex);
+
+  const foldedLineStarts = getLineStarts(foldedText);
+  const foldControls = ranges
+    .filter((range) => !isRangeHiddenByCollapsedAncestor(range, collapsedRanges))
+    .map((range) => ({
+      rangeId: range.id,
+      lineIndex: getLineIndex(mapOriginalOffsetToFoldedOffset(range.openIndex, collapsedRanges), foldedLineStarts),
+      isCollapsed: collapsedIds.has(range.id),
+    }));
+
+  return {
+    text: foldedText,
+    foldControls,
+  };
+}
+
+function getVisibleCollapsedJsonRanges(ranges: JsonFoldRange[], collapsedIds: Set<string>) {
+  const visibleRanges: JsonFoldRange[] = [];
+
+  for (const range of ranges) {
+    if (!collapsedIds.has(range.id)) continue;
+    if (isRangeHiddenByCollapsedAncestor(range, visibleRanges)) continue;
+
+    visibleRanges.push(range);
+  }
+
+  return visibleRanges;
+}
+
+function isRangeHiddenByCollapsedAncestor(range: JsonFoldRange, collapsedRanges: JsonFoldRange[]) {
+  return collapsedRanges.some(
+    (collapsedRange) =>
+      collapsedRange.openIndex < range.openIndex && range.closeIndex <= collapsedRange.closeIndex,
+  );
+}
+
+function mapOriginalOffsetToFoldedOffset(offset: number, collapsedRanges: JsonFoldRange[]) {
+  let removedCharacterCount = 0;
+
+  for (const range of collapsedRanges) {
+    if (offset <= range.openIndex) {
+      break;
+    }
+
+    if (offset < range.closeIndex) {
+      return range.openIndex + 1 - removedCharacterCount;
+    }
+
+    removedCharacterCount += range.closeIndex - range.openIndex - 1;
+  }
+
+  return offset - removedCharacterCount;
+}
+
+function getLineStarts(text: string) {
+  const lineStarts = [0];
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "\n") {
+      lineStarts.push(index + 1);
+    }
+  }
+
+  return lineStarts;
+}
+
+function getLineIndex(offset: number, lineStarts: number[]) {
+  let low = 0;
+  let high = lineStarts.length - 1;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const lineStart = lineStarts[middle];
+    const nextLineStart = lineStarts[middle + 1] ?? Number.POSITIVE_INFINITY;
+
+    if (offset < lineStart) {
+      high = middle - 1;
+    } else if (offset >= nextLineStart) {
+      low = middle + 1;
+    } else {
+      return middle;
+    }
+  }
+
+  return Math.max(0, lineStarts.length - 1);
+}
+
+function findLastMatchingOpenIndex(stack: Array<{ char: string }>, matchingOpen: string) {
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    if (stack[index].char === matchingOpen) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getJsonSyntaxParts(text: string): JsonSyntaxPart[] {
+  const parts: JsonSyntaxPart[] = [];
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (/\s/.test(char)) {
+      const start = index;
+      index += 1;
+      while (index < text.length && /\s/.test(text[index])) {
+        index += 1;
+      }
+      parts.push({ text: text.slice(start, index) });
+      continue;
+    }
+
+    if (char === '"') {
+      const token = readJsonStringToken(text, index);
+      const tokenText = text.slice(index, token.end);
+      const className = isJsonKeyToken(text, token.end)
+        ? `json-key json-key-${getJsonKeyColorIndex(tokenText)}`
+        : "json-string";
+
+      parts.push({ text: tokenText, className });
+      index = token.end;
+      continue;
+    }
+
+    const numberMatch = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (numberMatch) {
+      parts.push({ text: numberMatch[0], className: "json-number" });
+      index += numberMatch[0].length;
+      continue;
+    }
+
+    if (text.startsWith("true", index) || text.startsWith("false", index)) {
+      const literal = text.startsWith("true", index) ? "true" : "false";
+      parts.push({ text: literal, className: "json-boolean" });
+      index += literal.length;
+      continue;
+    }
+
+    if (text.startsWith("null", index)) {
+      parts.push({ text: "null", className: "json-null" });
+      index += 4;
+      continue;
+    }
+
+    if ("{}[],:".includes(char)) {
+      parts.push({ text: char, className: "json-punctuation" });
+      index += 1;
+      continue;
+    }
+
+    parts.push({ text: char });
+    index += 1;
+  }
+
+  return parts;
+}
+
+function readJsonStringToken(text: string, start: number) {
+  let index = start + 1;
+  let isEscaped = false;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (isEscaped) {
+      isEscaped = false;
+    } else if (char === "\\") {
+      isEscaped = true;
+    } else if (char === '"') {
+      index += 1;
+      break;
+    }
+
+    index += 1;
+  }
+
+  return { end: index };
+}
+
+function isJsonKeyToken(text: string, tokenEnd: number) {
+  let index = tokenEnd;
+
+  while (index < text.length && /\s/.test(text[index])) {
+    index += 1;
+  }
+
+  return text[index] === ":";
+}
+
+function getJsonKeyColorIndex(keyToken: string) {
+  let hash = 0;
+
+  for (let index = 1; index < keyToken.length - 1; index += 1) {
+    hash = (hash * 31 + keyToken.charCodeAt(index)) % 997;
+  }
+
+  return hash % 6;
 }
 
 function applyAgentTextEdit(text: string, edit: AgentTextEditResult) {

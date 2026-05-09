@@ -527,7 +527,7 @@
 .text-editor-layout {
   position: relative;
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr) 96px;
+  grid-template-columns: 84px minmax(0, 1fr) 96px;
   height: 100%;
   min-width: 0;
   overflow: hidden;
@@ -542,8 +542,8 @@
 .line-numbers {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  padding: 23px 19px 80px 0;
+  align-items: stretch;
+  padding: 23px 13px 80px 0;
   color: #2b73a6;
   font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
   font-size: 15px;
@@ -552,9 +552,55 @@
   will-change: transform;
 }
 
+.line-number-row {
+  display: grid;
+  grid-template-columns: 20px minmax(22px, 1fr);
+  align-items: center;
+  min-height: 1.72em;
+}
+
+.line-number-text {
+  text-align: right;
+}
+
+.json-fold-toggle,
+.json-fold-spacer {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  justify-self: center;
+}
+
+.json-fold-toggle {
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: #2b73a6;
+  background: transparent;
+  cursor: pointer;
+}
+
+.json-fold-toggle:hover {
+  color: #111111;
+  background: #edf3f9;
+}
+
+.json-fold-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.json-fold-toggle.collapsed .json-fold-chevron {
+  transform: rotate(-45deg) translate(-1px, -1px);
+}
+
 .preview-text-editor {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   display: block;
   width: 100%;
   height: 100%;
@@ -576,6 +622,10 @@
   overflow: auto;
 }
 
+.json-text-editor {
+  color: transparent;
+}
+
 .text-editor-stack {
   position: relative;
   min-width: 0;
@@ -584,10 +634,79 @@
   background: #ffffff;
 }
 
+.json-syntax-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  min-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 23px 26px 80px 0;
+  color: #24292f;
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.72;
+  pointer-events: none;
+  tab-size: 2;
+  white-space: pre;
+  will-change: transform;
+}
+
+.json-key {
+  font-weight: 700;
+}
+
+.json-key-0 {
+  color: #116a8f;
+}
+
+.json-key-1 {
+  color: #8a4f00;
+}
+
+.json-key-2 {
+  color: #2f7d32;
+}
+
+.json-key-3 {
+  color: #8c3f72;
+}
+
+.json-key-4 {
+  color: #5e56a2;
+}
+
+.json-key-5 {
+  color: #b23838;
+}
+
+.json-string {
+  color: #1b7f52;
+}
+
+.json-number {
+  color: #175ddc;
+}
+
+.json-boolean {
+  color: #a14512;
+}
+
+.json-null {
+  color: #6f7782;
+}
+
+.json-punctuation {
+  color: #68707a;
+}
+
 .text-selection-overlay {
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: 1;
   overflow: hidden;
   pointer-events: none;
 }
@@ -643,4 +762,29 @@
   height: 2px;
   max-width: 80px;
   background: #8b8b8b;
+}
+
+@media (max-width: 640px) {
+  .line-numbers {
+    padding-right: 6px;
+  }
+
+  .line-number-row {
+    grid-template-columns: 14px minmax(18px, 1fr);
+  }
+
+  .json-fold-toggle,
+  .json-fold-spacer {
+    width: 14px;
+    height: 18px;
+  }
+
+  .json-fold-chevron {
+    width: 6px;
+    height: 6px;
+  }
+
+  .json-syntax-overlay {
+    font-size: 13px;
+  }
 }
