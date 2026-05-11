@@ -643,6 +643,19 @@
   padding: 2px 0;
 }
 
+.docx-paragraph-text[contenteditable="true"],
+.docx-cell-text[contenteditable="true"] {
+  border-radius: 3px;
+  cursor: text;
+}
+
+.docx-paragraph-text[contenteditable="true"]:focus,
+.docx-cell-text[contenteditable="true"]:focus {
+  outline: 1px solid #2f80ed;
+  outline-offset: 2px;
+  background: rgba(47, 128, 237, 0.06);
+}
+
 .docx-empty-text {
   color: #6a737d;
 }

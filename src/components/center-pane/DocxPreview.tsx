@@ -41,6 +41,7 @@ export function DocxPreview({
   const loadedFileIdRef = useRef("");
   const lastPublishedFileRef = useRef<File | null>(null);
   const lastRenderSignatureRef = useRef("");
+  const blocksSourceFileRef = useRef<File | null>(null);
   const latestActiveFileRef = useRef(activeFile);
   const latestBlocksRef = useRef<DocxBlock[]>([]);
   const latestBlocksSignatureRef = useRef("");
@@ -70,6 +71,10 @@ export function DocxPreview({
     let isCancelled = false;
     loadedFileIdRef.current = activeFile.id;
     lastRenderSignatureRef.current = "";
+    if (lastPublishedFileRef.current !== activeFile.file) {
+      lastPublishedFileRef.current = null;
+    }
+    blocksSourceFileRef.current = null;
     latestBlocksSignatureRef.current = "";
     setState({ blocks: [], error: "", isLoading: true, renderError: "", warnings: [] });
     setSelectedTarget(null);
@@ -100,7 +105,9 @@ export function DocxPreview({
           renderError: "",
           warnings: result.warnings,
         });
-        lastRenderSignatureRef.current = getBlocksSignature(result.blocks);
+        const signature = getBlocksSignature(result.blocks);
+        lastRenderSignatureRef.current = signature;
+        blocksSourceFileRef.current = activeFile.file;
       } catch (error) {
         if (isCancelled) return;
         setState({
@@ -138,20 +145,34 @@ export function DocxPreview({
 
   useEffect(() => {
     return onRegisterSaveFileProvider(activeFile.id, async () => {
+      const currentActiveFile = latestActiveFileRef.current;
+
       if (state.isLoading) {
-        throw new Error(`DOCX 仍在解析，请稍后再保存（文件：${activeFile.filename}）`);
+        if (blocksSourceFileRef.current !== currentActiveFile.file) {
+          return currentActiveFile.file;
+        }
+
+        throw new Error(`DOCX 仍在解析，请稍后再保存（文件：${currentActiveFile.filename}）`);
       }
 
       if (state.error) {
-        throw new Error(`DOCX 解析失败，无法保存（文件：${activeFile.filename}）：${state.error}`);
+        throw new Error(`DOCX 解析失败，无法保存（文件：${currentActiveFile.filename}）：${state.error}`);
       }
 
       const blocks = latestBlocksRef.current;
       const signature = getBlocksSignature(blocks);
       latestBlocksSignatureRef.current = signature;
 
-      if (signature === lastRenderSignatureRef.current && lastPublishedFileRef.current) {
+      if (
+        signature === lastRenderSignatureRef.current &&
+        lastPublishedFileRef.current &&
+        lastPublishedFileRef.current === currentActiveFile.file
+      ) {
         return lastPublishedFileRef.current;
+      }
+
+      if (blocksSourceFileRef.current !== currentActiveFile.file) {
+        return currentActiveFile.file;
       }
 
       return publishDocxFile(signature, blocks, { keepWhenNewer: true });
@@ -251,6 +272,10 @@ export function DocxPreview({
       <section className={className} key={block.id}>
         <p
           className="docx-paragraph-text"
+          contentEditable
+          suppressContentEditableWarning
+          onFocus={() => setSelectedTarget({ blockId: block.id, kind: "paragraph" })}
+          onInput={(event) => updateParagraphText(block.id, event.currentTarget.textContent ?? "")}
           onMouseUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
         >
           {block.text}
@@ -297,7 +322,13 @@ export function DocxPreview({
                     <td className={className} key={cell.id}>
                       <div
                         className="docx-cell-text"
+                        contentEditable
+                        suppressContentEditableWarning
                         aria-label={`DOCX table cell ${rowIndex + 1}, ${cellIndex + 1}`}
+                        onFocus={() => setSelectedTarget({ blockId: block.id, cellId: cell.id, kind: "cell" })}
+                        onInput={(event) =>
+                          updateTableCellText(block.id, cell.id, event.currentTarget.textContent ?? "")
+                        }
                         onMouseUp={(event) =>
                           publishElementTextSelection(event.currentTarget, {
                             blockId: block.id,
@@ -317,6 +348,50 @@ export function DocxPreview({
         </table>
       </div>
     );
+  }
+
+  function updateParagraphText(blockId: string, text: string) {
+    updateDocxBlocks((blocks) =>
+      blocks.map((block) =>
+        block.type === "paragraph" && block.id === blockId
+          ? {
+              ...block,
+              text,
+            }
+          : block,
+      ),
+    );
+  }
+
+  function updateTableCellText(blockId: string, cellId: string, text: string) {
+    updateDocxBlocks((blocks) =>
+      blocks.map((block) => {
+        if (block.type !== "table" || block.id !== blockId) return block;
+
+        return {
+          ...block,
+          rows: block.rows.map((row) =>
+            row.map((cell) =>
+              cell.id === cellId
+                ? {
+                    ...cell,
+                    text,
+                  }
+                : cell,
+            ),
+          ),
+        };
+      }),
+    );
+  }
+
+  function updateDocxBlocks(update: (blocks: DocxBlock[]) => DocxBlock[]) {
+    setState((current) => {
+      const nextBlocks = update(current.blocks);
+      latestBlocksRef.current = nextBlocks;
+      latestBlocksSignatureRef.current = getBlocksSignature(nextBlocks);
+      return { ...current, blocks: nextBlocks, renderError: "" };
+    });
   }
 
   function selectImage(block: DocxImageBlock) {
@@ -437,6 +512,7 @@ export function DocxPreview({
 
       lastPublishedFileRef.current = nextFile;
       lastRenderSignatureRef.current = signature;
+      blocksSourceFileRef.current = nextFile;
       setState((current) => ({ ...current, renderError: "" }));
       onUpdateFile(currentActiveFile.id, nextFile);
       return nextFile;
