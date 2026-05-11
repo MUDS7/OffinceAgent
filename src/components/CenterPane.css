@@ -614,7 +614,8 @@
 }
 
 .docx-paragraph.selected,
-.docx-cell.selected {
+.docx-cell.selected,
+.docx-image.selected {
   outline: 1px solid #2f80ed;
   outline-offset: 2px;
   background: rgba(47, 128, 237, 0.08);
@@ -657,6 +658,54 @@
   font-size: 19px;
   font-weight: 700;
   line-height: 1.5;
+}
+
+.docx-paragraph.heading-three .docx-paragraph-input {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.56;
+}
+
+.docx-paragraph.subtitle .docx-paragraph-input {
+  color: #4f5f6f;
+  font-size: 17px;
+  line-height: 1.58;
+}
+
+.docx-paragraph.align-center .docx-paragraph-input,
+.docx-cell.align-center .docx-cell-input {
+  text-align: center;
+}
+
+.docx-paragraph.align-right .docx-paragraph-input,
+.docx-cell.align-right .docx-cell-input {
+  text-align: right;
+}
+
+.docx-paragraph.align-justify .docx-paragraph-input,
+.docx-cell.align-justify .docx-cell-input {
+  text-align: justify;
+}
+
+.docx-image {
+  display: flex;
+  margin: 14px 0;
+  min-height: 24px;
+  border-radius: 4px;
+}
+
+.docx-image.align-center {
+  justify-content: center;
+}
+
+.docx-image.align-right {
+  justify-content: flex-end;
+}
+
+.docx-image img {
+  display: block;
+  height: auto;
+  object-fit: contain;
 }
 
 .docx-table-wrap {

@@ -1,5 +1,5 @@
 import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { DOCUMENT_SERVICE_URL } from "../../constants";
 import type { DocumentSelectionContext, PreviewFile } from "./types";
 
@@ -15,11 +15,14 @@ type DocxParagraphBlock = {
   type: "paragraph";
   text: string;
   style?: string | null;
+  style_id?: string | null;
+  alignment?: string | null;
 };
 
 type DocxTableCell = {
   id: string;
   text: string;
+  alignment?: string | null;
 };
 
 type DocxTableBlock = {
@@ -28,7 +31,19 @@ type DocxTableBlock = {
   rows: DocxTableCell[][];
 };
 
-type DocxBlock = DocxParagraphBlock | DocxTableBlock;
+type DocxImageBlock = {
+  id: string;
+  type: "image";
+  filename: string;
+  content_type: string;
+  data_url: string;
+  alt_text?: string | null;
+  width_emu?: number | null;
+  height_emu?: number | null;
+  alignment?: string | null;
+};
+
+type DocxBlock = DocxParagraphBlock | DocxTableBlock | DocxImageBlock;
 
 type DocxParseResponse = {
   filename: string;
@@ -39,9 +54,11 @@ type DocxParseResponse = {
 
 type SelectedDocxTarget =
   | { blockId: string; kind: "paragraph" }
-  | { blockId: string; cellId: string; kind: "cell" };
+  | { blockId: string; cellId: string; kind: "cell" }
+  | { blockId: string; kind: "image" };
 
 const RENDER_DEBOUNCE_MS = 450;
+const EMU_PER_PIXEL = 9525;
 
 export function DocxPreview({
   activeFile,
@@ -199,19 +216,21 @@ export function DocxPreview({
       >
         <article className="docx-page" aria-label={`${activeFile.filename} docx editor`}>
           {state.blocks.length ? (
-            state.blocks.map((block) =>
-              block.type === "paragraph" ? renderParagraph(block) : renderTable(block),
-            )
+            state.blocks.map((block) => {
+              if (block.type === "paragraph") return renderParagraph(block);
+              if (block.type === "table") return renderTable(block);
+              return renderImage(block);
+            })
           ) : (
-          <textarea
-            className="docx-paragraph-input"
-            aria-label="空 DOCX 段落"
-            value=""
-            placeholder="空文档"
-            rows={1}
-            onChange={(event) => {
-              updateParagraph("p-0", event.target.value, "Normal");
-            }}
+            <textarea
+              className="docx-paragraph-input"
+              aria-label="空 DOCX 段落"
+              value=""
+              placeholder="空文档"
+              rows={1}
+              onChange={(event) => {
+                updateParagraph("p-0", event.target.value, "Normal");
+              }}
             />
           )}
         </article>
@@ -224,7 +243,8 @@ export function DocxPreview({
     const className = [
       "docx-block",
       "docx-paragraph",
-      getParagraphStyleClass(block.style),
+      getParagraphStyleClass(block.style, block.style_id),
+      getAlignmentClass(block.alignment),
       isSelected ? "selected" : "",
     ]
       .filter(Boolean)
@@ -246,6 +266,24 @@ export function DocxPreview({
     );
   }
 
+  function renderImage(block: DocxImageBlock) {
+    const isSelected = selectedTarget?.kind === "image" && selectedTarget.blockId === block.id;
+    const className = [
+      "docx-block",
+      "docx-image",
+      getAlignmentClass(block.alignment),
+      isSelected ? "selected" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return (
+      <figure className={className} key={block.id} onPointerDown={() => selectImage(block)}>
+        <img src={block.data_url} alt={block.alt_text || block.filename} style={getImageStyle(block)} />
+      </figure>
+    );
+  }
+
   function renderTable(block: DocxTableBlock) {
     return (
       <div className="docx-block docx-table-wrap" key={block.id}>
@@ -258,9 +296,12 @@ export function DocxPreview({
                     selectedTarget?.kind === "cell" &&
                     selectedTarget.blockId === block.id &&
                     selectedTarget.cellId === cell.id;
+                  const className = ["docx-cell", getAlignmentClass(cell.alignment), isSelected ? "selected" : ""]
+                    .filter(Boolean)
+                    .join(" ");
 
                   return (
-                    <td className={isSelected ? "docx-cell selected" : "docx-cell"} key={cell.id}>
+                    <td className={className} key={cell.id}>
                       <textarea
                         className="docx-cell-input"
                         aria-label={`DOCX table cell ${rowIndex + 1}, ${cellIndex + 1}`}
@@ -318,6 +359,11 @@ export function DocxPreview({
   function selectParagraph(block: DocxParagraphBlock) {
     setSelectedTarget({ blockId: block.id, kind: "paragraph" });
     publishSelectionContext(block.text, block.id);
+  }
+
+  function selectImage(block: DocxImageBlock) {
+    setSelectedTarget({ blockId: block.id, kind: "image" });
+    publishSelectionContext(`图片：${block.alt_text || block.filename}`, block.id);
   }
 
   function selectCell(block: DocxTableBlock, cell: DocxTableCell, rowIndex: number, cellIndex: number) {
@@ -386,6 +432,7 @@ function getDocumentText(blocks: DocxBlock[]) {
   return blocks
     .map((block) => {
       if (block.type === "paragraph") return block.text;
+      if (block.type === "image") return `图片：${block.alt_text || block.filename}`;
       return block.rows.map((row) => row.map((cell) => cell.text).join("\t")).join("\n");
     })
     .join("\n");
@@ -393,14 +440,25 @@ function getDocumentText(blocks: DocxBlock[]) {
 
 function getSelectedTargetLabel(target: SelectedDocxTarget) {
   if (target.kind === "paragraph") return "段落已选中";
+  if (target.kind === "image") return "图片已选中";
   return "表格单元格已选中";
 }
 
-function getParagraphStyleClass(style?: string | null) {
-  const normalized = style?.toLowerCase() ?? "";
-  if (normalized.includes("heading 1") || normalized.includes("标题 1")) return "heading-one";
-  if (normalized.includes("heading 2") || normalized.includes("标题 2")) return "heading-two";
-  if (normalized.includes("title") || normalized.includes("标题")) return "title";
+function getParagraphStyleClass(style?: string | null, styleId?: string | null) {
+  const normalized = `${style ?? ""} ${styleId ?? ""}`.toLowerCase();
+  if (/heading\s*1|heading1|标题\s*1/.test(normalized)) return "heading-one";
+  if (/heading\s*2|heading2|标题\s*2/.test(normalized)) return "heading-two";
+  if (/heading\s*3|heading3|标题\s*3/.test(normalized)) return "heading-three";
+  if (/subtitle|副标题/.test(normalized)) return "subtitle";
+  if (/title|标题/.test(normalized)) return "title";
+  return "";
+}
+
+function getAlignmentClass(alignment?: string | null) {
+  const normalized = alignment?.toLowerCase().replace("_", "-") ?? "";
+  if (normalized.includes("center")) return "align-center";
+  if (normalized.includes("right")) return "align-right";
+  if (normalized.includes("justify") || normalized.includes("distribute")) return "align-justify";
   return "";
 }
 
@@ -410,4 +468,14 @@ function getTextareaRows(text: string, approximateCharsPerLine: number) {
   }, 0);
 
   return Math.min(Math.max(rows, 1), 18);
+}
+
+function getImageStyle(block: DocxImageBlock): CSSProperties {
+  const width = block.width_emu ? Math.round(block.width_emu / EMU_PER_PIXEL) : undefined;
+  const height = block.height_emu ? Math.round(block.height_emu / EMU_PER_PIXEL) : undefined;
+  return {
+    width: width ? `${width}px` : undefined,
+    height: height ? `${height}px` : undefined,
+    maxWidth: "100%",
+  };
 }
