@@ -34,6 +34,7 @@ fn main() {
             document_service::restart_document_service,
             storage::index_document_structure,
             storage::search_document_full_text,
+            storage::open_workspace_storage,
             storage::get_qdrant_status,
             storage::ensure_qdrant_collection,
             storage::upsert_qdrant_chunk_vectors,

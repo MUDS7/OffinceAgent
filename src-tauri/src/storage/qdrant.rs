@@ -93,7 +93,7 @@ pub(super) fn qdrant_db_path(app: &tauri::App) -> Result<PathBuf, String> {
 pub(crate) async fn get_qdrant_status(
     state: State<'_, DocumentStore>,
 ) -> Result<QdrantStatus, String> {
-    let config = QdrantConfig::from_store(&state, None);
+    let config = QdrantConfig::from_store(&state, None)?;
     Ok(QdrantStatus {
         url: config.local_url(),
         collection: config.collection,
@@ -106,7 +106,7 @@ pub(crate) async fn ensure_qdrant_collection(
     state: State<'_, DocumentStore>,
     request: QdrantCollectionRequest,
 ) -> Result<QdrantStatus, String> {
-    let config = QdrantConfig::from_store(&state, request.collection);
+    let config = QdrantConfig::from_store(&state, request.collection)?;
     let distance = request.distance.unwrap_or_else(|| "Cosine".to_string());
     let connection = state
         .qdrant_connection
@@ -156,7 +156,7 @@ fn upsert_qdrant_points(
     collection: Option<String>,
     points: Vec<QdrantVectorPoint>,
 ) -> Result<QdrantUpsertResult, String> {
-    let config = QdrantConfig::from_store(store, collection);
+    let config = QdrantConfig::from_store(store, collection)?;
     let point_count = points.len();
     let mut connection = store
         .qdrant_connection
@@ -388,7 +388,7 @@ pub(crate) async fn search_qdrant_vectors(
     state: State<'_, DocumentStore>,
     request: QdrantSearchRequest,
 ) -> Result<Value, String> {
-    let config = QdrantConfig::from_store(&state, request.collection);
+    let config = QdrantConfig::from_store(&state, request.collection)?;
     let connection = state
         .qdrant_connection
         .lock()
@@ -672,16 +672,19 @@ struct QdrantConfig {
 }
 
 impl QdrantConfig {
-    fn from_store(store: &DocumentStore, collection: Option<String>) -> Self {
+    fn from_store(store: &DocumentStore, collection: Option<String>) -> Result<Self, String> {
         let collection = collection
             .or_else(|| std::env::var("OFFICE_AGENT_QDRANT_COLLECTION").ok())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_QDRANT_COLLECTION.to_string());
 
-        Self {
-            path: store.qdrant_path.clone(),
-            collection,
-        }
+        let path = store
+            .qdrant_path
+            .lock()
+            .map_err(|_| "embedded Qdrant path lock is poisoned".to_string())?
+            .clone();
+
+        Ok(Self { path, collection })
     }
 
     fn local_url(&self) -> String {

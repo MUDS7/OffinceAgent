@@ -28,6 +28,14 @@ export type WorkspaceFile = {
   analysis: AnalyzeResult | null;
 };
 
+export type WorkspaceStorageInfo = {
+  workspace_path: string;
+  data_path: string;
+  sqlite_path: string;
+  qdrant_path: string;
+  created_data_dir: boolean;
+};
+
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";

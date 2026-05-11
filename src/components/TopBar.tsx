@@ -18,7 +18,7 @@ type FileMenuItem = {
   shortcut?: string;
   hasSubmenu?: boolean;
   disabled?: boolean;
-  action?: "open-file" | "open-folder";
+  action?: "open-file" | "open-folder" | "open-workspace";
 };
 
 type TopBarProps = {
@@ -27,6 +27,7 @@ type TopBarProps = {
   workspaceFileCount: number;
   onOpenFilePicker: () => void;
   onOpenFolderPicker: () => void;
+  onOpenWorkspacePicker: () => void;
 };
 
 const fileMenuGroups: FileMenuItem[][] = [
@@ -39,7 +40,7 @@ const fileMenuGroups: FileMenuItem[][] = [
   [
     { label: "打开文件...", shortcut: "Ctrl+O", action: "open-file" },
     { label: "打开文件夹...", shortcut: "Ctrl+K Ctrl+O", action: "open-folder" },
-    { label: "从文件打开工作区..." },
+    { label: "从文件打开工作区...", action: "open-workspace" },
     { label: "打开最近的文件", hasSubmenu: true },
   ],
   [{ label: "将文件夹添加到工作区..." }, { label: "将工作区另存为..." }, { label: "复制工作区" }],
@@ -65,6 +66,7 @@ export function TopBar({
   workspaceFileCount,
   onOpenFilePicker,
   onOpenFolderPicker,
+  onOpenWorkspacePicker,
 }: TopBarProps) {
   const fileMenuRef = useRef<HTMLDivElement | null>(null);
   const [isFileMenuOpen, setIsFileMenuOpen] = useState(false);
@@ -81,6 +83,12 @@ export function TopBar({
     if (item.action === "open-folder") {
       setIsFileMenuOpen(false);
       onOpenFolderPicker();
+      return;
+    }
+
+    if (item.action === "open-workspace") {
+      setIsFileMenuOpen(false);
+      onOpenWorkspacePicker();
       return;
     }
 

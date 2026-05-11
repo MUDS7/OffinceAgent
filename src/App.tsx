@@ -30,6 +30,7 @@ import type {
   TextEditOperation,
   TextSelectionIntentAction,
   WorkspaceFile,
+  WorkspaceStorageInfo,
 } from "./types";
 import {
   buildExcelAgentMessages,
@@ -205,6 +206,24 @@ function App() {
     folderInputRef.current?.click();
   }
 
+  async function openWorkspacePicker() {
+    if (canUseTauriEvents()) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const selected = await open({ directory: true, multiple: false });
+        if (!selected) return;
+        const folderPath = Array.isArray(selected) ? selected[0] : selected;
+        await openWorkspaceByPath(folderPath);
+      } catch (error) {
+        setErrorMessage(`打开工作区对话框失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+
+    if (folderInputRef.current) folderInputRef.current.value = "";
+    folderInputRef.current?.click();
+  }
+
   async function openFilesByPath(filePaths: string[]) {
     const nextFiles: WorkspaceFile[] = [];
     for (const filePath of filePaths) {
@@ -302,6 +321,60 @@ function App() {
       setErrorMessage("");
     } catch (error) {
       setErrorMessage(`读取文件夹失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function openWorkspaceByPath(folderPath: string) {
+    try {
+      await invoke<WorkspaceStorageInfo>("open_workspace_storage", { path: folderPath });
+      const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
+      const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
+      const supported = entries.filter(isSupportedPreviewPath);
+      const nextFiles: WorkspaceFile[] = [];
+
+      for (const filePath of supported) {
+        const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+        const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+        const isBinaryPreview = BINARY_PREVIEW_EXTENSIONS.has(extension);
+        try {
+          const content = isBinaryPreview
+            ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
+            : await invoke<string>("read_file_text", { path: filePath });
+          const relativePath = buildFolderRelativePath(folderPath, rootName, filePath);
+          const file = new File([content], filename, {
+            type: getFileMimeType(filename),
+            lastModified: Date.now(),
+          });
+          nextFiles.push({
+            id: `${filePath}-${file.lastModified}`,
+            file,
+            relativePath,
+            diskPath: filePath,
+            analysis: null,
+          });
+        } catch {
+          // Skip unreadable files silently
+        }
+      }
+
+      setWorkspaceName(rootName);
+      setWorkspaceFiles(nextFiles);
+      setOpenFileIds([]);
+      setSelectedFileId("");
+      setUnsavedContents({});
+      setDirtyFileIds([]);
+      setDocumentSelection(null);
+      setPendingAgentTextEdit(null);
+      setPendingTextRestore(null);
+
+      if (nextFiles.length) {
+        openWorkspaceFile(nextFiles[0].id);
+        setErrorMessage("");
+      } else {
+        setErrorMessage("已打开工作区，但该文件夹中没有支持预览的文件类型");
+      }
+    } catch (error) {
+      setErrorMessage(`打开工作区失败: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1407,6 +1480,7 @@ function App() {
         workspaceFileCount={workspaceFiles.length}
         onOpenFilePicker={openFilePicker}
         onOpenFolderPicker={openFolderPicker}
+        onOpenWorkspacePicker={openWorkspacePicker}
       />
 
       <section className="workbench" style={workbenchStyle}>
