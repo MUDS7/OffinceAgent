@@ -621,69 +621,74 @@
   background: rgba(47, 128, 237, 0.08);
 }
 
-.docx-paragraph-input,
-.docx-cell-input {
+.docx-paragraph-text,
+.docx-cell-text,
+.docx-empty-text {
   display: block;
   width: 100%;
   min-width: 0;
-  resize: vertical;
-  border: 0;
-  outline: 0;
+  margin: 0;
   color: #1f2328;
   background: transparent;
   font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
   font-size: 15px;
   line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.docx-paragraph-input {
+.docx-paragraph-text,
+.docx-empty-text {
   min-height: 34px;
-  overflow: hidden;
   padding: 2px 0;
 }
 
-.docx-paragraph.title .docx-paragraph-input {
+.docx-empty-text {
+  color: #6a737d;
+}
+
+.docx-paragraph.title .docx-paragraph-text {
   font-size: 26px;
   font-weight: 700;
   line-height: 1.35;
 }
 
-.docx-paragraph.heading-one .docx-paragraph-input {
+.docx-paragraph.heading-one .docx-paragraph-text {
   font-size: 23px;
   font-weight: 700;
   line-height: 1.42;
 }
 
-.docx-paragraph.heading-two .docx-paragraph-input {
+.docx-paragraph.heading-two .docx-paragraph-text {
   font-size: 19px;
   font-weight: 700;
   line-height: 1.5;
 }
 
-.docx-paragraph.heading-three .docx-paragraph-input {
+.docx-paragraph.heading-three .docx-paragraph-text {
   font-size: 17px;
   font-weight: 700;
   line-height: 1.56;
 }
 
-.docx-paragraph.subtitle .docx-paragraph-input {
+.docx-paragraph.subtitle .docx-paragraph-text {
   color: #4f5f6f;
   font-size: 17px;
   line-height: 1.58;
 }
 
-.docx-paragraph.align-center .docx-paragraph-input,
-.docx-cell.align-center .docx-cell-input {
+.docx-paragraph.align-center .docx-paragraph-text,
+.docx-cell.align-center .docx-cell-text {
   text-align: center;
 }
 
-.docx-paragraph.align-right .docx-paragraph-input,
-.docx-cell.align-right .docx-cell-input {
+.docx-paragraph.align-right .docx-paragraph-text,
+.docx-cell.align-right .docx-cell-text {
   text-align: right;
 }
 
-.docx-paragraph.align-justify .docx-paragraph-input,
-.docx-cell.align-justify .docx-cell-input {
+.docx-paragraph.align-justify .docx-paragraph-text,
+.docx-cell.align-justify .docx-cell-text {
   text-align: justify;
 }
 
@@ -729,13 +734,12 @@
   vertical-align: top;
 }
 
-.docx-cell-input {
+.docx-cell-text {
   min-height: 36px;
-  resize: vertical;
 }
 
-.docx-paragraph-input::selection,
-.docx-cell-input::selection {
+.docx-paragraph-text::selection,
+.docx-cell-text::selection {
   background: rgba(31, 111, 235, 0.22);
 }
 

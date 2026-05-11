@@ -262,16 +262,7 @@ export function DocxPreview({
               return renderImage(block);
             })
           ) : (
-            <textarea
-              className="docx-paragraph-input"
-              aria-label="空 DOCX 段落"
-              value=""
-              placeholder="空文档"
-              rows={1}
-              onChange={(event) => {
-                updateParagraph("p-0", event.target.value, "Normal");
-              }}
-            />
+            <p className="docx-empty-text">空文档</p>
           )}
         </article>
       </div>
@@ -292,18 +283,12 @@ export function DocxPreview({
 
     return (
       <section className={className} key={block.id}>
-        <textarea
-          className="docx-paragraph-input"
-          aria-label="DOCX paragraph"
-          spellCheck={false}
-          rows={getTextareaRows(block.text, 86)}
-          value={block.text}
-          onChange={(event) => updateParagraph(block.id, event.target.value, block.style)}
-          onFocus={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
-          onKeyUp={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
-          onMouseUp={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
-          onSelect={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
-        />
+        <p
+          className="docx-paragraph-text"
+          onMouseUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
+        >
+          {block.text}
+        </p>
       </section>
     );
   }
@@ -344,42 +329,19 @@ export function DocxPreview({
 
                   return (
                     <td className={className} key={cell.id}>
-                      <textarea
-                        className="docx-cell-input"
+                      <div
+                        className="docx-cell-text"
                         aria-label={`DOCX table cell ${rowIndex + 1}, ${cellIndex + 1}`}
-                        spellCheck={false}
-                        rows={getTextareaRows(cell.text, 28)}
-                        value={cell.text}
-                        onChange={(event) => updateTableCell(block.id, cell.id, event.target.value)}
-                        onFocus={(event) =>
-                          publishTextSelection(event.currentTarget, {
-                            blockId: block.id,
-                            cellId: cell.id,
-                            kind: "cell",
-                          })
-                        }
-                        onKeyUp={(event) =>
-                          publishTextSelection(event.currentTarget, {
-                            blockId: block.id,
-                            cellId: cell.id,
-                            kind: "cell",
-                          })
-                        }
                         onMouseUp={(event) =>
-                          publishTextSelection(event.currentTarget, {
+                          publishElementTextSelection(event.currentTarget, {
                             blockId: block.id,
                             cellId: cell.id,
                             kind: "cell",
                           })
                         }
-                        onSelect={(event) =>
-                          publishTextSelection(event.currentTarget, {
-                            blockId: block.id,
-                            cellId: cell.id,
-                            kind: "cell",
-                          })
-                        }
-                      />
+                      >
+                        {cell.text}
+                      </div>
                     </td>
                   );
                 })}
@@ -391,38 +353,6 @@ export function DocxPreview({
     );
   }
 
-  function updateParagraph(blockId: string, text: string, style?: string | null) {
-    setState((current) => {
-      const hasExistingBlock = current.blocks.some((block) => block.id === blockId);
-      const blocks = hasExistingBlock
-        ? current.blocks.map((block) =>
-            block.type === "paragraph" && block.id === blockId ? { ...block, text } : block,
-          )
-        : [{ id: blockId, type: "paragraph" as const, text, style: style ?? "Normal" }];
-
-      return {
-        ...current,
-        blocks,
-      };
-    });
-  }
-
-  function updateTableCell(blockId: string, cellId: string, text: string) {
-    setState((current) => ({
-      ...current,
-      blocks: current.blocks.map((block) => {
-        if (block.type !== "table" || block.id !== blockId) return block;
-
-        return {
-          ...block,
-          rows: block.rows.map((row) =>
-            row.map((cell) => (cell.id === cellId ? { ...cell, text } : cell)),
-          ),
-        };
-      }),
-    }));
-  }
-
   function selectImage(block: DocxImageBlock) {
     setSelectedTarget({ blockId: block.id, kind: "image" });
     const text = getDocxImageText(block);
@@ -430,15 +360,27 @@ export function DocxPreview({
     publishSelectionContext(text, start, start === undefined ? undefined : start + text.length);
   }
 
-  function publishTextSelection(textarea: HTMLTextAreaElement, target: SelectedDocxTextTarget) {
-    const selectionStart = textarea.selectionStart;
-    const selectionEnd = textarea.selectionEnd;
-    const selectedText = textarea.value.slice(selectionStart, selectionEnd);
-    if (!selectedText.trim() || selectionStart === selectionEnd) {
+  function publishElementTextSelection(element: HTMLElement, target: SelectedDocxTextTarget) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
       clearDocxSelectionContext();
       return;
     }
 
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+      clearDocxSelectionContext();
+      return;
+    }
+
+    const selectedText = selection.toString();
+    if (!selectedText.trim()) {
+      clearDocxSelectionContext();
+      return;
+    }
+
+    const selectionStart = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
+    const selectionEnd = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
     setSelectedTarget(target);
     publishSelectionContext(
       selectedText,
@@ -543,6 +485,15 @@ export function DocxPreview({
   }
 }
 
+function getTextOffsetWithinElement(element: HTMLElement, container: Node, offset: number) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.setEnd(container, offset);
+  const textOffset = range.toString().length;
+  range.detach();
+  return textOffset;
+}
+
 function getBlocksSignature(blocks: DocxBlock[]) {
   return JSON.stringify(blocks);
 }
@@ -588,14 +539,6 @@ function getAlignmentClass(alignment?: string | null) {
   if (normalized.includes("right")) return "align-right";
   if (normalized.includes("justify") || normalized.includes("distribute")) return "align-justify";
   return "";
-}
-
-function getTextareaRows(text: string, approximateCharsPerLine: number) {
-  const rows = text.split(/\r?\n/).reduce((total, line) => {
-    return total + Math.max(1, Math.ceil(line.length / approximateCharsPerLine));
-  }, 0);
-
-  return Math.min(Math.max(rows, 1), 18);
 }
 
 function getImageStyle(block: DocxImageBlock): CSSProperties {
