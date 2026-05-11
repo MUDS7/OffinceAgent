@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Manager, State};
 
-use super::{
-    document_index::{build_document_index, flatten_document_blocks},
-    unix_timestamp_seconds, DocumentStore,
-};
+use super::{document_index::build_document_index, unix_timestamp_seconds, DocumentStore};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DocumentIndexRequest {
@@ -69,6 +66,13 @@ pub(crate) fn index_document_structure(
         .connection
         .lock()
         .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+    index_document_structure_with_connection(&mut connection, request)
+}
+
+fn index_document_structure_with_connection(
+    connection: &mut Connection,
+    request: DocumentIndexRequest,
+) -> Result<DocumentIndexResult, String> {
     let transaction = connection
         .transaction()
         .map_err(|error| format!("cannot start SQLite transaction: {error}"))?;
@@ -140,91 +144,17 @@ pub(crate) fn index_document_structure(
 
     transaction
         .execute(
-            "DELETE FROM chunk_assets WHERE chunk_id IN (
-                SELECT id FROM chunks WHERE document_id = ?1
-             )",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old chunk asset links: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM chunk_fts WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old chunk full-text rows: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM assets WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old document assets: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM chunks WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old chunks: {error}"))?;
-    transaction
-        .execute(
             "DELETE FROM doc_nodes WHERE document_id = ?1",
             params![request.document_id],
         )
         .map_err(|error| format!("cannot clear old document nodes: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM document_blocks WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old document blocks: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM document_fts WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old full-text rows: {error}"))?;
 
-    let flattened = flatten_document_blocks(&request.blocks);
     let indexed = build_document_index(&request.document_id, &request.blocks);
     let mut text_bytes_indexed = 0usize;
-    for block in &flattened {
-        text_bytes_indexed += block.text.len();
-        transaction
-            .execute(
-                "INSERT INTO document_blocks (
-                    document_id, block_id, block_type, block_index, parent_id, text, metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    request.document_id,
-                    block.block_id,
-                    block.block_type,
-                    block.block_index as i64,
-                    block.parent_id,
-                    block.text,
-                    block.metadata_json,
-                ],
-            )
-            .map_err(|error| format!("cannot insert document block {}: {error}", block.block_id))?;
-
-        if !block.text.trim().is_empty() {
-            transaction
-                .execute(
-                    "INSERT INTO document_fts (document_id, block_id, filename, path, text)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        request.document_id,
-                        block.block_id,
-                        request.filename,
-                        request.path,
-                        block.text,
-                    ],
-                )
-                .map_err(|error| {
-                    format!("cannot insert full-text row {}: {error}", block.block_id)
-                })?;
-        }
-    }
-
     for node in &indexed.nodes {
+        if let Some(text) = &node.text {
+            text_bytes_indexed += text.len();
+        }
         transaction
             .execute(
                 "INSERT INTO doc_nodes (
@@ -247,93 +177,16 @@ pub(crate) fn index_document_structure(
             .map_err(|error| format!("cannot insert document node {}: {error}", node.id))?;
     }
 
-    for chunk in &indexed.chunks {
-        text_bytes_indexed += chunk.content.len();
-        transaction
-            .execute(
-                "INSERT INTO chunks (
-                    id, document_id, node_ids_json, heading_path_json, chunk_type,
-                    content, content_for_embedding, order_index, token_count, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    chunk.id,
-                    request.document_id,
-                    chunk.node_ids_json,
-                    chunk.heading_path_json,
-                    chunk.chunk_type,
-                    chunk.content,
-                    chunk.content_for_embedding,
-                    chunk.order_index as i64,
-                    chunk.token_count as i64,
-                    now,
-                ],
-            )
-            .map_err(|error| format!("cannot insert chunk {}: {error}", chunk.id))?;
-
-        if !chunk.content.trim().is_empty() {
-            transaction
-                .execute(
-                    "INSERT INTO chunk_fts (chunk_id, document_id, heading_path, content)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        chunk.id,
-                        request.document_id,
-                        chunk.heading_path_text,
-                        chunk.content,
-                    ],
-                )
-                .map_err(|error| format!("cannot insert chunk FTS row {}: {error}", chunk.id))?;
-        }
-    }
-
-    for asset in &indexed.assets {
-        transaction
-            .execute(
-                "INSERT INTO assets (
-                    id, document_id, node_id, asset_type, file_path, caption,
-                    description, nearby_text, metadata_json, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    asset.id,
-                    request.document_id,
-                    asset.node_id,
-                    asset.asset_type,
-                    asset.file_path,
-                    asset.caption,
-                    asset.description,
-                    asset.nearby_text,
-                    asset.metadata_json,
-                    now,
-                ],
-            )
-            .map_err(|error| format!("cannot insert asset {}: {error}", asset.id))?;
-    }
-
-    for link in &indexed.chunk_assets {
-        transaction
-            .execute(
-                "INSERT INTO chunk_assets (chunk_id, asset_id, relation_type)
-                 VALUES (?1, ?2, ?3)",
-                params![link.chunk_id, link.asset_id, link.relation_type],
-            )
-            .map_err(|error| {
-                format!(
-                    "cannot link chunk {} to asset {}: {error}",
-                    link.chunk_id, link.asset_id
-                )
-            })?;
-    }
-
     transaction
         .commit()
         .map_err(|error| format!("cannot commit SQLite document index: {error}"))?;
 
     Ok(DocumentIndexResult {
         document_id: request.document_id,
-        blocks_indexed: flattened.len(),
+        blocks_indexed: 0,
         nodes_indexed: indexed.nodes.len(),
-        chunks_indexed: indexed.chunks.len(),
-        assets_indexed: indexed.assets.len(),
+        chunks_indexed: 0,
+        assets_indexed: 0,
         text_bytes_indexed,
     })
 }
@@ -579,6 +432,7 @@ pub(super) fn build_safe_fts_query(query: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn builds_quoted_fts_query() {
@@ -609,5 +463,69 @@ mod tests {
             )
             .expect("FTS query should run");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn indexes_only_documents_and_doc_nodes_for_now() {
+        let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+
+        let result = index_document_structure_with_connection(
+            &mut connection,
+            DocumentIndexRequest {
+                document_id: "doc_001".to_string(),
+                filename: "demo.docx".to_string(),
+                path: Some("E:\\docs\\demo.docx".to_string()),
+                original_path: None,
+                stored_path: None,
+                extension: Some("docx".to_string()),
+                file_type: Some("docx".to_string()),
+                size_bytes: Some(128),
+                sha256: Some("abc123".to_string()),
+                parse_status: None,
+                index_status: None,
+                blocks: json!([
+                    {
+                        "id": "h1",
+                        "type": "paragraph",
+                        "text": "Heading",
+                        "style": "Heading 1"
+                    },
+                    {
+                        "id": "p1",
+                        "type": "paragraph",
+                        "text": "Body text"
+                    },
+                    {
+                        "id": "img1",
+                        "type": "image",
+                        "filename": "image_001.png",
+                        "alt_text": "Diagram"
+                    }
+                ]),
+            },
+        )
+        .expect("document structure should index");
+
+        assert_eq!(result.nodes_indexed, 3);
+        assert_eq!(result.blocks_indexed, 0);
+        assert_eq!(result.chunks_indexed, 0);
+        assert_eq!(result.assets_indexed, 0);
+        assert_eq!(table_count(&connection, "documents"), 1);
+        assert_eq!(table_count(&connection, "doc_nodes"), 3);
+        assert_eq!(table_count(&connection, "chunks"), 0);
+        assert_eq!(table_count(&connection, "chunk_fts"), 0);
+        assert_eq!(table_count(&connection, "assets"), 0);
+        assert_eq!(table_count(&connection, "chunk_assets"), 0);
+        assert_eq!(table_count(&connection, "document_blocks"), 0);
+        assert_eq!(table_count(&connection, "document_fts"), 0);
+    }
+
+    fn table_count(connection: &Connection, table: &str) -> i64 {
+        connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("table count should be readable")
     }
 }

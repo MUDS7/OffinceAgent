@@ -19,6 +19,7 @@ pub(super) struct IndexedNode {
     pub(super) metadata_json: String,
 }
 
+#[allow(dead_code)]
 pub(super) struct IndexedChunk {
     pub(super) id: String,
     pub(super) node_ids_json: String,
@@ -31,6 +32,7 @@ pub(super) struct IndexedChunk {
     pub(super) token_count: usize,
 }
 
+#[allow(dead_code)]
 pub(super) struct IndexedAsset {
     pub(super) id: String,
     pub(super) node_id: Option<String>,
@@ -42,6 +44,7 @@ pub(super) struct IndexedAsset {
     pub(super) metadata_json: String,
 }
 
+#[allow(dead_code)]
 pub(super) struct ChunkAssetLink {
     pub(super) chunk_id: String,
     pub(super) asset_id: String,
@@ -416,6 +419,7 @@ fn estimate_token_count(text: &str) -> usize {
     (text.chars().count() / 4).max(1)
 }
 
+#[allow(dead_code)]
 pub(super) struct FlattenedBlock {
     pub(super) block_id: String,
     pub(super) block_type: String,
@@ -425,6 +429,7 @@ pub(super) struct FlattenedBlock {
     pub(super) metadata_json: String,
 }
 
+#[allow(dead_code)]
 pub(super) fn flatten_document_blocks(blocks: &Value) -> Vec<FlattenedBlock> {
     let Some(blocks) = blocks.as_array() else {
         return Vec::new();
