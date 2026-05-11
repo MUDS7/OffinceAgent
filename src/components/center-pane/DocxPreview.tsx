@@ -60,6 +60,8 @@ type SelectedDocxTarget =
   | { blockId: string; cellId: string; kind: "cell" }
   | { blockId: string; kind: "image" };
 
+type SelectedDocxTextTarget = Exclude<SelectedDocxTarget, { kind: "image" }>;
+
 const RENDER_DEBOUNCE_MS = 450;
 const EMU_PER_PIXEL = 9525;
 
@@ -249,8 +251,7 @@ export function DocxPreview({
         className="docx-page-shell"
         onPointerDown={(event) => {
           if (event.target instanceof Element && event.target.closest(".docx-block, .docx-cell")) return;
-          setSelectedTarget(null);
-          onSelectionContextChange(null);
+          clearDocxSelectionContext();
         }}
       >
         <article className="docx-page" aria-label={`${activeFile.filename} docx editor`}>
@@ -290,7 +291,7 @@ export function DocxPreview({
       .join(" ");
 
     return (
-      <section className={className} key={block.id} onPointerDown={() => selectParagraph(block)}>
+      <section className={className} key={block.id}>
         <textarea
           className="docx-paragraph-input"
           aria-label="DOCX paragraph"
@@ -298,8 +299,10 @@ export function DocxPreview({
           rows={getTextareaRows(block.text, 86)}
           value={block.text}
           onChange={(event) => updateParagraph(block.id, event.target.value, block.style)}
-          onFocus={() => selectParagraph(block)}
-          onSelect={(event) => publishTextSelection(event.currentTarget, block.text, block.id)}
+          onFocus={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
+          onKeyUp={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
+          onMouseUp={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
+          onSelect={(event) => publishTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
         />
       </section>
     );
@@ -348,9 +351,34 @@ export function DocxPreview({
                         rows={getTextareaRows(cell.text, 28)}
                         value={cell.text}
                         onChange={(event) => updateTableCell(block.id, cell.id, event.target.value)}
-                        onFocus={() => selectCell(block, cell, rowIndex, cellIndex)}
-                        onPointerDown={() => selectCell(block, cell, rowIndex, cellIndex)}
-                        onSelect={(event) => publishTextSelection(event.currentTarget, cell.text, block.id)}
+                        onFocus={(event) =>
+                          publishTextSelection(event.currentTarget, {
+                            blockId: block.id,
+                            cellId: cell.id,
+                            kind: "cell",
+                          })
+                        }
+                        onKeyUp={(event) =>
+                          publishTextSelection(event.currentTarget, {
+                            blockId: block.id,
+                            cellId: cell.id,
+                            kind: "cell",
+                          })
+                        }
+                        onMouseUp={(event) =>
+                          publishTextSelection(event.currentTarget, {
+                            blockId: block.id,
+                            cellId: cell.id,
+                            kind: "cell",
+                          })
+                        }
+                        onSelect={(event) =>
+                          publishTextSelection(event.currentTarget, {
+                            blockId: block.id,
+                            cellId: cell.id,
+                            kind: "cell",
+                          })
+                        }
                       />
                     </td>
                   );
@@ -395,37 +423,93 @@ export function DocxPreview({
     }));
   }
 
-  function selectParagraph(block: DocxParagraphBlock) {
-    setSelectedTarget({ blockId: block.id, kind: "paragraph" });
-    publishSelectionContext(block.text, block.id);
-  }
-
   function selectImage(block: DocxImageBlock) {
     setSelectedTarget({ blockId: block.id, kind: "image" });
-    publishSelectionContext(`图片：${block.alt_text || block.filename}`, block.id);
+    const text = getDocxImageText(block);
+    const start = getBlockStartOffset(block.id);
+    publishSelectionContext(text, start, start === undefined ? undefined : start + text.length);
   }
 
-  function selectCell(block: DocxTableBlock, cell: DocxTableCell, rowIndex: number, cellIndex: number) {
-    setSelectedTarget({ blockId: block.id, cellId: cell.id, kind: "cell" });
-    publishSelectionContext(`Table ${block.id}, R${rowIndex + 1}C${cellIndex + 1}\n${cell.text}`, block.id);
+  function publishTextSelection(textarea: HTMLTextAreaElement, target: SelectedDocxTextTarget) {
+    const selectionStart = textarea.selectionStart;
+    const selectionEnd = textarea.selectionEnd;
+    const selectedText = textarea.value.slice(selectionStart, selectionEnd);
+    if (!selectedText.trim() || selectionStart === selectionEnd) {
+      clearDocxSelectionContext();
+      return;
+    }
+
+    setSelectedTarget(target);
+    publishSelectionContext(
+      selectedText,
+      getTextTargetOffset(target, selectionStart),
+      getTextTargetOffset(target, selectionEnd),
+    );
   }
 
-  function publishTextSelection(textarea: HTMLTextAreaElement, fallbackText: string, blockId: string) {
-    const selectedText = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
-    publishSelectionContext(selectedText.trim() ? selectedText : fallbackText, blockId);
+  function clearDocxSelectionContext() {
+    setSelectedTarget(null);
+    onSelectionContextChange(null);
   }
 
-  function publishSelectionContext(text: string, blockId: string) {
-    const start = documentText.indexOf(text);
+  function publishSelectionContext(text: string, start?: number, end?: number) {
+    const fallbackStart = start === undefined ? documentText.indexOf(text) : -1;
+    const resolvedStart = start ?? (fallbackStart >= 0 ? fallbackStart : undefined);
     onSelectionContextChange({
       fileId: activeFile.id,
       filePath: activeFile.diskPath ?? activeFile.filename,
       filename: activeFile.filename,
       sourceType: "docx",
-      start: start >= 0 ? start : undefined,
-      end: start >= 0 ? start + text.length : undefined,
+      start: resolvedStart,
+      end: end ?? (resolvedStart === undefined ? undefined : resolvedStart + text.length),
       text,
     });
+  }
+
+  function getBlockStartOffset(blockId: string) {
+    let offset = 0;
+
+    for (const [blockIndex, block] of state.blocks.entries()) {
+      if (block.id === blockId) return offset;
+
+      offset += getDocxBlockText(block).length;
+      if (blockIndex < state.blocks.length - 1) offset += 1;
+    }
+
+    return undefined;
+  }
+
+  function getTextTargetOffset(target: SelectedDocxTextTarget, localOffset: number) {
+    let offset = 0;
+
+    for (const [blockIndex, block] of state.blocks.entries()) {
+      if (block.type === "paragraph") {
+        if (target.kind === "paragraph" && block.id === target.blockId) {
+          return offset + clampTextOffset(localOffset, block.text.length);
+        }
+
+        offset += block.text.length;
+      } else if (block.type === "image") {
+        offset += getDocxImageText(block).length;
+      } else {
+        for (const [rowIndex, row] of block.rows.entries()) {
+          for (const [cellIndex, cell] of row.entries()) {
+            if (target.kind === "cell" && block.id === target.blockId && cell.id === target.cellId) {
+              return offset + clampTextOffset(localOffset, cell.text.length);
+            }
+
+            offset += cell.text.length;
+            if (cellIndex < row.length - 1) offset += 1;
+          }
+
+          if (rowIndex < block.rows.length - 1) offset += 1;
+        }
+      }
+
+      if (blockIndex < state.blocks.length - 1) offset += 1;
+    }
+
+    return undefined;
   }
 
   async function publishDocxFile(
@@ -464,19 +548,28 @@ function getBlocksSignature(blocks: DocxBlock[]) {
 }
 
 function getDocumentText(blocks: DocxBlock[]) {
-  return blocks
-    .map((block) => {
-      if (block.type === "paragraph") return block.text;
-      if (block.type === "image") return `图片：${block.alt_text || block.filename}`;
-      return block.rows.map((row) => row.map((cell) => cell.text).join("\t")).join("\n");
-    })
-    .join("\n");
+  return blocks.map((block) => getDocxBlockText(block)).join("\n");
+}
+
+function getDocxBlockText(block: DocxBlock) {
+  if (block.type === "paragraph") return block.text;
+  if (block.type === "image") return getDocxImageText(block);
+  return block.rows.map((row) => row.map((cell) => cell.text).join("\t")).join("\n");
+}
+
+function getDocxImageText(block: DocxImageBlock) {
+  return `图片：${block.alt_text || block.filename}`;
+}
+
+function clampTextOffset(offset: number, textLength: number) {
+  if (!Number.isFinite(offset)) return 0;
+  return Math.min(Math.max(Math.trunc(offset), 0), textLength);
 }
 
 function getSelectedTargetLabel(target: SelectedDocxTarget) {
-  if (target.kind === "paragraph") return "段落已选中";
+  if (target.kind === "paragraph") return "文本已选中";
   if (target.kind === "image") return "图片已选中";
-  return "表格单元格已选中";
+  return "单元格文本已选中";
 }
 
 function getParagraphStyleClass(style?: string | null, styleId?: string | null) {
