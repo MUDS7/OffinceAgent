@@ -2,7 +2,7 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type * as XLSXModule from "xlsx";
 import { DOCUMENT_SERVICE_URL, MAX_FILE_CONTEXT_CHARS } from "../constants";
-import type { WorkspaceFile } from "../types";
+import type { DocxBlock, DocxImageBlock, WorkspaceFile } from "../types";
 import { fetchDocumentService } from "./documentService";
 
 export type CompressedFileContext = {
@@ -18,6 +18,7 @@ const PDF_FILE_EXTENSIONS = new Set(["pdf"]);
 const DOCX_FILE_EXTENSIONS = new Set(["docx"]);
 const MAX_CELL_VALUE_CHARS = 160;
 const MAX_TEXT_LINE_CHARS = 500;
+const EMU_PER_PIXEL = 9525;
 
 export async function buildCompressedFileContext(
   workspaceFile: WorkspaceFile | null,
@@ -60,15 +61,17 @@ async function buildDocxFileContext(file: File): Promise<CompressedFileContext> 
     throw new Error(`DOCX parse service returned ${response.status}`);
   }
 
-  const result = (await response.json()) as { blocks: Array<Record<string, unknown>> };
+  const result = (await response.json()) as { blocks: DocxBlock[] };
   const output = createContextWriter();
   let emittedBlocks = 0;
 
-  output.push("Compressed Word document context. Block numbers keep their parsed order.");
+  output.push(
+    "Compressed Word document context. Block numbers keep their parsed order. Image blocks include metadata but omit raw base64 image bytes.",
+  );
 
   for (const [index, block] of result.blocks.entries()) {
     if (block.type === "paragraph") {
-      const text = compressTextValue(String(block.text ?? ""), MAX_TEXT_LINE_CHARS * 2);
+      const text = compressTextValue(block.text, MAX_TEXT_LINE_CHARS * 2);
       if (!text.trim()) continue;
       if (!output.push(`B${index + 1} paragraph: ${text}`)) break;
       emittedBlocks += 1;
@@ -76,14 +79,21 @@ async function buildDocxFileContext(file: File): Promise<CompressedFileContext> 
     }
 
     if (block.type === "table" && Array.isArray(block.rows)) {
-      const rows = block.rows as Array<Array<{ text?: string }>>;
+      const rows = block.rows;
       const rowText = rows
         .map((row, rowIndex) =>
-          `R${rowIndex + 1}: ${row.map((cell) => compressTextValue(String(cell.text ?? ""), MAX_CELL_VALUE_CHARS)).join(" | ")}`,
+          `R${rowIndex + 1}: ${row.map((cell) => compressTextValue(cell.text, MAX_CELL_VALUE_CHARS)).join(" | ")}`,
         )
         .join("\n");
       if (!rowText.trim()) continue;
       if (!output.push(`B${index + 1} table:\n${rowText}`)) break;
+      emittedBlocks += 1;
+      continue;
+    }
+
+    if (block.type === "image") {
+      const imageText = buildDocxImageContextLine(block);
+      if (!output.push(`B${index + 1} image: ${imageText}`)) break;
       emittedBlocks += 1;
     }
   }
@@ -94,6 +104,34 @@ async function buildDocxFileContext(file: File): Promise<CompressedFileContext> 
     fileType: "docx",
     isTruncated: output.isTruncated,
   };
+}
+
+function buildDocxImageContextLine(block: DocxImageBlock) {
+  const altText = block.alt_text?.trim();
+  const fields = [
+    `filename=${JSON.stringify(compressTextValue(block.filename || "image", MAX_CELL_VALUE_CHARS))}`,
+    altText ? `alt_text=${JSON.stringify(compressTextValue(altText, MAX_TEXT_LINE_CHARS))}` : "",
+    `content_type=${JSON.stringify(block.content_type || "application/octet-stream")}`,
+    buildImageSizeField(block),
+    block.alignment ? `alignment=${block.alignment}` : "",
+  ].filter(Boolean);
+
+  return fields.join("; ");
+}
+
+function buildImageSizeField(block: DocxImageBlock) {
+  const widthPx = block.width_emu ? Math.round(block.width_emu / EMU_PER_PIXEL) : null;
+  const heightPx = block.height_emu ? Math.round(block.height_emu / EMU_PER_PIXEL) : null;
+
+  if (widthPx && heightPx) {
+    return `size=${widthPx}x${heightPx}px`;
+  }
+
+  if (block.width_emu || block.height_emu) {
+    return `size_emu=${block.width_emu ?? "unknown"}x${block.height_emu ?? "unknown"}`;
+  }
+
+  return "";
 }
 
 function buildTextFileContext(filename: string, text: string): CompressedFileContext {

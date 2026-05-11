@@ -1028,7 +1028,9 @@ function App() {
 
     try {
       const shouldBuildFileContext =
-        !documentSelection?.text.trim() || documentSelection.sourceType === "text";
+        shouldUseDocxAgent(selectedWorkspaceFile) ||
+        !documentSelection?.text.trim() ||
+        documentSelection.sourceType === "text";
       if (shouldBuildFileContext) {
         try {
           fileContext = await buildCompressedFileContext(

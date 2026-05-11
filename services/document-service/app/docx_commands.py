@@ -39,9 +39,12 @@ def get_docx_commands() -> DocxCommandsResponse:
             DocxCommandSpec(
                 command="replace_paragraph",
                 category="basic",
-                description="Replace one paragraph by 1-based block_index or by matching target_text.",
-                required_args=["text"],
-                optional_args=["block_index", "target_text", "case_sensitive"],
+                description=(
+                    "Replace one or more paragraphs by 1-based block_index or by matching target_text. "
+                    "Use replacements for batch updates."
+                ),
+                required_args=["text for single replacement, or replacements for batch replacement"],
+                optional_args=["block_index", "target_text", "replacements", "style", "alignment", "case_sensitive"],
             ),
             DocxCommandSpec(
                 command="insert_paragraph",
@@ -175,18 +178,66 @@ def replace_docx_text(
 
 
 def replace_docx_paragraph(blocks: list[DocxBlock], args: dict[str, Any]) -> int:
-    text = str(required_arg(args, "text"))
+    replacements_arg = args.get("replacements")
+    if replacements_arg is not None:
+        replacements = normalize_paragraph_replacements(replacements_arg, args)
+        affected_indices: set[int] = set()
+
+        for replacement in replacements:
+            block_index = resolve_docx_block_index(blocks, replacement, require_paragraph=True)
+            if block_index in affected_indices:
+                raise HTTPException(status_code=400, detail=f"Duplicate paragraph target: B{block_index + 1}")
+
+            block = blocks[block_index]
+            if not isinstance(block, DocxParagraphBlock):
+                raise HTTPException(status_code=400, detail="Target block is not a paragraph")
+
+            apply_paragraph_replacement(block, replacement)
+            affected_indices.add(block_index)
+
+        return len(affected_indices)
+
     block_index = resolve_docx_block_index(blocks, args, require_paragraph=True)
     block = blocks[block_index]
     if not isinstance(block, DocxParagraphBlock):
         raise HTTPException(status_code=400, detail="Target block is not a paragraph")
 
-    block.text = text
+    apply_paragraph_replacement(block, args)
+    return 1
+
+
+def normalize_paragraph_replacements(replacements: Any, parent_args: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(replacements, list) or not replacements:
+        raise HTTPException(status_code=400, detail="replacements must be a non-empty array")
+
+    normalized: list[dict[str, Any]] = []
+    for index, replacement in enumerate(replacements, start=1):
+        if not isinstance(replacement, dict):
+            raise HTTPException(status_code=400, detail=f"replacements[{index}] must be an object")
+
+        item = dict(replacement)
+        required_arg(item, "text")
+        if item.get("block_index") is None and not str(item.get("target_text") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"replacements[{index}] requires block_index or target_text",
+            )
+
+        for inherited_name in ("case_sensitive", "style", "alignment"):
+            if inherited_name in parent_args and inherited_name not in item:
+                item[inherited_name] = parent_args[inherited_name]
+
+        normalized.append(item)
+
+    return normalized
+
+
+def apply_paragraph_replacement(block: DocxParagraphBlock, args: dict[str, Any]) -> None:
+    block.text = str(required_arg(args, "text"))
     if "style" in args:
         block.style = str(args.get("style") or "")
     if "alignment" in args:
         block.alignment = normalize_docx_alignment(args.get("alignment"))
-    return 1
 
 
 def insert_docx_paragraph(blocks: list[DocxBlock], args: dict[str, Any]) -> None:
