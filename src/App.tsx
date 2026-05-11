@@ -20,6 +20,8 @@ import type {
   ChatMessage,
   DeepSeekStreamEvent,
   DocumentSelectionContext,
+  DocxCommandsResponse,
+  DocxExecuteResponse,
   ExcelCommandsResponse,
   ExcelExecuteResponse,
   LayoutWidths,
@@ -40,6 +42,17 @@ import {
   parseExcelAgentPlan,
   parseSpreadsheetSelectionSheet,
 } from "./utils/excelAgent";
+import {
+  buildDocxAgentMessages,
+  buildDocxExecutionStatus,
+  buildUnavailableDocxCommandMessage,
+  executeDocxPlan,
+  fetchDocxCommandSpecs,
+  isDocxCommandAvailable,
+  normalizeDocxCommandName,
+  parseDocxAgentPlan,
+  shouldUseDocxAgent,
+} from "./utils/docxAgent";
 import {
   buildDeepSeekMessages,
   buildTextEditAgentRequest,
@@ -644,6 +657,102 @@ function App() {
     );
   }
 
+  async function handleDocxAgentCommand(
+    model: string,
+    instruction: string,
+    nextMessages: ChatMessage[],
+    assistantMessageId: string,
+    streamId: string,
+    fileContext: CompressedFileContext | null,
+  ) {
+    const targetFile = selectedWorkspaceFile;
+    if (!targetFile) return;
+
+    let unlisten: (() => void) | null = null;
+    let assistantText = "";
+    let streamError = "";
+    const selectionText = documentSelection?.sourceType === "docx" ? documentSelection.text : "";
+    let commandSpecs: DocxCommandsResponse | null = null;
+
+    try {
+      commandSpecs = await fetchDocxCommandSpecs();
+      const messages = buildDocxAgentMessages({
+        commandSpecs,
+        filename: targetFile.file.name,
+        instruction,
+        selectionText,
+        fileContext,
+        chatMessages: nextMessages,
+      });
+
+      unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
+        const payload = event.payload;
+        if (payload.stream_id !== streamId) return;
+
+        if (payload.kind === "reasoning" && payload.content) {
+          setChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, reasoningText: `${message.reasoningText ?? ""}${payload.content}` }
+                : message,
+            ),
+          );
+          return;
+        }
+
+        if (payload.kind === "delta" && payload.content) {
+          assistantText += payload.content;
+        }
+
+        if (payload.kind === "error" && payload.error) {
+          streamError = payload.error;
+        }
+      });
+
+      await invoke("chat_with_deepseek", {
+        model,
+        streamId,
+        messages,
+        textEditRequest: null,
+      });
+
+      if (streamError) {
+        throw new Error(streamError);
+      }
+    } finally {
+      unlisten?.();
+    }
+
+    const plan = parseDocxAgentPlan(assistantText);
+    if (plan.action === "answer_only" || plan.action === "ask_confirm") {
+      updateAssistantMessage(assistantMessageId, plan.message || stripMarkdownFence(assistantText.trim()) || "需要你再补充一下要修改的位置或内容。");
+      return;
+    }
+
+    const command = normalizeDocxCommandName(plan.command);
+    if (!command) {
+      updateAssistantMessage(assistantMessageId, "模型没有返回可执行的 DOCX 命令，我没有改动文件。");
+      return;
+    }
+
+    if (commandSpecs && !isDocxCommandAvailable(command, commandSpecs)) {
+      updateAssistantMessage(assistantMessageId, buildUnavailableDocxCommandMessage(command));
+      return;
+    }
+
+    const executionResult = await executeDocxPlan({
+      command,
+      file: targetFile.file,
+      plan,
+    });
+    refreshDocxWorkspaceFile(targetFile, executionResult);
+
+    updateAssistantMessage(
+      assistantMessageId,
+      buildDocxExecutionStatus(plan, executionResult),
+    );
+  }
+
   function updateAssistantMessage(assistantMessageId: string, text: string) {
     setChatMessages((current) =>
       current.map((message) => (message.id === assistantMessageId ? { ...message, text } : message)),
@@ -826,6 +935,22 @@ function App() {
     }
   }
 
+  function refreshDocxWorkspaceFile(targetFile: WorkspaceFile, result: DocxExecuteResponse) {
+    const content = decodeBase64Bytes(result.document_base64);
+    const refreshedFile = new File([content], result.filename || targetFile.file.name, {
+      type: getFileMimeType(result.filename || targetFile.file.name),
+      lastModified: Date.now(),
+    });
+
+    setWorkspaceFiles((current) =>
+      current.map((item) => (item.id === targetFile.id ? { ...item, file: refreshedFile, analysis: null } : item)),
+    );
+    setDirtyFileIds((current) => {
+      if (current.includes(targetFile.id)) return current;
+      return [...current, targetFile.id];
+    });
+  }
+
   async function sendMessage(model: string) {
     const text = draftMessage.trim();
     if (!text || isSendingMessage) return;
@@ -917,6 +1042,11 @@ function App() {
 
       if (shouldUseSpreadsheetAgent(selectedWorkspaceFile)) {
         await handleSpreadsheetAgentCommand(model, text, nextMessages, assistantMessageId, streamId, fileContext);
+        return;
+      }
+
+      if (shouldUseDocxAgent(selectedWorkspaceFile)) {
+        await handleDocxAgentCommand(model, text, nextMessages, assistantMessageId, streamId, fileContext);
         return;
       }
 

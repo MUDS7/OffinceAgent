@@ -3,7 +3,15 @@ import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { DOCUMENT_SERVICE_URL } from "../../constants";
 import { fetchDocumentService } from "../../utils/documentService";
-import type { DocumentSelectionContext, PreviewFile, SaveFileProvider } from "./types";
+import type {
+  DocxBlock,
+  DocxImageBlock,
+  DocxParagraphBlock,
+  DocxParseResponse,
+  DocxTableBlock,
+  DocumentSelectionContext,
+} from "../../types";
+import type { PreviewFile, SaveFileProvider } from "./types";
 
 type DocxPreviewProps = {
   activeFile: PreviewFile;
@@ -11,48 +19,6 @@ type DocxPreviewProps = {
   onRegisterSaveFileProvider: (fileId: string, provider: SaveFileProvider) => () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateFile: (fileId: string, file: File) => void;
-};
-
-type DocxParagraphBlock = {
-  id: string;
-  type: "paragraph";
-  text: string;
-  style?: string | null;
-  style_id?: string | null;
-  alignment?: string | null;
-};
-
-type DocxTableCell = {
-  id: string;
-  text: string;
-  alignment?: string | null;
-};
-
-type DocxTableBlock = {
-  id: string;
-  type: "table";
-  rows: DocxTableCell[][];
-};
-
-type DocxImageBlock = {
-  id: string;
-  type: "image";
-  filename: string;
-  content_type: string;
-  data_url: string;
-  alt_text?: string | null;
-  width_emu?: number | null;
-  height_emu?: number | null;
-  alignment?: string | null;
-};
-
-type DocxBlock = DocxParagraphBlock | DocxTableBlock | DocxImageBlock;
-
-type DocxParseResponse = {
-  filename: string;
-  blocks: DocxBlock[];
-  text_preview: string;
-  warnings: string[];
 };
 
 type SelectedDocxTarget =

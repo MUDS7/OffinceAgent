@@ -109,6 +109,89 @@ export type ExcelExecuteResponse = {
   data?: Record<string, unknown>[] | null;
 };
 
+// ─── DOCX Agent types ────────────────────────────────────────────────────────
+
+export type DocxParagraphBlock = {
+  id: string;
+  type: "paragraph";
+  text: string;
+  style?: string | null;
+  style_id?: string | null;
+  alignment?: string | null;
+};
+
+export type DocxTableCell = {
+  id: string;
+  text: string;
+  alignment?: string | null;
+};
+
+export type DocxTableBlock = {
+  id: string;
+  type: "table";
+  rows: DocxTableCell[][];
+};
+
+export type DocxImageBlock = {
+  id: string;
+  type: "image";
+  filename: string;
+  content_type: string;
+  data_url: string;
+  alt_text?: string | null;
+  width_emu?: number | null;
+  height_emu?: number | null;
+  alignment?: string | null;
+};
+
+export type DocxBlock = DocxParagraphBlock | DocxTableBlock | DocxImageBlock;
+
+export type DocxParseResponse = {
+  filename: string;
+  blocks: DocxBlock[];
+  text_preview: string;
+  warnings: string[];
+};
+
+export type DocxCommandName =
+  | "replace_text"
+  | "delete_text"
+  | "replace_paragraph"
+  | "insert_paragraph"
+  | "append_paragraph"
+  | "insert_table";
+
+export type DocxCommandSpec = {
+  command: DocxCommandName;
+  category: "basic" | "advanced";
+  description: string;
+  required_args: string[];
+  optional_args: string[];
+};
+
+export type DocxCommandsResponse = {
+  basic: DocxCommandSpec[];
+  advanced: DocxCommandSpec[];
+};
+
+export type DocxAgentPlan = {
+  action: "docx_execute" | "answer_only" | "ask_confirm";
+  command?: DocxCommandName;
+  args?: Record<string, unknown>;
+  message?: string;
+};
+
+export type DocxExecuteResponse = {
+  command: DocxCommandName;
+  category: "basic" | "advanced";
+  filename: string;
+  document_base64: string;
+  blocks: DocxBlock[];
+  paragraphs_affected: number;
+  tables_affected: number;
+  summary: string;
+};
+
 // ─── Document Selection & Text Edit types ────────────────────────────────────
 
 export type DocumentSelectionContext = {

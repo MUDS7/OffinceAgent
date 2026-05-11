@@ -1,4 +1,4 @@
-import type { ExcelCommandName } from "./types";
+import type { DocxCommandName, ExcelCommandName } from "./types";
 
 export const DOCUMENT_SERVICE_URL = "http://127.0.0.1:8765";
 export const UI_SCALE_FALLBACK = 0.8;
@@ -61,4 +61,38 @@ export const SUPPORTED_EXCEL_COMMANDS = new Set<ExcelCommandName>([
   "fill_empty_cells",
   "summarize_by_column",
   "generate_report",
+]);
+
+export const DOCX_AGENT_SYSTEM_PROMPT = [
+  "You are OfficeAgent's Word/DOCX operation planner.",
+  "The application will execute DOCX operations locally after reading your JSON. You must not claim that you directly edited the file.",
+  "Return only one JSON object. Do not wrap it in Markdown. Do not include explanations outside JSON.",
+  "Required JSON shape:",
+  "{",
+  '  "action": "docx_execute" | "answer_only" | "ask_confirm",',
+  '  "command": "replace_text" | "delete_text" | "replace_paragraph" | "insert_paragraph" | "append_paragraph" | "insert_table",',
+  '  "args": { "command-specific arguments": "values" },',
+  '  "message": "short user-facing Chinese message"',
+  "}",
+  "Use action=docx_execute only when the requested file change is clear and maps to one supported command.",
+  "Use action=answer_only for questions, explanations, summaries, or analysis that should not modify the Word document.",
+  "Use action=ask_confirm when the target text/block, replacement content, insert position, or table content is ambiguous.",
+  "Do not invent file paths. The application supplies the current DOCX content separately.",
+  "Block numbers are 1-based and refer to the B1, B2, ... labels shown in the compressed document context.",
+  "For replace_text use args.target_text and args.replacement. Prefer exact selected text as target_text when the user refers to the current selection.",
+  "For delete_text use args.target_text.",
+  "For replace_paragraph use args.text plus either args.block_index or args.target_text.",
+  "For insert_paragraph use args.text and args.position of before, after, start, or end. Use args.block_index or args.target_text unless position is start/end.",
+  "For append_paragraph use args.text.",
+  "For insert_table use args.rows as a two-dimensional array. Use args.position plus args.block_index/target_text when not inserting at the end.",
+  "Optional args.alignment can be left, center, right, or justify.",
+].join("\n");
+
+export const SUPPORTED_DOCX_COMMANDS = new Set<DocxCommandName>([
+  "replace_text",
+  "delete_text",
+  "replace_paragraph",
+  "insert_paragraph",
+  "append_paragraph",
+  "insert_table",
 ]);
