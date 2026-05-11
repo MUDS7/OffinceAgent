@@ -153,6 +153,22 @@ export type DocxParseResponse = {
   warnings: string[];
 };
 
+export type DocumentIndexRequest = {
+  document_id: string;
+  filename: string;
+  path?: string;
+  extension?: string;
+  size_bytes?: number;
+  sha256?: string;
+  blocks: DocxBlock[];
+};
+
+export type DocumentIndexResult = {
+  document_id: string;
+  blocks_indexed: number;
+  text_bytes_indexed: number;
+};
+
 export type DocxCommandName =
   | "replace_text"
   | "delete_text"

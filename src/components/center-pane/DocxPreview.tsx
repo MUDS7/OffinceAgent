@@ -9,6 +9,8 @@ import type {
   DocxParagraphBlock,
   DocxParseResponse,
   DocxTableBlock,
+  DocumentIndexRequest,
+  DocumentIndexResult,
   DocumentSelectionContext,
 } from "../../types";
 import type { PreviewFile, SaveFileProvider } from "./types";
@@ -29,6 +31,7 @@ type SelectedDocxTarget =
 type SelectedDocxTextTarget = Exclude<SelectedDocxTarget, { kind: "image" }>;
 
 const RENDER_DEBOUNCE_MS = 450;
+const INDEX_DEBOUNCE_MS = 800;
 const EMU_PER_PIXEL = 9525;
 
 export function DocxPreview({
@@ -41,6 +44,7 @@ export function DocxPreview({
   const loadedFileIdRef = useRef("");
   const lastPublishedFileRef = useRef<File | null>(null);
   const lastRenderSignatureRef = useRef("");
+  const lastIndexSignatureRef = useRef("");
   const blocksSourceFileRef = useRef<File | null>(null);
   const latestActiveFileRef = useRef(activeFile);
   const latestBlocksRef = useRef<DocxBlock[]>([]);
@@ -71,6 +75,7 @@ export function DocxPreview({
     let isCancelled = false;
     loadedFileIdRef.current = activeFile.id;
     lastRenderSignatureRef.current = "";
+    lastIndexSignatureRef.current = "";
     if (lastPublishedFileRef.current !== activeFile.file) {
       lastPublishedFileRef.current = null;
     }
@@ -137,6 +142,27 @@ export function DocxPreview({
     const timeoutId = window.setTimeout(() => {
       void publishDocxFile(signature, state.blocks).catch(() => undefined);
     }, RENDER_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [state.blocks, state.error, state.isLoading]);
+
+  useEffect(() => {
+    if (state.isLoading || state.error) return;
+
+    const signature = getBlocksSignature(state.blocks);
+    if (!signature || signature === lastIndexSignatureRef.current) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void indexDocxStructure(state.blocks)
+        .then(() => {
+          lastIndexSignatureRef.current = signature;
+        })
+        .catch((error) => {
+          console.warn("Failed to index DOCX structure:", error);
+        });
+    }, INDEX_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -524,6 +550,19 @@ export function DocxPreview({
       }));
       throw new Error(message);
     }
+  }
+
+  async function indexDocxStructure(blocks: DocxBlock[]) {
+    const request: DocumentIndexRequest = {
+      document_id: activeFile.diskPath ?? activeFile.id,
+      filename: activeFile.filename,
+      path: activeFile.diskPath,
+      extension: "docx",
+      size_bytes: activeFile.file.size,
+      blocks,
+    };
+
+    await invoke<DocumentIndexResult>("index_document_structure", { request });
   }
 }
 

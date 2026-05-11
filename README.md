@@ -22,6 +22,14 @@ OfficeAgent 是一个基于 Tauri v2、React、Rust 和 Python FastAPI 的桌面
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
 ```
 
+文档索引由 Rust/Tauri 侧负责：文档结构和全文索引会写入应用数据目录下的 SQLite 数据库，向量检索会调用 Qdrant HTTP API。Qdrant 默认地址和集合名如下，可按需覆盖：
+
+```env
+OFFICE_AGENT_QDRANT_URL=http://127.0.0.1:6333
+OFFICE_AGENT_QDRANT_COLLECTION=officeagent_documents
+# OFFICE_AGENT_QDRANT_API_KEY=可选
+```
+
 ## 首次安装
 
 在项目根目录执行：
@@ -76,6 +84,7 @@ npm run dev
 - 前端开发服务：`http://127.0.0.1:1420`
 - Python 文档服务：`http://127.0.0.1:8765`
 - 文档服务健康检查：`http://127.0.0.1:8765/health`
+- Qdrant 向量库：`http://127.0.0.1:6333`
 
 ## 单独运行文档服务
 
