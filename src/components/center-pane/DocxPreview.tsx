@@ -1,11 +1,14 @@
+import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { DOCUMENT_SERVICE_URL } from "../../constants";
-import type { DocumentSelectionContext, PreviewFile } from "./types";
+import { fetchDocumentService } from "../../utils/documentService";
+import type { DocumentSelectionContext, PreviewFile, SaveFileProvider } from "./types";
 
 type DocxPreviewProps = {
   activeFile: PreviewFile;
   onSaveFile: (fileId: string) => void;
+  onRegisterSaveFileProvider: (fileId: string, provider: SaveFileProvider) => () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateFile: (fileId: string, file: File) => void;
 };
@@ -63,26 +66,33 @@ const EMU_PER_PIXEL = 9525;
 export function DocxPreview({
   activeFile,
   onSaveFile,
+  onRegisterSaveFileProvider,
   onSelectionContextChange,
   onUpdateFile,
 }: DocxPreviewProps) {
   const loadedFileIdRef = useRef("");
   const lastPublishedFileRef = useRef<File | null>(null);
   const lastRenderSignatureRef = useRef("");
+  const latestActiveFileRef = useRef(activeFile);
+  const latestBlocksRef = useRef<DocxBlock[]>([]);
   const latestBlocksSignatureRef = useRef("");
   const [state, setState] = useState<{
     blocks: DocxBlock[];
     error: string;
     isLoading: boolean;
+    renderError: string;
     warnings: string[];
   }>({
     blocks: [],
     error: "",
     isLoading: true,
+    renderError: "",
     warnings: [],
   });
   const [selectedTarget, setSelectedTarget] = useState<SelectedDocxTarget | null>(null);
   const documentText = useMemo(() => getDocumentText(state.blocks), [state.blocks]);
+  latestActiveFileRef.current = activeFile;
+  latestBlocksRef.current = state.blocks;
 
   useEffect(() => {
     if (loadedFileIdRef.current === activeFile.id && lastPublishedFileRef.current === activeFile.file) {
@@ -93,18 +103,19 @@ export function DocxPreview({
     loadedFileIdRef.current = activeFile.id;
     lastRenderSignatureRef.current = "";
     latestBlocksSignatureRef.current = "";
-    setState({ blocks: [], error: "", isLoading: true, warnings: [] });
+    setState({ blocks: [], error: "", isLoading: true, renderError: "", warnings: [] });
     setSelectedTarget(null);
     onSelectionContextChange(null);
 
     async function parseDocx() {
       try {
-        const body = new FormData();
-        body.append("file", activeFile.file);
-
-        const response = await fetch(`${DOCUMENT_SERVICE_URL}/docx/parse`, {
-          method: "POST",
-          body,
+        const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/parse`, () => {
+          const body = new FormData();
+          body.append("file", activeFile.file);
+          return {
+            method: "POST",
+            body,
+          };
         });
 
         if (!response.ok) {
@@ -118,6 +129,7 @@ export function DocxPreview({
           blocks: result.blocks,
           error: "",
           isLoading: false,
+          renderError: "",
           warnings: result.warnings,
         });
         lastRenderSignatureRef.current = getBlocksSignature(result.blocks);
@@ -127,6 +139,7 @@ export function DocxPreview({
           blocks: [],
           error: error instanceof Error ? error.message : String(error),
           isLoading: false,
+          renderError: "",
           warnings: [],
         });
       }
@@ -147,13 +160,35 @@ export function DocxPreview({
     if (!signature || signature === lastRenderSignatureRef.current) return;
 
     const timeoutId = window.setTimeout(() => {
-      void publishDocxFile(signature);
+      void publishDocxFile(signature, state.blocks).catch(() => undefined);
     }, RENDER_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timeoutId);
     };
   }, [state.blocks, state.error, state.isLoading]);
+
+  useEffect(() => {
+    return onRegisterSaveFileProvider(activeFile.id, async () => {
+      if (state.isLoading) {
+        throw new Error(`DOCX 仍在解析，请稍后再保存（文件：${activeFile.filename}）`);
+      }
+
+      if (state.error) {
+        throw new Error(`DOCX 解析失败，无法保存（文件：${activeFile.filename}）：${state.error}`);
+      }
+
+      const blocks = latestBlocksRef.current;
+      const signature = getBlocksSignature(blocks);
+      latestBlocksSignatureRef.current = signature;
+
+      if (signature === lastRenderSignatureRef.current && lastPublishedFileRef.current) {
+        return lastPublishedFileRef.current;
+      }
+
+      return publishDocxFile(signature, blocks, { keepWhenNewer: true });
+    });
+  }, [activeFile.id, onRegisterSaveFileProvider, state.error, state.isLoading]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -187,6 +222,10 @@ export function DocxPreview({
     );
   }
 
+  const warningMessages = state.renderError
+    ? [...state.warnings, `DOCX 自动生成失败：${state.renderError}`]
+    : state.warnings;
+
   return (
     <div className="editor-content docx-preview">
       <div className="docx-toolbar">
@@ -199,10 +238,10 @@ export function DocxPreview({
         </span>
       </div>
 
-      {state.warnings.length ? (
+      {warningMessages.length ? (
         <div className="docx-warning">
           <AlertTriangle size={15} />
-          <span>{state.warnings.join("；")}</span>
+          <span>{warningMessages.join("；")}</span>
         </div>
       ) : null}
 
@@ -389,37 +428,33 @@ export function DocxPreview({
     });
   }
 
-  async function publishDocxFile(signature: string) {
+  async function publishDocxFile(
+    signature: string,
+    blocks: DocxBlock[],
+    options: { keepWhenNewer?: boolean } = {},
+  ) {
+    const currentActiveFile = latestActiveFileRef.current;
     try {
-      const response = await fetch(`${DOCUMENT_SERVICE_URL}/docx/render`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filename: activeFile.filename,
-          blocks: state.blocks,
-        }),
-      });
+      const blob = await renderDocxBlob(currentActiveFile.filename, blocks);
+      if (!options.keepWhenNewer && latestBlocksSignatureRef.current !== signature) return null;
 
-      if (!response.ok) {
-        throw new Error(`DOCX 生成服务返回 ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      if (latestBlocksSignatureRef.current !== signature) return;
-
-      const nextFile = new File([blob], activeFile.filename, {
-        type: activeFile.file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      const nextFile = new File([blob], currentActiveFile.filename, {
+        type: currentActiveFile.file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         lastModified: Date.now(),
       });
 
       lastPublishedFileRef.current = nextFile;
       lastRenderSignatureRef.current = signature;
-      onUpdateFile(activeFile.id, nextFile);
+      setState((current) => ({ ...current, renderError: "" }));
+      onUpdateFile(currentActiveFile.id, nextFile);
+      return nextFile;
     } catch (error) {
+      const message = buildDocxRenderErrorMessage(currentActiveFile.filename, blocks, error);
       setState((current) => ({
         ...current,
-        error: error instanceof Error ? error.message : String(error),
+        renderError: message,
       }));
+      throw new Error(message);
     }
   }
 }
@@ -478,4 +513,84 @@ function getImageStyle(block: DocxImageBlock): CSSProperties {
     height: height ? `${height}px` : undefined,
     maxWidth: "100%",
   };
+}
+
+async function getServiceErrorMessage(response: Response, fallback: string) {
+  try {
+    const text = await response.text();
+    if (!text.trim()) return fallback;
+    return `${fallback} ${response.statusText ? `(${response.statusText})` : ""}：${extractServiceErrorDetail(text)}`;
+  } catch {
+    return fallback;
+  }
+}
+
+async function renderDocxBlob(filename: string, blocks: DocxBlock[]) {
+  const renderSummary = summarizeDocxBlocks(blocks);
+  try {
+    const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/render`, () => ({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename,
+        blocks,
+      }),
+    }));
+
+    if (!response.ok) {
+      throw new Error(
+        await getServiceErrorMessage(
+          response,
+          `DOCX 生成服务返回 ${response.status}（文件：${filename}；${renderSummary}）`,
+        ),
+      );
+    }
+
+    return response.blob();
+  } catch (fetchError) {
+    try {
+      const bytes = await invoke<number[]>("render_docx_document", { filename, blocks });
+      return new Blob([new Uint8Array(bytes)], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    } catch (invokeError) {
+      throw new Error(
+        `HTTP 生成失败：${getErrorMessage(fetchError)}；` +
+          `Tauri 代理生成也失败（文件：${filename}；${renderSummary}）：${getErrorMessage(invokeError)}`,
+      );
+    }
+  }
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function extractServiceErrorDetail(text: string) {
+  try {
+    const payload = JSON.parse(text) as { detail?: unknown };
+    if (payload.detail) {
+      return typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail);
+    }
+  } catch {
+    // Fall back to the raw response body below.
+  }
+
+  return text.trim().slice(0, 500);
+}
+
+function summarizeDocxBlocks(blocks: DocxBlock[]) {
+  const counts = blocks.reduce(
+    (result, block) => {
+      result[block.type] += 1;
+      return result;
+    },
+    { image: 0, paragraph: 0, table: 0 },
+  );
+
+  return `内容块 ${blocks.length} 个，段落 ${counts.paragraph} 个，表格 ${counts.table} 个，图片 ${counts.image} 个`;
+}
+
+function buildDocxRenderErrorMessage(filename: string, blocks: DocxBlock[], error: unknown) {
+  return `DOCX 保存前生成失败（文件：${filename}；${summarizeDocxBlocks(blocks)}）：${getErrorMessage(error)}`;
 }

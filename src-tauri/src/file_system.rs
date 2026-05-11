@@ -6,25 +6,28 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf", "xlsx
 #[tauri::command]
 /// Tauri 命令：把 UTF-8 文本内容写入指定磁盘路径。
 pub(crate) fn save_file_to_disk(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|error| format!("Failed to save file: {error}"))
+    std::fs::write(&path, content)
+        .map_err(|error| format_file_error("保存文本文件失败", &path, error))
 }
 
 #[tauri::command]
 /// Tauri 命令：把二进制内容写入指定磁盘路径。
 pub(crate) fn save_file_bytes(path: String, content: Vec<u8>) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|error| format!("Failed to save file bytes: {error}"))
+    std::fs::write(&path, content)
+        .map_err(|error| format_file_error("保存二进制文件失败", &path, error))
 }
 
 #[tauri::command]
 /// Tauri 命令：按 UTF-8 文本读取文件。
 pub(crate) fn read_file_text(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))
+    std::fs::read_to_string(&path)
+        .map_err(|error| format_file_error("读取文本文件失败", &path, error))
 }
 
 #[tauri::command]
 /// Tauri 命令：以字节数组读取文件，供 PDF、Excel 等二进制格式使用。
 pub(crate) fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
-    std::fs::read(&path).map_err(|error| format!("Failed to read file bytes: {error}"))
+    std::fs::read(&path).map_err(|error| format_file_error("读取二进制文件失败", &path, error))
 }
 
 #[tauri::command]
@@ -61,4 +64,11 @@ fn is_supported_file(path: &Path) -> bool {
     path.extension()
         .map(|extension| extension.to_string_lossy().to_lowercase())
         .is_some_and(|extension| SUPPORTED_EXTENSIONS.contains(&extension.as_str()))
+}
+
+fn format_file_error(action: &str, path: &str, error: std::io::Error) -> String {
+    format!(
+        "{action}（路径：{path}；错误类型：{:?}）：{error}",
+        error.kind()
+    )
 }

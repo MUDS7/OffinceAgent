@@ -26,6 +26,8 @@ fn main() {
             agent::get_agent_info,
             // 文档服务状态查询。
             document_service::get_document_service_status,
+            document_service::render_docx_document,
+            document_service::restart_document_service,
             // DeepSeek 聊天、文本编辑和意图识别能力。
             deepseek::chat_with_deepseek,
             deepseek::classify_text_selection_intent,

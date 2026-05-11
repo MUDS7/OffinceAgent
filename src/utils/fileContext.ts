@@ -3,6 +3,7 @@ import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type * as XLSXModule from "xlsx";
 import { DOCUMENT_SERVICE_URL, MAX_FILE_CONTEXT_CHARS } from "../constants";
 import type { WorkspaceFile } from "../types";
+import { fetchDocumentService } from "./documentService";
 
 export type CompressedFileContext = {
   content: string;
@@ -46,12 +47,13 @@ export async function buildCompressedFileContext(
 }
 
 async function buildDocxFileContext(file: File): Promise<CompressedFileContext> {
-  const body = new FormData();
-  body.append("file", file);
-
-  const response = await fetch(`${DOCUMENT_SERVICE_URL}/docx/parse`, {
-    method: "POST",
-    body,
+  const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/parse`, () => {
+    const body = new FormData();
+    body.append("file", file);
+    return {
+      method: "POST",
+      body,
+    };
   });
 
   if (!response.ok) {

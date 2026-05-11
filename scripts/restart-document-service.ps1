@@ -1,5 +1,9 @@
 $ErrorActionPreference = "Stop"
 
+$ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$ServiceRoot = Join-Path $ProjectRoot "services/document-service"
+$VenvPython = Join-Path $ServiceRoot ".venv/Scripts/python.exe"
+$RunScript = Join-Path $ServiceRoot "run.py"
 $Port = 8765
 $HealthUrl = "http://127.0.0.1:$Port/health"
 
@@ -26,17 +30,14 @@ function Get-ProcessCommandLine([int]$ProcessId) {
 }
 
 $listenerPids = @(Get-ListenerProcessIds | Where-Object { $_ })
-if ($listenerPids.Count -eq 0) {
-  Write-Host "OfficeAgent document service is not running."
-  return
-}
-
 $isDocumentService = $false
-try {
-  $health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 1 -ErrorAction Stop
-  $isDocumentService = $health.service -eq "document-service"
-} catch {
-  $isDocumentService = $false
+if ($listenerPids.Count -gt 0) {
+  try {
+    $health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 1 -ErrorAction Stop
+    $isDocumentService = $health.service -eq "document-service"
+  } catch {
+    $isDocumentService = $false
+  }
 }
 
 $targetPids = @()
@@ -47,9 +48,8 @@ foreach ($listenerPid in $listenerPids) {
   }
 }
 
-if ($targetPids.Count -eq 0) {
-  Write-Warning "Port $Port is in use, but it does not look like the OfficeAgent document service. Leaving it running."
-  return
+if ($listenerPids.Count -gt 0 -and $targetPids.Count -eq 0) {
+  throw "Port $Port is in use, but it does not look like the OfficeAgent document service. Cannot restart safely."
 }
 
 foreach ($targetPid in ($targetPids | Select-Object -Unique)) {
@@ -60,3 +60,36 @@ foreach ($targetPid in ($targetPids | Select-Object -Unique)) {
   } catch {
   }
 }
+
+if (!(Test-Path $RunScript)) {
+  throw "Document service entrypoint not found: $RunScript"
+}
+
+$python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
+
+if (Test-Path (Join-Path $ServiceRoot ".packages")) {
+  $env:PYTHONPATH = "$(Resolve-Path (Join-Path $ServiceRoot ".packages"));$env:PYTHONPATH"
+}
+
+Write-Host "Starting OfficeAgent document service on port $Port..."
+$process = Start-Process `
+  -FilePath $python `
+  -ArgumentList "run.py" `
+  -WorkingDirectory $ServiceRoot `
+  -WindowStyle Hidden `
+  -PassThru
+
+$deadline = (Get-Date).AddSeconds(15)
+while ((Get-Date) -lt $deadline) {
+  try {
+    $health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 1 -ErrorAction Stop
+    if ($health.service -eq "document-service") {
+      Write-Host "OfficeAgent document service is ready (pid $($process.Id))."
+      return
+    }
+  } catch {
+    Start-Sleep -Milliseconds 300
+  }
+}
+
+throw "Document service did not become healthy at $HealthUrl"

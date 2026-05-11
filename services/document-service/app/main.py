@@ -5,8 +5,9 @@ from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -27,6 +28,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
 
@@ -133,12 +135,23 @@ async def parse_docx(file: UploadFile = File(...)) -> DocxParseResponse:
 
 @app.post("/docx/render")
 def render_docx(request: DocxRenderRequest) -> StreamingResponse:
-    content = build_docx_bytes(request.blocks)
+    try:
+        content = build_docx_bytes(request.blocks)
+    except Exception as exc:  # pragma: no cover - external document writer boundary
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"DOCX 生成失败（文件：{Path(request.filename or 'document.docx').name}；"
+                f"{summarize_docx_blocks(request.blocks)}）：{type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+
     filename = Path(request.filename or "document.docx").name
+    encoded_filename = quote(filename)
     return StreamingResponse(
         BytesIO(content),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}"},
     )
 
 
@@ -371,7 +384,10 @@ def build_docx_bytes(blocks: list[DocxBlock]) -> bytes:
             apply_paragraph_alignment(paragraph, block.alignment)
             width = Emu(block.width_emu) if block.width_emu else None
             height = Emu(block.height_emu) if block.height_emu else None
-            paragraph.add_run().add_picture(BytesIO(image_bytes), width=width, height=height)
+            try:
+                paragraph.add_run().add_picture(BytesIO(image_bytes), width=width, height=height)
+            except Exception:
+                paragraph.add_run(f"[Image omitted: {block.alt_text or block.filename}]")
             has_content = True
 
     if not has_content:
@@ -380,6 +396,13 @@ def build_docx_bytes(blocks: list[DocxBlock]) -> bytes:
     output = BytesIO()
     document.save(output)
     return output.getvalue()
+
+
+def summarize_docx_blocks(blocks: list[DocxBlock]) -> str:
+    paragraph_count = sum(isinstance(block, DocxParagraphBlock) for block in blocks)
+    table_count = sum(isinstance(block, DocxTableBlock) for block in blocks)
+    image_count = sum(isinstance(block, DocxImageBlock) for block in blocks)
+    return f"内容块 {len(blocks)} 个，段落 {paragraph_count} 个，表格 {table_count} 个，图片 {image_count} 个"
 
 
 def apply_paragraph_style(document, paragraph, style: str | None, style_id: str | None) -> None:

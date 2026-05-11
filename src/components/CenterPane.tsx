@@ -21,6 +21,7 @@ export function CenterPane({
   onAgentTextEditApplied,
   onClosePreviewTab,
   onRefreshStatus,
+  onRegisterSaveFileProvider,
   onSelectionContextChange,
   onSelectPreviewTab,
   onUpdateSpreadsheetFile,
@@ -102,6 +103,7 @@ export function CenterPane({
         <DocxPreview
           activeFile={activeFile}
           onSaveFile={onSaveTextFile}
+          onRegisterSaveFileProvider={onRegisterSaveFileProvider}
           onSelectionContextChange={onSelectionContextChange}
           onUpdateFile={onUpdateSpreadsheetFile}
         />

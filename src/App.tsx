@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
@@ -52,6 +52,7 @@ import {
 import { decodeBase64Bytes, getFileMimeType, getFileRelativePath, normalizeFilePath } from "./utils/fileUtils";
 import { buildCompressedFileContext } from "./utils/fileContext";
 import type { CompressedFileContext } from "./utils/fileContext";
+import type { SaveFileProvider } from "./components/center-pane/types";
 import { restoreTextEditPayload } from "./utils/textCompression";
 import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
@@ -83,6 +84,7 @@ function App() {
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const saveFileProvidersRef = useRef<Record<string, SaveFileProvider>>({});
   const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
   const [dirtyFileIds, setDirtyFileIds] = useState<string[]>([]);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
@@ -358,10 +360,32 @@ function App() {
     });
   }
 
-  async function saveWorkspaceFile(fileId: string) {
+  const registerSaveFileProvider = useCallback((fileId: string, provider: SaveFileProvider) => {
+    saveFileProvidersRef.current[fileId] = provider;
+
+    return () => {
+      if (saveFileProvidersRef.current[fileId] === provider) {
+        delete saveFileProvidersRef.current[fileId];
+      }
+    };
+  }, []);
+
+  async function saveWorkspaceFile(fileId: string, fileOverride?: File) {
     const currentItem = workspaceFiles.find((item) => item.id === fileId);
     if (!currentItem) return;
 
+    let fileToSave = fileOverride;
+    const saveFileProvider = saveFileProvidersRef.current[fileId];
+    if (!fileToSave && saveFileProvider) {
+      try {
+        fileToSave = (await saveFileProvider()) ?? undefined;
+      } catch (error) {
+        setErrorMessage(`保存前生成文件失败（文件：${currentItem.file.name}）：${getErrorMessage(error)}`);
+        return;
+      }
+    }
+
+    const sourceFile = fileToSave ?? currentItem.file;
     const unsavedText = unsavedContents[fileId];
     const fileExtension = currentItem.file.name.split(".").pop()?.toLowerCase() ?? "";
     const isTextSave = unsavedText !== undefined || !BINARY_PREVIEW_EXTENSIONS.has(fileExtension);
@@ -381,7 +405,7 @@ function App() {
         filePath = chosen;
       } catch (error) {
         console.error("Save dialog error:", error);
-        setErrorMessage("保存对话框打开失败");
+        setErrorMessage(`保存对话框打开失败（文件：${currentItem.file.name}）：${getErrorMessage(error)}`);
         return;
       }
     }
@@ -391,20 +415,22 @@ function App() {
       return;
     }
 
-    let savedContent: BlobPart = currentItem.file;
+    let savedContent: BlobPart = sourceFile;
     try {
       if (isTextSave) {
-        const textToSave = unsavedText ?? (await currentItem.file.text());
+        const textToSave = unsavedText ?? (await sourceFile.text());
         savedContent = textToSave;
         await invoke("save_file_to_disk", { path: filePath, content: textToSave });
       } else {
-        const bytesToSave = Array.from(new Uint8Array(await currentItem.file.arrayBuffer()));
+        const bytesToSave = Array.from(new Uint8Array(await sourceFile.arrayBuffer()));
         savedContent = new Uint8Array(bytesToSave);
         await invoke("save_file_bytes", { path: filePath, content: bytesToSave });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setErrorMessage(`保存文件到磁盘失败: ${message}`);
+      setErrorMessage(
+        `保存文件到磁盘失败（文件：${currentItem.file.name}；路径：${filePath}；` +
+          `模式：${isTextSave ? "文本" : "二进制"}；大小：${formatFileSize(savedContent)}）：${getErrorMessage(error)}`,
+      );
       return;
     }
 
@@ -415,10 +441,13 @@ function App() {
       wsFiles.map((item) => {
         if (item.id !== fileId) return item;
 
-        const file = new File([savedContent], item.file.name, {
-          type: item.file.type || getFileMimeType(item.file.name),
-          lastModified: Date.now(),
-        });
+        const file =
+          fileToSave && !isTextSave
+            ? fileToSave
+            : new File([savedContent], item.file.name, {
+                type: item.file.type || getFileMimeType(item.file.name),
+                lastModified: Date.now(),
+              });
 
         return { ...item, file, diskPath: resolvedDiskPath, analysis: null };
       }),
@@ -1250,6 +1279,7 @@ function App() {
           onAgentTextEditApplied={attachAgentFileChange}
           onClosePreviewTab={closePreviewTab}
           onRefreshStatus={refreshStatus}
+          onRegisterSaveFileProvider={registerSaveFileProvider}
           onSelectionContextChange={setDocumentSelection}
           onSelectPreviewTab={setSelectedFileId}
           onUpdateSpreadsheetFile={updateSpreadsheetFile}
@@ -1323,6 +1353,22 @@ function splitComparableLines(text: string) {
     : normalizedText;
 
   return withoutFinalEmptyLine.length ? withoutFinalEmptyLine.split("\n") : [];
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatFileSize(content: BlobPart) {
+  if (typeof content === "string") {
+    return `${new Blob([content]).size} bytes`;
+  }
+
+  if (content instanceof Blob) {
+    return `${content.size} bytes`;
+  }
+
+  return `${content.byteLength} bytes`;
 }
 
 export default App;

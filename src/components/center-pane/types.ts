@@ -49,6 +49,8 @@ export type PendingTextRestore = {
   text: string;
 };
 
+export type SaveFileProvider = () => Promise<File | null> | File | null;
+
 export type CenterPaneProps = {
   activeFilename: string;
   activeFile: PreviewFile | null;
@@ -61,9 +63,10 @@ export type CenterPaneProps = {
   onAgentTextEditApplied: (change: AppliedAgentTextEditChange) => void;
   onClosePreviewTab: (fileId: string) => void;
   onRefreshStatus: () => void;
+  onRegisterSaveFileProvider: (fileId: string, provider: SaveFileProvider) => () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onSelectPreviewTab: (fileId: string) => void;
   onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
   onUpdateTextFile: (fileId: string, text: string) => void;
-  onSaveTextFile: (fileId: string) => void;
+  onSaveTextFile: (fileId: string, fileOverride?: File) => void;
 };

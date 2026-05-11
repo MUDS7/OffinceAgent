@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "predev:frontend": "npm run restart:document-service",
     "dev:frontend": "vite --host 127.0.0.1",
     "dev:python": "python services/document-service/run.py",
+    "restart:document-service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-document-service.ps1",
     "tauri:dev": "tauri dev",
     "build": "tauri build --no-bundle",
     "build:desktop": "tauri build --no-bundle",
