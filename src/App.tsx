@@ -242,7 +242,7 @@ function App() {
     try {
       const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
       const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
-      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf|xlsx|xls|docx)$/i.test(p));
+      const supported = entries.filter(isSupportedPreviewPath);
       if (!supported.length) {
         setErrorMessage("该文件夹中没有支持的文件类型");
         return;
@@ -256,7 +256,7 @@ function App() {
           const content = isBinaryPreview
             ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
             : await invoke<string>("read_file_text", { path: filePath });
-          const relativePath = normalizeFilePath(filePath.replace(folderPath, rootName));
+          const relativePath = buildFolderRelativePath(folderPath, rootName, filePath);
           const file = new File([content], filename, {
             type: getFileMimeType(filename),
             lastModified: Date.now(),
@@ -273,10 +273,31 @@ function App() {
         }
       }
       if (!nextFiles.length) return;
-      setWorkspaceName(rootName);
-      setWorkspaceFiles(nextFiles);
-      setSelectedFileId("");
-      setOpenFileIds([]);
+      const knownPaths = new Map(
+        workspaceFiles
+          .filter((item) => item.diskPath)
+          .map((item) => [normalizeFilePath(item.diskPath as string).toLowerCase(), item]),
+      );
+      const firstFileToOpen =
+        nextFiles.find((item) => !knownPaths.has(normalizeFilePath(item.diskPath ?? "").toLowerCase())) ??
+        knownPaths.get(normalizeFilePath(nextFiles[0].diskPath ?? "").toLowerCase()) ??
+        nextFiles[0];
+
+      setWorkspaceName((currentName) => (workspaceFiles.length ? currentName : rootName));
+      setWorkspaceFiles((current) => {
+        const currentPaths = new Set(
+          current
+            .map((item) => item.diskPath)
+            .filter((path): path is string => Boolean(path))
+            .map((path) => normalizeFilePath(path).toLowerCase()),
+        );
+
+        return [
+          ...current,
+          ...nextFiles.filter((item) => !currentPaths.has(normalizeFilePath(item.diskPath ?? "").toLowerCase())),
+        ];
+      });
+      openWorkspaceFile(firstFileToOpen.id);
       setDocumentSelection(null);
       setErrorMessage("");
     } catch (error) {
@@ -304,7 +325,12 @@ function App() {
   function handleFolderSelection(files: FileList | null) {
     if (!files?.length) return;
 
-    const selectedFiles = Array.from(files);
+    const selectedFiles = Array.from(files).filter((file) => isSupportedPreviewPath(getFileRelativePath(file) || file.name));
+    if (!selectedFiles.length) {
+      setErrorMessage("该文件夹中没有支持预览的文件类型");
+      return;
+    }
+
     const firstRelativePath = normalizeFilePath(getFileRelativePath(selectedFiles[0]));
     const rootName = firstRelativePath.split("/")[0] || "工作区";
     const nextFiles = selectedFiles.map((file) => {
@@ -320,10 +346,18 @@ function App() {
       };
     });
 
-    setWorkspaceName(rootName);
-    setWorkspaceFiles(nextFiles);
-    setSelectedFileId("");
-    setOpenFileIds([]);
+    const knownKeys = new Map(workspaceFiles.map((item) => [getWorkspaceFileKey(item), item]));
+    const firstFileToOpen =
+      nextFiles.find((item) => !knownKeys.has(getWorkspaceFileKey(item))) ??
+      knownKeys.get(getWorkspaceFileKey(nextFiles[0])) ??
+      nextFiles[0];
+
+    setWorkspaceName((currentName) => (workspaceFiles.length ? currentName : rootName));
+    setWorkspaceFiles((current) => {
+      const currentKeys = new Set(current.map(getWorkspaceFileKey));
+      return [...current, ...nextFiles.filter((item) => !currentKeys.has(getWorkspaceFileKey(item)))];
+    });
+    openWorkspaceFile(firstFileToOpen.id);
     setDocumentSelection(null);
     setErrorMessage("");
   }
@@ -1384,6 +1418,7 @@ function App() {
           onSelectFile={openWorkspaceFile}
           onCreateEmptyFile={createEmptyFile}
           onOpenFilePicker={openFilePicker}
+          onOpenFolderPicker={openFolderPicker}
           onDeleteFiles={deleteFiles}
         />
 
@@ -1446,6 +1481,28 @@ function App() {
       </section>
     </main>
   );
+}
+
+function isSupportedPreviewPath(path: string) {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return DOCUMENT_EXTENSIONS.includes(extension);
+}
+
+function buildFolderRelativePath(folderPath: string, rootName: string, filePath: string) {
+  const normalizedFolderPath = normalizeFilePath(folderPath).replace(/\/+$/, "");
+  const normalizedFilePath = normalizeFilePath(filePath);
+
+  if (normalizedFilePath.toLowerCase().startsWith(`${normalizedFolderPath.toLowerCase()}/`)) {
+    return `${rootName}/${normalizedFilePath.slice(normalizedFolderPath.length + 1)}`;
+  }
+
+  return `${rootName}/${normalizedFilePath.split("/").pop() ?? normalizedFilePath}`;
+}
+
+function getWorkspaceFileKey(fileItem: WorkspaceFile) {
+  if (fileItem.diskPath) return `disk:${normalizeFilePath(fileItem.diskPath).toLowerCase()}`;
+  if (fileItem.relativePath) return `relative:${normalizeFilePath(fileItem.relativePath).toLowerCase()}`;
+  return `file:${fileItem.file.name.toLowerCase()}:${fileItem.file.size}:${fileItem.file.lastModified}`;
 }
 
 function calculateLineChangeStats(beforeText: string, afterText: string) {

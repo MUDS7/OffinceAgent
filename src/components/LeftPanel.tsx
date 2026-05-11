@@ -64,6 +64,7 @@ type LeftPanelProps = {
   onSelectFile: (fileId: string) => void;
   onCreateEmptyFile: (filename: string) => void;
   onOpenFilePicker: () => void;
+  onOpenFolderPicker: () => void;
   onDeleteFiles: (fileIds: string[]) => void;
 };
 
@@ -75,6 +76,7 @@ export function LeftPanel({
   onSelectFile,
   onCreateEmptyFile,
   onOpenFilePicker,
+  onOpenFolderPicker,
   onDeleteFiles,
 }: LeftPanelProps) {
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([]);
@@ -211,6 +213,11 @@ export function LeftPanel({
   function handleStartCreatingFolder(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
     startCreatingFolder();
+  }
+
+  function handleOpenFolder(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    onOpenFolderPicker();
   }
 
   function handleConfirmDelete() {
@@ -430,6 +437,9 @@ export function LeftPanel({
               </button>
               <button className="tree-action-button" type="button" title="新建文件夹" onClick={handleStartCreatingFolder}>
                 <FolderPlus size={18} strokeWidth={1.8} />
+              </button>
+              <button className="tree-action-button" type="button" title="打开文件夹" onClick={handleOpenFolder}>
+                <FolderOpen size={18} strokeWidth={1.8} />
               </button>
               <button className="tree-action-button" type="button" title="刷新资源管理器" onClick={stopTreeRootAction}>
                 <RefreshCw size={18} strokeWidth={1.8} />
