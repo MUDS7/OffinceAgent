@@ -76,12 +76,14 @@ export function truncateSelectionContext(text: string): string {
 }
 
 function getSelectionSourceTypeLabel(sourceType: DocumentSelectionContext["sourceType"]): string {
+  if (sourceType === "docx") return "Word";
   if (sourceType === "pdf") return "PDF";
   if (sourceType === "spreadsheet") return "Excel";
   return "文本";
 }
 
 function getFileContextTypeLabel(sourceType: CompressedFileContext["fileType"]): string {
+  if (sourceType === "docx") return "Word";
   if (sourceType === "pdf") return "PDF";
   if (sourceType === "spreadsheet") return "Excel";
   return "文本";

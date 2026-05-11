@@ -1,7 +1,7 @@
 use std::path::Path;
 
 /// 前端资料库/文件树允许递归展示的文件扩展名。
-const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf", "xlsx", "xls"];
+const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "csv", "json", "pdf", "xlsx", "xls", "docx"];
 
 #[tauri::command]
 /// Tauri 命令：把 UTF-8 文本内容写入指定磁盘路径。

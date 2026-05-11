@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.excel_commands import (
@@ -41,6 +42,39 @@ class AnalyzeResponse(BaseModel):
     warnings: list[str]
 
 
+class DocxParagraphBlock(BaseModel):
+    id: str
+    type: str = "paragraph"
+    text: str
+    style: str | None = None
+
+
+class DocxTableCell(BaseModel):
+    id: str
+    text: str
+
+
+class DocxTableBlock(BaseModel):
+    id: str
+    type: str = "table"
+    rows: list[list[DocxTableCell]]
+
+
+DocxBlock = DocxParagraphBlock | DocxTableBlock
+
+
+class DocxParseResponse(BaseModel):
+    filename: str
+    blocks: list[DocxBlock]
+    text_preview: str
+    warnings: list[str]
+
+
+class DocxRenderRequest(BaseModel):
+    filename: str = "document.docx"
+    blocks: list[DocxBlock]
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", service="document-service")
@@ -61,6 +95,33 @@ async def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
         sha256=sha256(content).hexdigest(),
         text_preview=text[:4000] if text else "",
         warnings=warnings,
+    )
+
+
+@app.post("/docx/parse", response_model=DocxParseResponse)
+async def parse_docx(file: UploadFile = File(...)) -> DocxParseResponse:
+    content = await file.read()
+    filename = file.filename or "untitled.docx"
+    warnings: list[str] = []
+    blocks = extract_docx_blocks(content, warnings)
+    text_preview = "\n".join(get_docx_block_text(block) for block in blocks).strip()
+
+    return DocxParseResponse(
+        filename=filename,
+        blocks=blocks,
+        text_preview=text_preview[:4000],
+        warnings=warnings,
+    )
+
+
+@app.post("/docx/render")
+def render_docx(request: DocxRenderRequest) -> StreamingResponse:
+    content = build_docx_bytes(request.blocks)
+    filename = Path(request.filename or "document.docx").name
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -115,11 +176,120 @@ def extract_pdf_text(content: bytes, warnings: list[str]) -> str:
 
 def extract_docx_text(content: bytes, warnings: list[str]) -> str:
     try:
-        from docx import Document
-
-        document = Document(BytesIO(content))
-        paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
-        return "\n".join(paragraphs)
+        blocks = extract_docx_blocks(content, warnings)
+        return "\n".join(get_docx_block_text(block) for block in blocks).strip()
     except Exception as exc:  # pragma: no cover - external parser boundary
         warnings.append(f"DOCX 解析失败: {exc}")
         return ""
+
+
+def extract_docx_blocks(content: bytes, warnings: list[str]) -> list[DocxBlock]:
+    try:
+        from docx import Document
+        from docx.oxml.table import CT_Tbl
+        from docx.oxml.text.paragraph import CT_P
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        document = Document(BytesIO(content))
+        blocks: list[DocxBlock] = []
+        paragraph_index = 0
+        table_index = 0
+        body = document._body
+
+        for child in document.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                paragraph = Paragraph(child, body)
+                text = paragraph.text
+                if not text.strip():
+                    paragraph_index += 1
+                    continue
+
+                style = paragraph.style.name if paragraph.style else None
+                blocks.append(
+                    DocxParagraphBlock(
+                        id=f"p-{paragraph_index}",
+                        text=text,
+                        style=style,
+                    )
+                )
+                paragraph_index += 1
+                continue
+
+            if isinstance(child, CT_Tbl):
+                table = Table(child, body)
+                rows: list[list[DocxTableCell]] = []
+                for row_index, row in enumerate(table.rows):
+                    cells = [
+                        DocxTableCell(
+                            id=f"t-{table_index}-r-{row_index}-c-{cell_index}",
+                            text=cell.text,
+                        )
+                        for cell_index, cell in enumerate(row.cells)
+                    ]
+                    rows.append(cells)
+
+                if rows:
+                    blocks.append(
+                        DocxTableBlock(
+                            id=f"t-{table_index}",
+                            rows=rows,
+                        )
+                    )
+                table_index += 1
+
+        if not blocks:
+            warnings.append("DOCX 中未提取到可显示文本")
+
+        return blocks
+    except Exception as exc:  # pragma: no cover - external parser boundary
+        warnings.append(f"DOCX 解析失败: {exc}")
+        return []
+
+
+def build_docx_bytes(blocks: list[DocxBlock]) -> bytes:
+    from docx import Document
+
+    document = Document()
+    has_content = False
+
+    for block in blocks:
+        if isinstance(block, DocxParagraphBlock):
+            paragraph = document.add_paragraph(block.text)
+            if block.style:
+                try:
+                    paragraph.style = block.style
+                except Exception:
+                    pass
+            has_content = has_content or bool(block.text.strip())
+            continue
+
+        if isinstance(block, DocxTableBlock):
+            row_count = len(block.rows)
+            col_count = max((len(row) for row in block.rows), default=0)
+            if row_count == 0 or col_count == 0:
+                continue
+
+            table = document.add_table(rows=row_count, cols=col_count)
+            try:
+                table.style = "Table Grid"
+            except Exception:
+                pass
+            for row_index, row in enumerate(block.rows):
+                for col_index, cell in enumerate(row):
+                    table.cell(row_index, col_index).text = cell.text
+                    has_content = has_content or bool(cell.text.strip())
+
+    if not has_content:
+        document.add_paragraph("")
+
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def get_docx_block_text(block: DocxBlock) -> str:
+    if isinstance(block, DocxParagraphBlock):
+        return block.text
+
+    return "\n".join("\t".join(cell.text for cell in row) for row in block.rows)

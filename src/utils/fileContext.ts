@@ -1,19 +1,20 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type * as XLSXModule from "xlsx";
-import { MAX_FILE_CONTEXT_CHARS } from "../constants";
+import { DOCUMENT_SERVICE_URL, MAX_FILE_CONTEXT_CHARS } from "../constants";
 import type { WorkspaceFile } from "../types";
 
 export type CompressedFileContext = {
   content: string;
   filename: string;
-  fileType: "pdf" | "spreadsheet" | "text" | "unsupported";
+  fileType: "docx" | "pdf" | "spreadsheet" | "text" | "unsupported";
   isTruncated: boolean;
 };
 
 const TEXT_FILE_EXTENSIONS = new Set(["txt", "md", "csv", "json"]);
 const SPREADSHEET_FILE_EXTENSIONS = new Set(["xlsx", "xls"]);
 const PDF_FILE_EXTENSIONS = new Set(["pdf"]);
+const DOCX_FILE_EXTENSIONS = new Set(["docx"]);
 const MAX_CELL_VALUE_CHARS = 160;
 const MAX_TEXT_LINE_CHARS = 500;
 
@@ -32,12 +33,65 @@ export async function buildCompressedFileContext(
     return buildPdfFileContext(workspaceFile.file);
   }
 
+  if (DOCX_FILE_EXTENSIONS.has(extension)) {
+    return buildDocxFileContext(workspaceFile.file);
+  }
+
   if (TEXT_FILE_EXTENSIONS.has(extension)) {
     const text = unsavedText ?? (await workspaceFile.file.text());
     return buildTextFileContext(workspaceFile.file.name, text);
   }
 
   return null;
+}
+
+async function buildDocxFileContext(file: File): Promise<CompressedFileContext> {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await fetch(`${DOCUMENT_SERVICE_URL}/docx/parse`, {
+    method: "POST",
+    body,
+  });
+
+  if (!response.ok) {
+    throw new Error(`DOCX parse service returned ${response.status}`);
+  }
+
+  const result = (await response.json()) as { blocks: Array<Record<string, unknown>> };
+  const output = createContextWriter();
+  let emittedBlocks = 0;
+
+  output.push("Compressed Word document context. Block numbers keep their parsed order.");
+
+  for (const [index, block] of result.blocks.entries()) {
+    if (block.type === "paragraph") {
+      const text = compressTextValue(String(block.text ?? ""), MAX_TEXT_LINE_CHARS * 2);
+      if (!text.trim()) continue;
+      if (!output.push(`B${index + 1} paragraph: ${text}`)) break;
+      emittedBlocks += 1;
+      continue;
+    }
+
+    if (block.type === "table" && Array.isArray(block.rows)) {
+      const rows = block.rows as Array<Array<{ text?: string }>>;
+      const rowText = rows
+        .map((row, rowIndex) =>
+          `R${rowIndex + 1}: ${row.map((cell) => compressTextValue(String(cell.text ?? ""), MAX_CELL_VALUE_CHARS)).join(" | ")}`,
+        )
+        .join("\n");
+      if (!rowText.trim()) continue;
+      if (!output.push(`B${index + 1} table:\n${rowText}`)) break;
+      emittedBlocks += 1;
+    }
+  }
+
+  return {
+    content: output.toString(emittedBlocks),
+    filename: file.name,
+    fileType: "docx",
+    isTruncated: output.isTruncated,
+  };
 }
 
 function buildTextFileContext(filename: string, text: string): CompressedFileContext {

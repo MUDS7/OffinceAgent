@@ -1,11 +1,12 @@
 import { FileWarning, Info, XCircle } from "lucide-react";
 import type { PointerEvent } from "react";
 import { PreviewHeader } from "./center-pane/PreviewHeader";
+import { DocxPreview } from "./center-pane/DocxPreview";
 import { PdfTextPreview } from "./center-pane/PdfTextPreview";
 import { SpreadsheetPreview } from "./center-pane/SpreadsheetPreview";
 import { TextFilePreview } from "./center-pane/TextFilePreview";
 import type { CenterPaneProps } from "./center-pane/types";
-import { getFileExtension, isEditableTextFile, isSpreadsheetExtension } from "./center-pane/filePreviewUtils";
+import { getFileExtension, isDocxExtension, isEditableTextFile, isSpreadsheetExtension } from "./center-pane/filePreviewUtils";
 import "./CenterPane.css";
 
 export function CenterPane({
@@ -30,6 +31,7 @@ export function CenterPane({
   const isTextPreview = isEditableTextFile(activeFile?.file, activeExtension);
   const isPdfPreview = activeExtension === "pdf";
   const isSpreadsheetPreview = isSpreadsheetExtension(activeExtension);
+  const isDocxPreview = isDocxExtension(activeExtension);
 
   return (
     <section className="preview-pane" aria-label="文件预览" onPointerDown={handlePreviewPanePointerDown}>
@@ -60,7 +62,7 @@ export function CenterPane({
       return (
         <div className="editor-content preview-empty">
           <Info size={28} />
-          <span>选择一个 txt 或 pdf 文件进行预览</span>
+          <span>选择一个 txt、pdf、docx 或 Excel 文件进行预览</span>
         </div>
       );
     }
@@ -95,6 +97,17 @@ export function CenterPane({
       );
     }
 
+    if (isDocxPreview) {
+      return (
+        <DocxPreview
+          activeFile={activeFile}
+          onSaveFile={onSaveTextFile}
+          onSelectionContextChange={onSelectionContextChange}
+          onUpdateFile={onUpdateSpreadsheetFile}
+        />
+      );
+    }
+
     return (
       <div className="editor-content preview-empty">
         <FileWarning size={30} />
@@ -107,7 +120,7 @@ export function CenterPane({
     const target = event.target;
 
     if (!(target instanceof Element)) return;
-    if (target.closest(".preview-text-editor, .pdf-viewer-shell, .spreadsheet-preview")) return;
+    if (target.closest(".preview-text-editor, .pdf-viewer-shell, .spreadsheet-preview, .docx-preview")) return;
 
     onSelectionContextChange(null);
   }

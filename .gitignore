@@ -10,6 +10,7 @@ services/document-service/.packages/
 services/document-service/**/__pycache__/
 services/document-service/.pytest_cache/
 *.pyc
+*.log
 
 .env
 .env.local

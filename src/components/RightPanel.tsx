@@ -3,6 +3,7 @@ import {
   ChevronDown,
   Check,
   ChevronRight,
+  FileText,
   Hand,
   Maximize2,
   Paperclip,
@@ -323,6 +324,7 @@ function AgentFileChangeTag({
 
 function FileTextIcon({ sourceType }: { sourceType: DocumentSelectionContext["sourceType"] }) {
   if (sourceType === "spreadsheet") return <Table2 size={15} />;
+  if (sourceType === "docx") return <FileText size={15} />;
 
   return sourceType === "pdf" ? <Paperclip size={15} /> : <Sparkles size={15} />;
 }

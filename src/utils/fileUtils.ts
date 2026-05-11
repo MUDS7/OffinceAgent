@@ -3,6 +3,7 @@ export function getFileMimeType(filename: string): string {
 
   if (extension === "json") return "application/json";
   if (extension === "pdf") return "application/pdf";
+  if (extension === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   if (extension === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   if (extension === "xls") return "application/vnd.ms-excel";
   if (extension === "txt") return "text/plain";

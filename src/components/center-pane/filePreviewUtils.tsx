@@ -6,6 +6,7 @@ export function EditorTabIcon({ filename }: { filename: string }) {
   if (extension === "css") return <Hash className="css-tab-icon" size={16} />;
   if (extension === "tsx" || extension === "jsx") return <Atom className="react-tab-icon" size={16} />;
   if (extension === "json") return <Braces className="json-tab-icon" size={16} />;
+  if (isDocxExtension(extension)) return <FileText className="docx-tab-icon" size={16} />;
   if (isSpreadsheetExtension(extension)) return <Table2 className="spreadsheet-tab-icon" size={16} />;
   if (extension === "ts" || extension === "js" || extension === "html") return <Code2 className="code-tab-icon" size={16} />;
 
@@ -14,6 +15,10 @@ export function EditorTabIcon({ filename }: { filename: string }) {
 
 export function isSpreadsheetExtension(extension: string) {
   return extension === "xlsx" || extension === "xls";
+}
+
+export function isDocxExtension(extension: string) {
+  return extension === "docx";
 }
 
 export function getFileExtension(filename: string) {

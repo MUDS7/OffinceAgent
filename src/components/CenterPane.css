@@ -101,6 +101,10 @@
   color: #2f855a;
 }
 
+.docx-tab-icon {
+  color: #2f6fc6;
+}
+
 .editor-actions {
   display: flex;
   align-items: center;
@@ -522,6 +526,168 @@
 .spreadsheet-cell-input:focus {
   color: #111111;
   background: #ffffff;
+}
+
+.docx-preview {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #f2f2f2;
+}
+
+.docx-toolbar {
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 39px;
+  padding: 0 14px;
+  border-bottom: 1px solid #e1e4e8;
+  color: #59636e;
+  background: #f8f8f8;
+  font-size: 13px;
+}
+
+.docx-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.docx-summary svg {
+  color: #2f6fc6;
+}
+
+.docx-selection-summary {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.docx-warning {
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 31px;
+  padding: 0 13px;
+  border-bottom: 1px solid #eadfbf;
+  color: #6f5a24;
+  background: #fff9e8;
+  font-size: 13px;
+}
+
+.docx-page-shell {
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px;
+  scrollbar-color: #aeb4bc #f1f3f4;
+  scrollbar-width: thin;
+}
+
+.docx-page {
+  width: min(820px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 52px 64px 72px;
+  border: 1px solid #dadde2;
+  background: #ffffff;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08);
+}
+
+.docx-block {
+  position: relative;
+  min-width: 0;
+}
+
+.docx-paragraph {
+  margin: 0 0 12px;
+  border-radius: 4px;
+}
+
+.docx-paragraph.selected,
+.docx-cell.selected {
+  outline: 1px solid #2f80ed;
+  outline-offset: 2px;
+  background: rgba(47, 128, 237, 0.08);
+}
+
+.docx-paragraph-input,
+.docx-cell-input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  color: #1f2328;
+  background: transparent;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.72;
+}
+
+.docx-paragraph-input {
+  min-height: 34px;
+  overflow: hidden;
+  padding: 2px 0;
+}
+
+.docx-paragraph.title .docx-paragraph-input {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.docx-paragraph.heading-one .docx-paragraph-input {
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.42;
+}
+
+.docx-paragraph.heading-two .docx-paragraph-input {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.docx-table-wrap {
+  margin: 16px 0;
+  overflow-x: auto;
+}
+
+.docx-table {
+  width: 100%;
+  min-width: 420px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  color: #1f2328;
+  font-size: 14px;
+}
+
+.docx-cell {
+  min-width: 120px;
+  padding: 6px 8px;
+  border: 1px solid #d6d9de;
+  vertical-align: top;
+}
+
+.docx-cell-input {
+  min-height: 36px;
+  resize: vertical;
+}
+
+.docx-paragraph-input::selection,
+.docx-cell-input::selection {
+  background: rgba(31, 111, 235, 0.22);
 }
 
 .text-editor-layout {

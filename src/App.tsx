@@ -227,7 +227,7 @@ function App() {
     try {
       const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
       const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
-      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf|xlsx|xls)$/i.test(p));
+      const supported = entries.filter((p) => /\.(txt|md|csv|json|pdf|xlsx|xls|docx)$/i.test(p));
       if (!supported.length) {
         setErrorMessage("该文件夹中没有支持的文件类型");
         return;
