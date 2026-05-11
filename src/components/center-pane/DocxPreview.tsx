@@ -557,8 +557,13 @@ export function DocxPreview({
       document_id: activeFile.diskPath ?? activeFile.id,
       filename: activeFile.filename,
       path: activeFile.diskPath,
+      original_path: activeFile.diskPath,
+      stored_path: activeFile.diskPath,
       extension: "docx",
+      file_type: "docx",
       size_bytes: activeFile.file.size,
+      parse_status: "parsed",
+      index_status: "indexed",
       blocks,
     };
 

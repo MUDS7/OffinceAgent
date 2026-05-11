@@ -157,15 +157,23 @@ export type DocumentIndexRequest = {
   document_id: string;
   filename: string;
   path?: string;
+  original_path?: string;
+  stored_path?: string;
   extension?: string;
+  file_type?: string;
   size_bytes?: number;
   sha256?: string;
-  blocks: DocxBlock[];
+  parse_status?: string;
+  index_status?: string;
+  blocks: unknown[];
 };
 
 export type DocumentIndexResult = {
   document_id: string;
   blocks_indexed: number;
+  nodes_indexed: number;
+  chunks_indexed: number;
+  assets_indexed: number;
   text_bytes_indexed: number;
 };
 

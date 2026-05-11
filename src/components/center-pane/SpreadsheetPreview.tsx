@@ -1,8 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Check, RefreshCw, XCircle } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
+import type { DocumentIndexRequest, DocumentIndexResult } from "../../types";
 import type { DocumentSelectionContext, PreviewFile } from "./types";
 
 type SpreadsheetPreviewProps = {
@@ -39,6 +41,20 @@ type SelectionRange = {
 
 type SizeMapBySheet = Record<string, Record<number, number>>;
 
+type SpreadsheetIndexBlock = {
+  id: string;
+  type: "excel_sheet";
+  name: string;
+  range: string;
+  rows: {
+    range: string;
+    cells: {
+      address: string;
+      text: string;
+    }[];
+  }[];
+};
+
 const MAX_VISIBLE_ROWS = 800;
 const MAX_VISIBLE_COLUMNS = 120;
 const DEFAULT_COLUMN_WIDTH = 132;
@@ -57,6 +73,7 @@ export function SpreadsheetPreview({
 }: SpreadsheetPreviewProps) {
   const lastPublishedFileRef = useRef<File | null>(null);
   const loadedFileIdRef = useRef("");
+  const lastIndexSignatureRef = useRef("");
   const [previewState, setPreviewState] = useState<{
     error: string;
     isLoading: boolean;
@@ -98,6 +115,7 @@ export function SpreadsheetPreview({
 
     let isCancelled = false;
     loadedFileIdRef.current = activeFile.id;
+    lastIndexSignatureRef.current = "";
 
     setPreviewState({ error: "", isLoading: true, sheets: [], workbook: null, xlsx: null });
     setActiveSheetIndex(0);
@@ -152,6 +170,44 @@ export function SpreadsheetPreview({
     onSelectionContextChange(null);
     setEditingCell(null);
   }, [activeSheetIndex, onSelectionContextChange]);
+
+  useEffect(() => {
+    if (previewState.isLoading || previewState.error || !previewState.sheets.length) return;
+
+    const blocks = buildSpreadsheetIndexBlocks(previewState.sheets);
+    const signature = JSON.stringify(blocks);
+    if (!signature || signature === lastIndexSignatureRef.current) return;
+
+    const request: DocumentIndexRequest = {
+      document_id: activeFile.diskPath ?? activeFile.id,
+      filename: activeFile.filename,
+      path: activeFile.diskPath,
+      original_path: activeFile.diskPath,
+      stored_path: activeFile.diskPath,
+      extension: activeFile.filename.split(".").pop()?.toLowerCase() ?? "xlsx",
+      file_type: "spreadsheet",
+      size_bytes: activeFile.file.size,
+      parse_status: "parsed",
+      index_status: "indexed",
+      blocks,
+    };
+
+    void invoke<DocumentIndexResult>("index_document_structure", { request })
+      .then(() => {
+        lastIndexSignatureRef.current = signature;
+      })
+      .catch((error) => {
+        console.warn("Failed to index spreadsheet structure:", error);
+      });
+  }, [
+    activeFile.diskPath,
+    activeFile.file.size,
+    activeFile.filename,
+    activeFile.id,
+    previewState.error,
+    previewState.isLoading,
+    previewState.sheets,
+  ]);
 
   useEffect(() => {
     if (!selectionRange || !activeSheet) return;
@@ -951,6 +1007,30 @@ function buildSheetPreview(
     rows,
     rowStart: usedRange.s.r,
   };
+}
+
+function buildSpreadsheetIndexBlocks(sheets: SheetPreview[]): SpreadsheetIndexBlock[] {
+  return sheets.map((sheet, sheetIndex) => ({
+    id: `sheet-${sheetIndex}`,
+    type: "excel_sheet",
+    name: sheet.name,
+    range: sheet.rangeLabel,
+    rows: sheet.rows.map((row) => {
+      const nonEmptyCells = row
+        .filter((cell) => cell.value.trim())
+        .map((cell) => ({
+          address: cell.address,
+          text: cell.value,
+        }));
+      const firstAddress = row[0]?.address ?? "A1";
+      const lastAddress = row[row.length - 1]?.address ?? firstAddress;
+
+      return {
+        range: `${firstAddress}:${lastAddress}`,
+        cells: nonEmptyCells,
+      };
+    }),
+  }));
 }
 
 function setWorksheetCellValue(

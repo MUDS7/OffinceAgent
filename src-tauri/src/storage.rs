@@ -13,38 +13,12 @@ use tauri::{Manager, State};
 const DEFAULT_QDRANT_COLLECTION: &str = "officeagent_documents";
 const DEFAULT_QDRANT_DB_NAME: &str = "office-agent-qdrant.sqlite3";
 
+mod sqlite_store;
+
 pub(crate) struct DocumentStore {
     connection: Mutex<Connection>,
     qdrant_connection: Mutex<Connection>,
     qdrant_path: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct DocumentIndexRequest {
-    document_id: String,
-    filename: String,
-    path: Option<String>,
-    extension: Option<String>,
-    size_bytes: Option<u64>,
-    sha256: Option<String>,
-    blocks: Value,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct DocumentIndexResult {
-    document_id: String,
-    blocks_indexed: usize,
-    text_bytes_indexed: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct FullTextSearchHit {
-    document_id: String,
-    block_id: String,
-    filename: String,
-    path: Option<String>,
-    text: String,
-    rank: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +64,7 @@ pub(crate) struct QdrantUpsertResult {
 }
 
 pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
-    let db_path = sqlite_db_path(app)?;
+    let db_path = sqlite_store::sqlite_db_path(app)?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -102,7 +76,7 @@ pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
 
     let connection = Connection::open(&db_path)
         .map_err(|error| format!("cannot open SQLite database {}: {error}", db_path.display()))?;
-    migrate_sqlite(&connection)?;
+    sqlite_store::migrate_sqlite(&connection)?;
 
     let qdrant_path = qdrant_db_path(app)?;
     if let Some(parent) = qdrant_path.parent() {
@@ -129,21 +103,6 @@ pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-fn sqlite_db_path(app: &tauri::App) -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("OFFICE_AGENT_SQLITE_PATH") {
-        if !path.trim().is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("cannot resolve app data directory: {error}"))?;
-
-    Ok(data_dir.join("office-agent.sqlite3"))
-}
-
 fn qdrant_db_path(app: &tauri::App) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("OFFICE_AGENT_QDRANT_PATH") {
         if !path.trim().is_empty() {
@@ -167,114 +126,9 @@ fn qdrant_db_path(app: &tauri::App) -> Result<PathBuf, String> {
 #[tauri::command]
 pub(crate) fn index_document_structure(
     state: State<'_, DocumentStore>,
-    request: DocumentIndexRequest,
-) -> Result<DocumentIndexResult, String> {
-    let mut connection = state
-        .connection
-        .lock()
-        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("cannot start SQLite transaction: {error}"))?;
-
-    let extension = request
-        .extension
-        .clone()
-        .or_else(|| {
-            request
-                .filename
-                .rsplit_once('.')
-                .map(|(_, ext)| ext.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    let now = unix_timestamp_seconds();
-
-    transaction
-        .execute(
-            "INSERT INTO documents (
-                id, path, filename, extension, sha256, size_bytes, indexed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-                path = excluded.path,
-                filename = excluded.filename,
-                extension = excluded.extension,
-                sha256 = excluded.sha256,
-                size_bytes = excluded.size_bytes,
-                indexed_at = excluded.indexed_at",
-            params![
-                request.document_id,
-                request.path,
-                request.filename,
-                extension,
-                request.sha256,
-                request.size_bytes.map(|size| size as i64),
-                now,
-            ],
-        )
-        .map_err(|error| format!("cannot upsert document metadata: {error}"))?;
-
-    transaction
-        .execute(
-            "DELETE FROM document_blocks WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old document blocks: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM document_fts WHERE document_id = ?1",
-            params![request.document_id],
-        )
-        .map_err(|error| format!("cannot clear old full-text rows: {error}"))?;
-
-    let flattened = flatten_document_blocks(&request.blocks);
-    let mut text_bytes_indexed = 0usize;
-    for block in &flattened {
-        text_bytes_indexed += block.text.len();
-        transaction
-            .execute(
-                "INSERT INTO document_blocks (
-                    document_id, block_id, block_type, block_index, parent_id, text, metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    request.document_id,
-                    block.block_id,
-                    block.block_type,
-                    block.block_index as i64,
-                    block.parent_id,
-                    block.text,
-                    block.metadata_json,
-                ],
-            )
-            .map_err(|error| format!("cannot insert document block {}: {error}", block.block_id))?;
-
-        if !block.text.trim().is_empty() {
-            transaction
-                .execute(
-                    "INSERT INTO document_fts (document_id, block_id, filename, path, text)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        request.document_id,
-                        block.block_id,
-                        request.filename,
-                        request.path,
-                        block.text,
-                    ],
-                )
-                .map_err(|error| {
-                    format!("cannot insert full-text row {}: {error}", block.block_id)
-                })?;
-        }
-    }
-
-    transaction
-        .commit()
-        .map_err(|error| format!("cannot commit SQLite document index: {error}"))?;
-
-    Ok(DocumentIndexResult {
-        document_id: request.document_id,
-        blocks_indexed: flattened.len(),
-        text_bytes_indexed,
-    })
+    request: sqlite_store::DocumentIndexRequest,
+) -> Result<sqlite_store::DocumentIndexResult, String> {
+    sqlite_store::index_document_structure(state, request)
 }
 
 #[tauri::command]
@@ -282,38 +136,8 @@ pub(crate) fn search_document_full_text(
     state: State<'_, DocumentStore>,
     query: String,
     limit: Option<u32>,
-) -> Result<Vec<FullTextSearchHit>, String> {
-    let query = build_safe_fts_query(&query).ok_or_else(|| "search query is empty".to_string())?;
-    let connection = state
-        .connection
-        .lock()
-        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
-    let mut statement = connection
-        .prepare(
-            "SELECT document_id, block_id, filename, path,
-                    snippet(document_fts, 4, '[', ']', '...', 24), rank
-             FROM document_fts
-             WHERE document_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )
-        .map_err(|error| format!("cannot prepare SQLite full-text search: {error}"))?;
-
-    let rows = statement
-        .query_map(params![query, limit.unwrap_or(20).min(100)], |row| {
-            Ok(FullTextSearchHit {
-                document_id: row.get(0)?,
-                block_id: row.get(1)?,
-                filename: row.get(2)?,
-                path: row.get(3)?,
-                text: row.get(4)?,
-                rank: row.get(5)?,
-            })
-        })
-        .map_err(|error| format!("cannot run SQLite full-text search: {error}"))?;
-
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("cannot read SQLite full-text results: {error}"))
+) -> Result<Vec<sqlite_store::FullTextSearchHit>, String> {
+    sqlite_store::search_document_full_text(state, query, limit)
 }
 
 #[tauri::command]
@@ -515,52 +339,6 @@ pub(crate) async fn search_qdrant_vectors(
     }))
 }
 
-fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                path TEXT,
-                filename TEXT NOT NULL,
-                extension TEXT NOT NULL,
-                sha256 TEXT,
-                size_bytes INTEGER,
-                indexed_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS document_blocks (
-                document_id TEXT NOT NULL,
-                block_id TEXT NOT NULL,
-                block_type TEXT NOT NULL,
-                block_index INTEGER NOT NULL,
-                parent_id TEXT,
-                text TEXT NOT NULL,
-                metadata_json TEXT NOT NULL,
-                PRIMARY KEY (document_id, block_id),
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
-                document_id UNINDEXED,
-                block_id UNINDEXED,
-                filename,
-                path UNINDEXED,
-                text,
-                tokenize = 'trigram'
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_document_blocks_document
-                ON document_blocks(document_id, block_index);
-            ",
-        )
-        .map(|_| ())
-        .map_err(|error| format!("cannot migrate SQLite document store: {error}"))
-}
-
 fn migrate_qdrant(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
@@ -612,6 +390,61 @@ struct QdrantSearchHit {
     point_id: String,
     score: f64,
     payload: Value,
+}
+
+#[derive(Default)]
+struct BuiltDocumentIndex {
+    nodes: Vec<IndexedNode>,
+    chunks: Vec<IndexedChunk>,
+    assets: Vec<IndexedAsset>,
+    chunk_assets: Vec<ChunkAssetLink>,
+}
+
+struct IndexedNode {
+    id: String,
+    parent_id: Option<String>,
+    node_type: String,
+    level: Option<i32>,
+    title: Option<String>,
+    text: Option<String>,
+    order_index: usize,
+    metadata_json: String,
+}
+
+struct IndexedChunk {
+    id: String,
+    node_ids_json: String,
+    heading_path_json: String,
+    heading_path_text: String,
+    chunk_type: String,
+    content: String,
+    content_for_embedding: String,
+    order_index: usize,
+    token_count: usize,
+}
+
+struct IndexedAsset {
+    id: String,
+    node_id: Option<String>,
+    asset_type: String,
+    file_path: Option<String>,
+    caption: Option<String>,
+    description: Option<String>,
+    nearby_text: Option<String>,
+    metadata_json: String,
+}
+
+struct ChunkAssetLink {
+    chunk_id: String,
+    asset_id: String,
+    relation_type: String,
+}
+
+#[derive(Clone)]
+struct HeadingContext {
+    node_id: String,
+    level: i32,
+    title: String,
 }
 
 fn upsert_qdrant_collection(
@@ -757,6 +590,367 @@ fn sort_qdrant_hits(hits: &mut [QdrantSearchHit], distance: &str) {
     });
 }
 
+fn build_document_index(document_id: &str, blocks: &Value) -> BuiltDocumentIndex {
+    let Some(blocks) = blocks.as_array() else {
+        return BuiltDocumentIndex::default();
+    };
+
+    let mut index = BuiltDocumentIndex::default();
+    let mut heading_stack: Vec<HeadingContext> = Vec::new();
+    let mut last_chunk_id: Option<String> = None;
+    let mut last_text = String::new();
+
+    for (order_index, block) in blocks.iter().enumerate() {
+        match block.get("type").and_then(Value::as_str) {
+            Some("excel_sheet") => {
+                build_excel_sheet_index(document_id, block, order_index, &mut index);
+            }
+            _ => {
+                build_docx_like_block_index(
+                    document_id,
+                    block,
+                    order_index,
+                    &mut heading_stack,
+                    &mut last_chunk_id,
+                    &mut last_text,
+                    &mut index,
+                );
+            }
+        }
+    }
+
+    index
+}
+
+fn build_docx_like_block_index(
+    document_id: &str,
+    block: &Value,
+    order_index: usize,
+    heading_stack: &mut Vec<HeadingContext>,
+    last_chunk_id: &mut Option<String>,
+    last_text: &mut String,
+    index: &mut BuiltDocumentIndex,
+) {
+    let raw_id = raw_block_id(block, order_index);
+    let node_id = scoped_stable_id("node", document_id, &raw_id);
+    let block_type = block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let text = extract_block_text(block);
+
+    if block_type == "paragraph" {
+        if let Some(level) = heading_level(block) {
+            while heading_stack
+                .last()
+                .map(|heading| heading.level >= level)
+                .unwrap_or(false)
+            {
+                heading_stack.pop();
+            }
+            let parent_id = heading_stack.last().map(|heading| heading.node_id.clone());
+            let title = text.trim().to_string();
+            index.nodes.push(IndexedNode {
+                id: node_id.clone(),
+                parent_id,
+                node_type: "heading".to_string(),
+                level: Some(level),
+                title: Some(title.clone()),
+                text: (!title.is_empty()).then_some(title.clone()),
+                order_index,
+                metadata_json: block.to_string(),
+            });
+            heading_stack.push(HeadingContext {
+                node_id,
+                level,
+                title,
+            });
+            return;
+        }
+    }
+
+    let parent_id = heading_stack.last().map(|heading| heading.node_id.clone());
+    let node_type = match block_type {
+        "table" => "table",
+        "image" => "image",
+        "paragraph" => "paragraph",
+        value => value,
+    };
+    let title = if node_type == "table" {
+        Some(format!("Table {}", order_index + 1))
+    } else if node_type == "image" {
+        block
+            .get("alt_text")
+            .and_then(Value::as_str)
+            .or_else(|| block.get("filename").and_then(Value::as_str))
+            .map(str::to_string)
+    } else {
+        None
+    };
+
+    index.nodes.push(IndexedNode {
+        id: node_id.clone(),
+        parent_id,
+        node_type: node_type.to_string(),
+        level: None,
+        title,
+        text: (!text.trim().is_empty()).then_some(text.clone()),
+        order_index,
+        metadata_json: block.to_string(),
+    });
+
+    if node_type == "image" {
+        let asset_id = scoped_stable_id("asset", document_id, &raw_id);
+        let file_path = block
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                block
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .map(|filename| format!("workspace/assets/{document_id}/images/{filename}"))
+            });
+        index.assets.push(IndexedAsset {
+            id: asset_id.clone(),
+            node_id: Some(node_id),
+            asset_type: "image".to_string(),
+            file_path,
+            caption: block
+                .get("caption")
+                .and_then(Value::as_str)
+                .or_else(|| block.get("alt_text").and_then(Value::as_str))
+                .map(str::to_string),
+            description: block
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            nearby_text: (!last_text.trim().is_empty()).then_some(last_text.clone()),
+            metadata_json: block.to_string(),
+        });
+        if let Some(chunk_id) = last_chunk_id.clone() {
+            index.chunk_assets.push(ChunkAssetLink {
+                chunk_id,
+                asset_id,
+                relation_type: "nearby".to_string(),
+            });
+        }
+        return;
+    }
+
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let heading_path = heading_stack
+        .iter()
+        .map(|heading| heading.title.clone())
+        .collect::<Vec<_>>();
+    let chunk = make_chunk(
+        document_id,
+        &format!("{raw_id}:chunk"),
+        vec![node_id],
+        heading_path,
+        match node_type {
+            "table" => "table_content",
+            _ => "section_content",
+        },
+        text,
+        order_index,
+    );
+    *last_text = chunk.content.clone();
+    *last_chunk_id = Some(chunk.id.clone());
+    index.chunks.push(chunk);
+}
+
+fn build_excel_sheet_index(
+    document_id: &str,
+    block: &Value,
+    order_index: usize,
+    index: &mut BuiltDocumentIndex,
+) {
+    let raw_id = raw_block_id(block, order_index);
+    let sheet_node_id = scoped_stable_id("node", document_id, &raw_id);
+    let sheet_name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Sheet")
+        .to_string();
+    let range_label = block
+        .get("range")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let title = if range_label.is_empty() {
+        sheet_name.clone()
+    } else {
+        format!("{sheet_name} {range_label}")
+    };
+
+    index.nodes.push(IndexedNode {
+        id: sheet_node_id.clone(),
+        parent_id: None,
+        node_type: "excel_sheet".to_string(),
+        level: Some(1),
+        title: Some(title.clone()),
+        text: None,
+        order_index,
+        metadata_json: block.to_string(),
+    });
+
+    let rows = block
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (row_index, row) in rows.iter().enumerate() {
+        let content = extract_excel_row_text(row);
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let row_raw_id = format!("{raw_id}:row:{row_index}");
+        let row_node_id = scoped_stable_id("node", document_id, &row_raw_id);
+        let row_range = row.get("range").and_then(Value::as_str).map(str::to_string);
+        index.nodes.push(IndexedNode {
+            id: row_node_id.clone(),
+            parent_id: Some(sheet_node_id.clone()),
+            node_type: "excel_cell_range".to_string(),
+            level: None,
+            title: row_range,
+            text: Some(content.clone()),
+            order_index: order_index * 100_000 + row_index + 1,
+            metadata_json: row.to_string(),
+        });
+        index.chunks.push(make_chunk(
+            document_id,
+            &format!("{row_raw_id}:chunk"),
+            vec![sheet_node_id.clone(), row_node_id],
+            vec![title.clone()],
+            "excel_range_content",
+            content,
+            order_index * 100_000 + row_index + 1,
+        ));
+    }
+}
+
+fn make_chunk(
+    document_id: &str,
+    raw_id: &str,
+    node_ids: Vec<String>,
+    heading_path: Vec<String>,
+    chunk_type: &str,
+    content: String,
+    order_index: usize,
+) -> IndexedChunk {
+    let heading_path_text = heading_path.join("\n");
+    let content_for_embedding = if heading_path_text.trim().is_empty() {
+        content.clone()
+    } else {
+        format!("{heading_path_text}\n\n{content}")
+    };
+    let node_ids_json = serde_json::to_string(&node_ids).unwrap_or_else(|_| "[]".to_string());
+    let heading_path_json =
+        serde_json::to_string(&heading_path).unwrap_or_else(|_| "[]".to_string());
+    let token_count = estimate_token_count(&content_for_embedding);
+
+    IndexedChunk {
+        id: scoped_stable_id("chunk", document_id, raw_id),
+        node_ids_json,
+        heading_path_json,
+        heading_path_text,
+        chunk_type: chunk_type.to_string(),
+        content,
+        content_for_embedding,
+        order_index,
+        token_count,
+    }
+}
+
+fn raw_block_id(block: &Value, index: usize) -> String {
+    block
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("block-{index}"))
+}
+
+fn scoped_stable_id(prefix: &str, document_id: &str, raw_id: &str) -> String {
+    format!(
+        "{prefix}_{:016x}",
+        stable_point_id(&format!("{document_id}:{raw_id}"))
+    )
+}
+
+fn heading_level(block: &Value) -> Option<i32> {
+    if let Some(level) = block.get("level").and_then(Value::as_i64) {
+        if (1..=9).contains(&level) {
+            return Some(level as i32);
+        }
+    }
+
+    for key in ["style_id", "style"] {
+        let Some(value) = block.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let normalized = value.trim().to_ascii_lowercase();
+        if !(normalized.contains("heading") || value.contains("标题")) {
+            continue;
+        }
+        if let Some(level) = normalized
+            .chars()
+            .find(|character| character.is_ascii_digit())
+            .and_then(|character| character.to_digit(10))
+        {
+            if (1..=9).contains(&level) {
+                return Some(level as i32);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_excel_row_text(row: &Value) -> String {
+    row.get("cells")
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter_map(|cell| {
+                    let address = cell.get("address").and_then(Value::as_str).unwrap_or("");
+                    let text = cell
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| cell.get("value").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .trim();
+                    (!text.is_empty()).then(|| {
+                        if address.is_empty() {
+                            text.to_string()
+                        } else {
+                            format!("{address}: {text}")
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\t")
+        })
+        .unwrap_or_default()
+}
+
+fn estimate_token_count(text: &str) -> usize {
+    let whitespace_count = text
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .count();
+    if whitespace_count > 1 {
+        return whitespace_count;
+    }
+
+    (text.chars().count() / 4).max(1)
+}
+
 struct FlattenedBlock {
     block_id: String,
     block_type: String,
@@ -832,27 +1026,19 @@ fn extract_block_text(block: &Value) -> String {
             .or_else(|| block.get("filename").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
+        Some("excel_sheet") => block
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .map(extract_excel_row_text)
+                    .filter(|row| !row.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default(),
         _ => String::new(),
     }
-}
-
-fn build_safe_fts_query(query: &str) -> Option<String> {
-    let terms = query
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>();
-
-    if terms.is_empty() {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        return Some(format!("\"{}\"", trimmed.replace('"', "\"\"")));
-    }
-
-    Some(terms.join(" "))
 }
 
 fn unix_timestamp_seconds() -> i64 {
@@ -1092,7 +1278,7 @@ mod tests {
     #[test]
     fn builds_quoted_fts_query() {
         assert_eq!(
-            build_safe_fts_query("alpha beta"),
+            sqlite_store::build_safe_fts_query("alpha beta"),
             Some("\"alpha\" \"beta\"".to_string())
         );
     }
@@ -1100,7 +1286,7 @@ mod tests {
     #[test]
     fn migrates_sqlite_schema_with_fts() {
         let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
-        migrate_sqlite(&connection).expect("schema should migrate");
+        sqlite_store::migrate_sqlite(&connection).expect("schema should migrate");
 
         connection
             .execute(
@@ -1113,11 +1299,70 @@ mod tests {
         let count: i64 = connection
             .query_row(
                 "SELECT count(*) FROM document_fts WHERE document_fts MATCH ?1",
-                params![build_safe_fts_query("alpha").unwrap()],
+                params![sqlite_store::build_safe_fts_query("alpha").unwrap()],
                 |row| row.get(0),
             )
             .expect("FTS query should run");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn builds_heading_chunks_and_nearby_image_assets() {
+        let blocks = json!([
+            { "id": "h1", "type": "paragraph", "text": "3 数据管理方案设计", "style": "Heading 1" },
+            { "id": "h2", "type": "paragraph", "text": "3.1 元数据组织方式", "style_id": "Heading2" },
+            { "id": "p1", "type": "paragraph", "text": "设备类元数据组织主要包括设备编码。" },
+            { "id": "img1", "type": "image", "filename": "image_001.png", "alt_text": "系统总体架构图" }
+        ]);
+
+        let index = build_document_index("doc_001", &blocks);
+
+        assert_eq!(index.nodes.len(), 4);
+        assert_eq!(index.chunks.len(), 1);
+        assert_eq!(index.assets.len(), 1);
+        assert_eq!(index.chunk_assets.len(), 1);
+        assert_eq!(index.chunks[0].chunk_type, "section_content");
+        assert!(index.chunks[0]
+            .content_for_embedding
+            .contains("3.1 元数据组织方式"));
+        assert_eq!(index.assets[0].caption.as_deref(), Some("系统总体架构图"));
+    }
+
+    #[test]
+    fn builds_excel_sheet_and_cell_range_chunks() {
+        let blocks = json!([
+            {
+                "id": "sheet-0",
+                "type": "excel_sheet",
+                "name": "设备清单",
+                "range": "A1:B2",
+                "rows": [
+                    {
+                        "range": "A1:B1",
+                        "cells": [
+                            { "address": "A1", "text": "设备编码" },
+                            { "address": "B1", "text": "设备名称" }
+                        ]
+                    },
+                    {
+                        "range": "A2:B2",
+                        "cells": [
+                            { "address": "A2", "text": "EQ-001" },
+                            { "address": "B2", "text": "泵站" }
+                        ]
+                    }
+                ]
+            }
+        ]);
+
+        let index = build_document_index("book_001", &blocks);
+
+        assert_eq!(index.nodes.len(), 3);
+        assert_eq!(index.chunks.len(), 2);
+        assert_eq!(index.nodes[0].node_type, "excel_sheet");
+        assert_eq!(index.nodes[1].node_type, "excel_cell_range");
+        assert_eq!(index.chunks[0].chunk_type, "excel_range_content");
+        assert!(index.chunks[1].content.contains("A2: EQ-001"));
     }
 
     #[test]
