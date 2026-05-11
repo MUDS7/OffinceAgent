@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -86,18 +87,16 @@ pub(crate) struct QdrantUpsertResult {
 }
 
 pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("cannot resolve app data directory: {error}"))?;
-    std::fs::create_dir_all(&data_dir).map_err(|error| {
-        format!(
-            "cannot create app data directory {}: {error}",
-            data_dir.display()
-        )
-    })?;
+    let db_path = sqlite_db_path(app)?;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create SQLite database directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
 
-    let db_path = data_dir.join("office-agent.sqlite3");
     let connection = Connection::open(&db_path)
         .map_err(|error| format!("cannot open SQLite database {}: {error}", db_path.display()))?;
     migrate_sqlite(&connection)?;
@@ -105,6 +104,21 @@ pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
         connection: Mutex::new(connection),
     });
     Ok(())
+}
+
+fn sqlite_db_path(app: &tauri::App) -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("OFFICE_AGENT_SQLITE_PATH") {
+        if !path.trim().is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("cannot resolve app data directory: {error}"))?;
+
+    Ok(data_dir.join("office-agent.sqlite3"))
 }
 
 #[tauri::command]

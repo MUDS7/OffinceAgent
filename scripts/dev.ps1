@@ -9,4 +9,6 @@ if (Test-Path "services/document-service/.venv/Scripts/python.exe") {
   $env:PYTHONPATH = "$(Resolve-Path services/document-service/.packages);$env:PYTHONPATH"
 }
 
+& "$PSScriptRoot/start-storage.ps1"
+
 npm run tauri:dev

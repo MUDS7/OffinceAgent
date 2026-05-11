@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "start:storage": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-storage.ps1",
     "predev:frontend": "npm run restart:document-service",
     "dev:frontend": "vite --host 127.0.0.1",
     "dev:python": "python services/document-service/run.py",
