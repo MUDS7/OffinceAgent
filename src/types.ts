@@ -177,6 +177,27 @@ export type DocumentIndexResult = {
   text_bytes_indexed: number;
 };
 
+export type QdrantChunkVectorPoint = {
+  id?: string;
+  chunk_id: string;
+  vector: number[];
+  document_id: string;
+  document_name?: string;
+  chunk_type: string;
+  heading_path?: string | string[];
+  order_index: number;
+};
+
+export type QdrantChunkUpsertRequest = {
+  collection?: string;
+  points: QdrantChunkVectorPoint[];
+};
+
+export type QdrantUpsertResult = {
+  collection: string;
+  points_upserted: number;
+};
+
 export type DocxCommandName =
   | "replace_text"
   | "delete_text"

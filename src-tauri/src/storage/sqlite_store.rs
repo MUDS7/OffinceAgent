@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Manager, State};
 
-use super::{build_document_index, flatten_document_blocks, unix_timestamp_seconds, DocumentStore};
+use super::{
+    document_index::{build_document_index, flatten_document_blocks},
+    unix_timestamp_seconds, DocumentStore,
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DocumentIndexRequest {
@@ -571,4 +574,40 @@ pub(super) fn build_safe_fts_query(query: &str) -> Option<String> {
     }
 
     Some(terms.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_quoted_fts_query() {
+        assert_eq!(
+            build_safe_fts_query("alpha beta"),
+            Some("\"alpha\" \"beta\"".to_string())
+        );
+    }
+
+    #[test]
+    fn migrates_sqlite_schema_with_fts() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+
+        connection
+            .execute(
+                "INSERT INTO document_fts (document_id, block_id, filename, path, text)
+                 VALUES ('doc', 'block', 'demo.docx', NULL, 'alpha beta gamma')",
+                [],
+            )
+            .expect("FTS row should insert");
+
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM document_fts WHERE document_fts MATCH ?1",
+                params![build_safe_fts_query("alpha").unwrap()],
+                |row| row.get(0),
+            )
+            .expect("FTS query should run");
+        assert_eq!(count, 1);
+    }
 }

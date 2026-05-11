@@ -36,6 +36,7 @@ fn main() {
             storage::search_document_full_text,
             storage::get_qdrant_status,
             storage::ensure_qdrant_collection,
+            storage::upsert_qdrant_chunk_vectors,
             storage::upsert_qdrant_vectors,
             storage::search_qdrant_vectors,
             // DeepSeek 聊天、文本编辑和意图识别能力。

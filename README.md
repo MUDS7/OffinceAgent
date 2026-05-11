@@ -26,7 +26,7 @@ DEEPSEEK_API_KEY=你的 DeepSeek API Key
 
 ```env
 OFFICE_AGENT_QDRANT_PATH=.data/qdrant
-OFFICE_AGENT_QDRANT_COLLECTION=officeagent_documents
+OFFICE_AGENT_QDRANT_COLLECTION=office_agent_chunks
 ```
 
 ## 首次安装
