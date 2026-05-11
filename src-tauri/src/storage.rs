@@ -1,20 +1,22 @@
 use std::{
+    cmp::Ordering,
     path::PathBuf,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::{header, Client};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{Manager, State};
 
-const DEFAULT_QDRANT_URL: &str = "http://127.0.0.1:6333";
 const DEFAULT_QDRANT_COLLECTION: &str = "officeagent_documents";
+const DEFAULT_QDRANT_DB_NAME: &str = "office-agent-qdrant.sqlite3";
 
 pub(crate) struct DocumentStore {
     connection: Mutex<Connection>,
+    qdrant_connection: Mutex<Connection>,
+    qdrant_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +80,7 @@ pub(crate) struct QdrantStatus {
     url: String,
     collection: String,
     reachable: bool,
+    path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,8 +103,28 @@ pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
     let connection = Connection::open(&db_path)
         .map_err(|error| format!("cannot open SQLite database {}: {error}", db_path.display()))?;
     migrate_sqlite(&connection)?;
+
+    let qdrant_path = qdrant_db_path(app)?;
+    if let Some(parent) = qdrant_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create embedded Qdrant directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let qdrant_connection = Connection::open(&qdrant_path).map_err(|error| {
+        format!(
+            "cannot open embedded Qdrant store {}: {error}",
+            qdrant_path.display()
+        )
+    })?;
+    migrate_qdrant(&qdrant_connection)?;
+
     app.manage(DocumentStore {
         connection: Mutex::new(connection),
+        qdrant_connection: Mutex::new(qdrant_connection),
+        qdrant_path,
     });
     Ok(())
 }
@@ -119,6 +142,26 @@ fn sqlite_db_path(app: &tauri::App) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot resolve app data directory: {error}"))?;
 
     Ok(data_dir.join("office-agent.sqlite3"))
+}
+
+fn qdrant_db_path(app: &tauri::App) -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("OFFICE_AGENT_QDRANT_PATH") {
+        if !path.trim().is_empty() {
+            let path = PathBuf::from(path);
+            return if path.extension().is_some() {
+                Ok(path)
+            } else {
+                Ok(path.join(DEFAULT_QDRANT_DB_NAME))
+            };
+        }
+    }
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("cannot resolve app data directory: {error}"))?;
+
+    Ok(data_dir.join("qdrant").join(DEFAULT_QDRANT_DB_NAME))
 }
 
 #[tauri::command]
@@ -274,98 +317,110 @@ pub(crate) fn search_document_full_text(
 }
 
 #[tauri::command]
-pub(crate) async fn get_qdrant_status() -> Result<QdrantStatus, String> {
-    let config = QdrantConfig::from_env(None);
-    let client = qdrant_http_client()?;
-    let response = qdrant_request(client.get(format!("{}/collections", config.url)), &config)
-        .send()
-        .await;
-
+pub(crate) async fn get_qdrant_status(
+    state: State<'_, DocumentStore>,
+) -> Result<QdrantStatus, String> {
+    let config = QdrantConfig::from_store(&state, None);
     Ok(QdrantStatus {
-        url: config.url,
+        url: config.local_url(),
         collection: config.collection,
-        reachable: response
-            .map(|value| value.status().is_success())
-            .unwrap_or(false),
+        reachable: true,
+        path: config.path.display().to_string(),
     })
 }
 
 #[tauri::command]
 pub(crate) async fn ensure_qdrant_collection(
+    state: State<'_, DocumentStore>,
     request: QdrantCollectionRequest,
 ) -> Result<QdrantStatus, String> {
-    let config = QdrantConfig::from_env(request.collection);
-    let client = qdrant_http_client()?;
+    let config = QdrantConfig::from_store(&state, request.collection);
     let distance = request.distance.unwrap_or_else(|| "Cosine".to_string());
-    let response = qdrant_request(
-        client.put(format!("{}/collections/{}", config.url, config.collection)),
-        &config,
-    )
-    .json(&json!({
-        "vectors": {
-            "size": request.vector_size,
-            "distance": distance,
-        },
-    }))
-    .send()
-    .await
-    .map_err(|error| format!("cannot connect to Qdrant: {error}"))?;
-
-    if !response.status().is_success() {
-        return Err(format_qdrant_error(response, "cannot create Qdrant collection").await);
-    }
+    let connection = state
+        .qdrant_connection
+        .lock()
+        .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
+    upsert_qdrant_collection(
+        &connection,
+        &config.collection,
+        request.vector_size,
+        &distance,
+    )?;
 
     Ok(QdrantStatus {
-        url: config.url,
+        url: config.local_url(),
         collection: config.collection,
         reachable: true,
+        path: config.path.display().to_string(),
     })
 }
 
 #[tauri::command]
 pub(crate) async fn upsert_qdrant_vectors(
+    state: State<'_, DocumentStore>,
     request: QdrantUpsertRequest,
 ) -> Result<QdrantUpsertResult, String> {
-    let config = QdrantConfig::from_env(request.collection);
+    let config = QdrantConfig::from_store(&state, request.collection);
     let point_count = request.points.len();
-    let points = request
-        .points
-        .into_iter()
-        .map(|point| {
-            let mut payload = match point.payload {
-                Some(Value::Object(map)) => map,
-                Some(value) => {
-                    let mut map = Map::new();
-                    map.insert("value".to_string(), value);
-                    map
-                }
-                None => Map::new(),
-            };
-            payload.insert("external_id".to_string(), Value::String(point.id.clone()));
-            json!({
-                "id": stable_point_id(&point.id),
-                "vector": point.vector,
-                "payload": payload,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut connection = state
+        .qdrant_connection
+        .lock()
+        .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
 
-    let client = qdrant_http_client()?;
-    let response = qdrant_request(
-        client.put(format!(
-            "{}/collections/{}/points?wait=true",
-            config.url, config.collection
-        )),
-        &config,
-    )
-    .json(&json!({ "points": points }))
-    .send()
-    .await
-    .map_err(|error| format!("cannot connect to Qdrant: {error}"))?;
+    let collection = get_or_create_collection(&connection, &config.collection, &request.points)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("cannot start embedded Qdrant transaction: {error}"))?;
 
-    if !response.status().is_success() {
-        return Err(format_qdrant_error(response, "cannot upsert Qdrant vectors").await);
+    for point in request.points {
+        if point.vector.len() as u64 != collection.vector_size {
+            return Err(format!(
+                "cannot upsert Qdrant vector {}: expected dimension {}, got {}",
+                point.id,
+                collection.vector_size,
+                point.vector.len()
+            ));
+        }
+
+        let mut payload = match point.payload {
+            Some(Value::Object(map)) => map,
+            Some(value) => {
+                let mut map = Map::new();
+                map.insert("value".to_string(), value);
+                map
+            }
+            None => Map::new(),
+        };
+        payload.insert("external_id".to_string(), Value::String(point.id.clone()));
+        let point_id = stable_point_id(&point.id).to_string();
+        let vector_json = serde_json::to_string(&point.vector)
+            .map_err(|error| format!("cannot serialize Qdrant vector {}: {error}", point.id))?;
+        let payload_json = Value::Object(payload).to_string();
+
+        transaction
+            .execute(
+                "INSERT INTO qdrant_points (
+                    collection, point_id, external_id, vector_json, payload_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(collection, point_id) DO UPDATE SET
+                    external_id = excluded.external_id,
+                    vector_json = excluded.vector_json,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    &config.collection,
+                    &point_id,
+                    &point.id,
+                    &vector_json,
+                    &payload_json,
+                    unix_timestamp_seconds(),
+                ],
+            )
+            .map_err(|error| format!("cannot upsert embedded Qdrant point: {error}"))?;
     }
+    transaction
+        .commit()
+        .map_err(|error| format!("cannot commit embedded Qdrant vectors: {error}"))?;
 
     Ok(QdrantUpsertResult {
         collection: config.collection,
@@ -374,38 +429,90 @@ pub(crate) async fn upsert_qdrant_vectors(
 }
 
 #[tauri::command]
-pub(crate) async fn search_qdrant_vectors(request: QdrantSearchRequest) -> Result<Value, String> {
-    let config = QdrantConfig::from_env(request.collection);
-    let mut body = json!({
-        "vector": request.vector,
-        "limit": request.limit.unwrap_or(10).min(100),
-        "with_payload": true,
-    });
-    if let Some(filter) = request.filter {
-        body["filter"] = filter;
+pub(crate) async fn search_qdrant_vectors(
+    state: State<'_, DocumentStore>,
+    request: QdrantSearchRequest,
+) -> Result<Value, String> {
+    let config = QdrantConfig::from_store(&state, request.collection);
+    let connection = state
+        .qdrant_connection
+        .lock()
+        .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
+    let collection = get_qdrant_collection(&connection, &config.collection)?
+        .ok_or_else(|| format!("Qdrant collection {} does not exist", config.collection))?;
+    if request.vector.len() as u64 != collection.vector_size {
+        return Err(format!(
+            "cannot search Qdrant collection {}: expected dimension {}, got {}",
+            config.collection,
+            collection.vector_size,
+            request.vector.len()
+        ));
     }
 
-    let client = qdrant_http_client()?;
-    let response = qdrant_request(
-        client.post(format!(
-            "{}/collections/{}/points/search",
-            config.url, config.collection
-        )),
-        &config,
-    )
-    .json(&body)
-    .send()
-    .await
-    .map_err(|error| format!("cannot connect to Qdrant: {error}"))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT point_id, external_id, vector_json, payload_json
+             FROM qdrant_points
+             WHERE collection = ?1",
+        )
+        .map_err(|error| format!("cannot prepare embedded Qdrant search: {error}"))?;
+    let rows = statement
+        .query_map(params![config.collection], |row| {
+            Ok(QdrantStoredPoint {
+                point_id: row.get(0)?,
+                external_id: row.get(1)?,
+                vector_json: row.get(2)?,
+                payload_json: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("cannot scan embedded Qdrant points: {error}"))?;
 
-    if !response.status().is_success() {
-        return Err(format_qdrant_error(response, "cannot search Qdrant vectors").await);
+    let mut hits = Vec::new();
+    for row in rows {
+        let point = row.map_err(|error| format!("cannot read embedded Qdrant point: {error}"))?;
+        let vector = serde_json::from_str::<Vec<f32>>(&point.vector_json)
+            .map_err(|error| format!("cannot parse embedded Qdrant vector: {error}"))?;
+        let payload = serde_json::from_str::<Value>(&point.payload_json)
+            .map_err(|error| format!("cannot parse embedded Qdrant payload: {error}"))?;
+        if let Some(filter) = &request.filter {
+            if !matches_qdrant_filter(&payload, filter, &point.point_id, &point.external_id) {
+                continue;
+            }
+        }
+
+        let score = score_vectors(&request.vector, &vector, &collection.distance);
+        hits.push(QdrantSearchHit {
+            point_id: point.point_id,
+            score,
+            payload,
+        });
     }
 
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("cannot parse Qdrant search response: {error}"))
+    sort_qdrant_hits(&mut hits, &collection.distance);
+    hits.truncate(request.limit.unwrap_or(10).min(100) as usize);
+
+    let result = hits
+        .into_iter()
+        .map(|hit| {
+            let id = hit
+                .point_id
+                .parse::<u64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| Value::String(hit.point_id));
+            json!({
+                "id": id,
+                "version": 0,
+                "score": hit.score,
+                "payload": hit.payload,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "result": result,
+        "status": "ok",
+        "time": 0.0,
+    }))
 }
 
 fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
@@ -452,6 +559,202 @@ fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
         )
         .map(|_| ())
         .map_err(|error| format!("cannot migrate SQLite document store: {error}"))
+}
+
+fn migrate_qdrant(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE IF NOT EXISTS qdrant_collections (
+                name TEXT PRIMARY KEY,
+                vector_size INTEGER NOT NULL,
+                distance TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS qdrant_points (
+                collection TEXT NOT NULL,
+                point_id TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                vector_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (collection, point_id),
+                FOREIGN KEY (collection) REFERENCES qdrant_collections(name) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_qdrant_points_collection
+                ON qdrant_points(collection);
+            ",
+        )
+        .map(|_| ())
+        .map_err(|error| format!("cannot migrate embedded Qdrant store: {error}"))
+}
+
+#[derive(Clone)]
+struct QdrantCollection {
+    vector_size: u64,
+    distance: String,
+}
+
+struct QdrantStoredPoint {
+    point_id: String,
+    external_id: String,
+    vector_json: String,
+    payload_json: String,
+}
+
+struct QdrantSearchHit {
+    point_id: String,
+    score: f64,
+    payload: Value,
+}
+
+fn upsert_qdrant_collection(
+    connection: &Connection,
+    collection: &str,
+    vector_size: u64,
+    distance: &str,
+) -> Result<(), String> {
+    let now = unix_timestamp_seconds();
+    connection
+        .execute(
+            "INSERT INTO qdrant_collections (name, vector_size, distance, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(name) DO UPDATE SET
+                vector_size = excluded.vector_size,
+                distance = excluded.distance,
+                updated_at = excluded.updated_at",
+            params![
+                collection,
+                vector_size as i64,
+                normalize_distance(distance),
+                now
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("cannot create embedded Qdrant collection: {error}"))
+}
+
+fn get_or_create_collection(
+    connection: &Connection,
+    collection: &str,
+    points: &[QdrantVectorPoint],
+) -> Result<QdrantCollection, String> {
+    if let Some(collection) = get_qdrant_collection(connection, collection)? {
+        return Ok(collection);
+    }
+
+    let vector_size = points
+        .first()
+        .map(|point| point.vector.len() as u64)
+        .unwrap_or(0);
+    upsert_qdrant_collection(connection, collection, vector_size, "Cosine")?;
+    Ok(QdrantCollection {
+        vector_size,
+        distance: "Cosine".to_string(),
+    })
+}
+
+fn get_qdrant_collection(
+    connection: &Connection,
+    collection: &str,
+) -> Result<Option<QdrantCollection>, String> {
+    let mut statement = connection
+        .prepare("SELECT vector_size, distance FROM qdrant_collections WHERE name = ?1")
+        .map_err(|error| format!("cannot prepare embedded Qdrant collection lookup: {error}"))?;
+    let mut rows = statement
+        .query(params![collection])
+        .map_err(|error| format!("cannot lookup embedded Qdrant collection: {error}"))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|error| format!("cannot read embedded Qdrant collection: {error}"))?
+    else {
+        return Ok(None);
+    };
+
+    let vector_size: i64 = row
+        .get(0)
+        .map_err(|error| format!("cannot read embedded Qdrant vector size: {error}"))?;
+    let distance: String = row
+        .get(1)
+        .map_err(|error| format!("cannot read embedded Qdrant distance: {error}"))?;
+    Ok(Some(QdrantCollection {
+        vector_size: vector_size.max(0) as u64,
+        distance,
+    }))
+}
+
+fn normalize_distance(distance: &str) -> String {
+    match distance.trim().to_ascii_lowercase().as_str() {
+        "dot" => "Dot".to_string(),
+        "euclid" | "euclidean" => "Euclid".to_string(),
+        "manhattan" => "Manhattan".to_string(),
+        _ => "Cosine".to_string(),
+    }
+}
+
+fn score_vectors(query: &[f32], candidate: &[f32], distance: &str) -> f64 {
+    match normalize_distance(distance).as_str() {
+        "Dot" => query
+            .iter()
+            .zip(candidate)
+            .map(|(left, right)| f64::from(*left) * f64::from(*right))
+            .sum(),
+        "Euclid" => query
+            .iter()
+            .zip(candidate)
+            .map(|(left, right)| {
+                let delta = f64::from(*left) - f64::from(*right);
+                delta * delta
+            })
+            .sum::<f64>()
+            .sqrt(),
+        "Manhattan" => query
+            .iter()
+            .zip(candidate)
+            .map(|(left, right)| (f64::from(*left) - f64::from(*right)).abs())
+            .sum(),
+        _ => cosine_similarity(query, candidate),
+    }
+}
+
+fn cosine_similarity(query: &[f32], candidate: &[f32]) -> f64 {
+    let mut dot = 0.0;
+    let mut query_norm = 0.0;
+    let mut candidate_norm = 0.0;
+    for (left, right) in query.iter().zip(candidate) {
+        let left = f64::from(*left);
+        let right = f64::from(*right);
+        dot += left * right;
+        query_norm += left * left;
+        candidate_norm += right * right;
+    }
+
+    if query_norm == 0.0 || candidate_norm == 0.0 {
+        0.0
+    } else {
+        dot / (query_norm.sqrt() * candidate_norm.sqrt())
+    }
+}
+
+fn sort_qdrant_hits(hits: &mut [QdrantSearchHit], distance: &str) {
+    let normalized = normalize_distance(distance);
+    hits.sort_by(|left, right| {
+        let ordering = left
+            .score
+            .partial_cmp(&right.score)
+            .unwrap_or(Ordering::Equal);
+        if normalized == "Euclid" || normalized == "Manhattan" {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
 }
 
 struct FlattenedBlock {
@@ -560,60 +863,205 @@ fn unix_timestamp_seconds() -> i64 {
 }
 
 struct QdrantConfig {
-    url: String,
+    path: PathBuf,
     collection: String,
-    api_key: Option<String>,
 }
 
 impl QdrantConfig {
-    fn from_env(collection: Option<String>) -> Self {
-        let url = std::env::var("OFFICE_AGENT_QDRANT_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_QDRANT_URL.to_string())
-            .trim_end_matches('/')
-            .to_string();
+    fn from_store(store: &DocumentStore, collection: Option<String>) -> Self {
         let collection = collection
             .or_else(|| std::env::var("OFFICE_AGENT_QDRANT_COLLECTION").ok())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_QDRANT_COLLECTION.to_string());
-        let api_key = std::env::var("OFFICE_AGENT_QDRANT_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
 
         Self {
-            url,
+            path: store.qdrant_path.clone(),
             collection,
-            api_key,
         }
     }
-}
 
-fn qdrant_http_client() -> Result<Client, String> {
-    Client::builder()
-        .build()
-        .map_err(|error| format!("cannot create Qdrant HTTP client: {error}"))
-}
-
-fn qdrant_request(
-    mut builder: reqwest::RequestBuilder,
-    config: &QdrantConfig,
-) -> reqwest::RequestBuilder {
-    if let Some(api_key) = &config.api_key {
-        builder = builder.header("api-key", api_key);
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {api_key}"));
+    fn local_url(&self) -> String {
+        format!("embedded://{}", self.path.display())
     }
-    builder
 }
 
-async fn format_qdrant_error(response: reqwest::Response, context: &str) -> String {
-    let status = response.status();
-    let detail = response.text().await.unwrap_or_default();
-    if detail.trim().is_empty() {
-        format!("{context}: Qdrant returned {status}")
-    } else {
-        format!("{context}: Qdrant returned {status}: {}", detail.trim())
+fn matches_qdrant_filter(
+    payload: &Value,
+    filter: &Value,
+    point_id: &str,
+    external_id: &str,
+) -> bool {
+    let Some(filter) = filter.as_object() else {
+        return true;
+    };
+
+    if let Some(must) = filter.get("must") {
+        if !filter_conditions(must)
+            .iter()
+            .all(|condition| matches_qdrant_condition(payload, condition, point_id, external_id))
+        {
+            return false;
+        }
     }
+    if let Some(should) = filter.get("should") {
+        let conditions = filter_conditions(should);
+        if !conditions.is_empty()
+            && !conditions.iter().any(|condition| {
+                matches_qdrant_condition(payload, condition, point_id, external_id)
+            })
+        {
+            return false;
+        }
+    }
+    if let Some(must_not) = filter.get("must_not") {
+        if filter_conditions(must_not)
+            .iter()
+            .any(|condition| matches_qdrant_condition(payload, condition, point_id, external_id))
+        {
+            return false;
+        }
+    }
+
+    if filter.contains_key("key") || filter.contains_key("has_id") {
+        return matches_qdrant_condition(
+            payload,
+            &Value::Object(filter.clone()),
+            point_id,
+            external_id,
+        );
+    }
+
+    true
+}
+
+fn filter_conditions(value: &Value) -> Vec<&Value> {
+    value
+        .as_array()
+        .map(|items| items.iter().collect())
+        .unwrap_or_else(|| vec![value])
+}
+
+fn matches_qdrant_condition(
+    payload: &Value,
+    condition: &Value,
+    point_id: &str,
+    external_id: &str,
+) -> bool {
+    let Some(condition) = condition.as_object() else {
+        return true;
+    };
+
+    if condition.contains_key("must")
+        || condition.contains_key("should")
+        || condition.contains_key("must_not")
+    {
+        return matches_qdrant_filter(
+            payload,
+            &Value::Object(condition.clone()),
+            point_id,
+            external_id,
+        );
+    }
+
+    if let Some(has_id) = condition.get("has_id") {
+        return filter_conditions(has_id)
+            .iter()
+            .any(|id| id_matches(id, point_id) || id_matches(id, external_id));
+    }
+
+    let Some(key) = condition.get("key").and_then(Value::as_str) else {
+        return true;
+    };
+    let Some(value) = payload_value(payload, key) else {
+        return false;
+    };
+
+    if let Some(match_value) = condition.get("match") {
+        return matches_qdrant_match(value, match_value);
+    }
+    if let Some(range) = condition.get("range") {
+        return matches_qdrant_range(value, range);
+    }
+    true
+}
+
+fn id_matches(expected: &Value, id: &str) -> bool {
+    match expected {
+        Value::String(value) => value == id,
+        Value::Number(value) => value.to_string() == id,
+        _ => false,
+    }
+}
+
+fn payload_value<'a>(payload: &'a Value, key: &str) -> Option<&'a Value> {
+    let mut current = payload;
+    for part in key.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+fn matches_qdrant_match(value: &Value, expected: &Value) -> bool {
+    let Some(expected) = expected.as_object() else {
+        return values_equal(value, expected);
+    };
+    if let Some(single) = expected.get("value") {
+        return values_equal(value, single);
+    }
+    if let Some(text) = expected.get("text").and_then(Value::as_str) {
+        return value
+            .as_str()
+            .map(|actual| actual.contains(text))
+            .unwrap_or(false);
+    }
+    if let Some(any) = expected.get("any").and_then(Value::as_array) {
+        return any.iter().any(|candidate| values_equal(value, candidate));
+    }
+    if let Some(except) = expected.get("except").and_then(Value::as_array) {
+        return !except
+            .iter()
+            .any(|candidate| values_equal(value, candidate));
+    }
+    true
+}
+
+fn matches_qdrant_range(value: &Value, range: &Value) -> bool {
+    let Some(actual) = value.as_f64() else {
+        return false;
+    };
+    let Some(range) = range.as_object() else {
+        return true;
+    };
+    if let Some(gt) = range.get("gt").and_then(Value::as_f64) {
+        if actual <= gt {
+            return false;
+        }
+    }
+    if let Some(gte) = range.get("gte").and_then(Value::as_f64) {
+        if actual < gte {
+            return false;
+        }
+    }
+    if let Some(lt) = range.get("lt").and_then(Value::as_f64) {
+        if actual >= lt {
+            return false;
+        }
+    }
+    if let Some(lte) = range.get("lte").and_then(Value::as_f64) {
+        if actual > lte {
+            return false;
+        }
+    }
+    true
+}
+
+fn values_equal(actual: &Value, expected: &Value) -> bool {
+    actual == expected
+        || actual
+            .as_str()
+            .zip(expected.as_str())
+            .map(|(left, right)| left.eq_ignore_ascii_case(right))
+            .unwrap_or(false)
 }
 
 fn stable_point_id(value: &str) -> u64 {
@@ -670,5 +1118,44 @@ mod tests {
             )
             .expect("FTS query should run");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn embedded_qdrant_sorts_cosine_hits() {
+        let mut hits = vec![
+            QdrantSearchHit {
+                point_id: "1".to_string(),
+                score: score_vectors(&[1.0, 0.0], &[0.0, 1.0], "Cosine"),
+                payload: json!({}),
+            },
+            QdrantSearchHit {
+                point_id: "2".to_string(),
+                score: score_vectors(&[1.0, 0.0], &[1.0, 0.0], "Cosine"),
+                payload: json!({}),
+            },
+        ];
+
+        sort_qdrant_hits(&mut hits, "Cosine");
+
+        assert_eq!(hits[0].point_id, "2");
+        assert!((hits[0].score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn embedded_qdrant_matches_basic_payload_filter() {
+        let payload = json!({
+            "document_id": "doc-1",
+            "page": 3,
+            "nested": { "kind": "paragraph" }
+        });
+        let filter = json!({
+            "must": [
+                { "key": "document_id", "match": { "value": "doc-1" } },
+                { "key": "page", "range": { "gte": 2, "lte": 4 } },
+                { "key": "nested.kind", "match": { "value": "paragraph" } }
+            ]
+        });
+
+        assert!(matches_qdrant_filter(&payload, &filter, "42", "block-1"));
     }
 }
