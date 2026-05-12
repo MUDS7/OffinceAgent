@@ -1,4 +1,5 @@
 mod docx;
+mod pdf;
 mod xlsx;
 
 use serde_json::Value;
@@ -51,6 +52,11 @@ pub(super) fn build_document_index(
     };
 
     let mut index = BuiltDocumentIndex::default();
+
+    if pdf::is_pdf_document(filename, blocks) {
+        return pdf::build_pdf_index(document_id, filename, blocks);
+    }
+
     let mut docx_indexer = docx::DocxBlockIndexer::default();
 
     for (order_index, block) in blocks.iter().enumerate() {
@@ -229,5 +235,37 @@ mod tests {
         assert_eq!(metadata["row_end"], 11);
         assert_eq!(metadata["headers"][1], "设备编号_2");
         assert_eq!(metadata["rows"][1]["cells"]["系统"], "系统一");
+    }
+
+    #[test]
+    fn builds_pdf_page_nodes_and_paragraph_chunks() {
+        let blocks = json!([
+            {
+                "id": "page-1",
+                "type": "pdf_page",
+                "page_number": 1,
+                "text": "First paragraph.\n\nSecond paragraph.",
+                "paragraphs": ["First paragraph.", "Second paragraph."]
+            },
+            {
+                "id": "page-2",
+                "type": "pdf_page",
+                "page_number": 2,
+                "text": "Third paragraph."
+            }
+        ]);
+
+        let index = build_document_index("pdf_001", "manual.pdf", &blocks);
+
+        assert_eq!(index.nodes.len(), 5);
+        assert_eq!(index.nodes[0].node_type, "pdf_page");
+        assert_eq!(index.nodes[1].node_type, "pdf_paragraph");
+        assert_eq!(index.chunks.len(), 3);
+        assert_eq!(index.chunks[0].chunk_type, "pdf_paragraph");
+        assert_eq!(index.chunks[0].title_path, "Page 1");
+        assert_eq!(index.chunks[0].paragraph_start_index, Some(1));
+        assert_eq!(index.chunks[1].paragraph_start_index, Some(2));
+        assert!(index.chunks[2].plain_text.contains("Page: 2"));
+        assert!(index.chunks[2].plain_text.contains("Third paragraph."));
     }
 }

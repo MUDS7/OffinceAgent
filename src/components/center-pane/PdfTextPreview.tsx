@@ -1,8 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, XCircle } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type MutableRefObject, useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type { PDFPageProxy, RenderTask } from "pdfjs-dist";
+import type { DocumentIndexRequest, DocumentIndexResult, PdfPageBlock } from "../../types";
+import { normalizeFilePath } from "../../utils/fileUtils";
 import { createPdfTextSelectionGuard, publishPdfSelection } from "./pdfSelection";
 import type { DocumentSelectionContext, PreviewFile } from "./types";
 
@@ -18,6 +21,7 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
   const pagesRef = useRef<HTMLDivElement | null>(null);
   const selectionOverlayRef = useRef<HTMLDivElement | null>(null);
   const lastPublishedSelectionRef = useRef("");
+  const lastIndexSignatureRef = useRef("");
   const [pdfState, setPdfState] = useState({
     isLoading: true,
     error: "",
@@ -39,6 +43,7 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
     targetPagesElement.replaceChildren();
     selectionOverlayRef.current?.replaceChildren();
     lastPublishedSelectionRef.current = "";
+    lastIndexSignatureRef.current = "";
     onSelectionContextChange(null);
     setPdfState({ isLoading: true, error: "" });
 
@@ -53,6 +58,7 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
           useSystemFonts: true,
         });
         const pdfDocument = await loadingTask.promise;
+        const indexBlocks: PdfPageBlock[] = [];
 
         for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
           if (isCancelled) return;
@@ -96,6 +102,15 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
           renderTasks.push(renderTask);
 
           const textContent = await page.getTextContent();
+          const textSnapshot = buildPdfTextSnapshot(textContent.items);
+          indexBlocks.push({
+            id: `page-${pageNumber}`,
+            type: "pdf_page",
+            page_number: pageNumber,
+            text: textSnapshot.text,
+            paragraphs: textSnapshot.paragraphs,
+          });
+
           const textLayer = new pdfjsLib.TextLayer({
             container: textLayerElement,
             textContentSource: textContent,
@@ -109,6 +124,9 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
 
         if (!isCancelled) {
           setPdfState({ isLoading: false, error: "" });
+          void indexPdfStructure(activeFile, indexBlocks, lastIndexSignatureRef).catch((error) => {
+            console.warn("Failed to index PDF structure:", error);
+          });
         }
       } catch (error) {
         if (isCancelled || isPdfRenderCancelled(error)) return;
@@ -131,7 +149,7 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
       targetPagesElement.replaceChildren();
       selectionOverlayRef.current?.replaceChildren();
     };
-  }, [file, id, onSelectionContextChange]);
+  }, [activeFile.diskPath, file, filename, id, onSelectionContextChange]);
 
   useEffect(() => {
     function handleSelectionChange() {
@@ -223,4 +241,153 @@ function getScaledViewport(page: PDFPageProxy, container: HTMLElement) {
 
 function isPdfRenderCancelled(error: unknown) {
   return error instanceof Error && error.name === "RenderingCancelledException";
+}
+
+type PdfTextItemLike = {
+  str?: string;
+  transform?: unknown;
+  hasEOL?: boolean;
+};
+
+type PdfLine = {
+  text: string;
+  y: number | null;
+};
+
+function buildPdfTextSnapshot(items: unknown[]) {
+  const lines = buildPdfLines(items);
+  const paragraphs = buildPdfParagraphs(lines);
+  const text = paragraphs.join("\n\n");
+
+  return { text, paragraphs };
+}
+
+function buildPdfLines(items: unknown[]): PdfLine[] {
+  const lines: PdfLine[] = [];
+  let currentText = "";
+  let currentY: number | null = null;
+
+  for (const item of items) {
+    const textItem = item as PdfTextItemLike;
+    const rawText = typeof textItem.str === "string" ? textItem.str : "";
+    const text = rawText.trim();
+    const y = getPdfItemY(textItem);
+    const isNewLine = currentText && y !== null && currentY !== null && Math.abs(y - currentY) > 3;
+
+    if (isNewLine) {
+      pushPdfLine(lines, currentText, currentY);
+      currentText = "";
+    }
+
+    if (text) {
+      currentText = appendPdfInlineText(currentText, text);
+      currentY = y ?? currentY;
+    }
+
+    if (textItem.hasEOL) {
+      pushPdfLine(lines, currentText, currentY);
+      currentText = "";
+      currentY = null;
+    } else if (currentY === null) {
+      currentY = y;
+    }
+  }
+
+  pushPdfLine(lines, currentText, currentY);
+  return lines;
+}
+
+function buildPdfParagraphs(lines: PdfLine[]) {
+  const nonEmptyLines = lines.filter((line) => line.text.trim());
+  if (!nonEmptyLines.length) return [];
+
+  const gaps = nonEmptyLines
+    .slice(1)
+    .map((line, index) => {
+      const previousY = nonEmptyLines[index].y;
+      if (previousY === null || line.y === null) return null;
+      return Math.abs(previousY - line.y);
+    })
+    .filter((gap): gap is number => gap !== null && gap > 0.5)
+    .sort((a, b) => a - b);
+  const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
+  const paragraphGap = medianGap ? Math.max(12, medianGap * 1.75) : null;
+  const paragraphs: string[] = [];
+  let current = nonEmptyLines[0].text;
+
+  for (let index = 1; index < nonEmptyLines.length; index += 1) {
+    const previous = nonEmptyLines[index - 1];
+    const line = nonEmptyLines[index];
+    const gap =
+      previous.y === null || line.y === null ? null : Math.abs(previous.y - line.y);
+    const startsNewParagraph = paragraphGap !== null && gap !== null && gap > paragraphGap;
+
+    if (startsNewParagraph) {
+      paragraphs.push(normalizePdfText(current));
+      current = line.text;
+    } else {
+      current = appendPdfInlineText(current, line.text);
+    }
+  }
+
+  paragraphs.push(normalizePdfText(current));
+  return paragraphs.filter(Boolean);
+}
+
+function pushPdfLine(lines: PdfLine[], text: string, y: number | null) {
+  const normalized = normalizePdfText(text);
+  if (normalized) {
+    lines.push({ text: normalized, y });
+  }
+}
+
+function appendPdfInlineText(current: string, next: string) {
+  if (!current) return next;
+  if (/[\s([{（《“‘]$/.test(current) || /^[,.;:!?，。；：！？、)\]}）】》”’]/.test(next)) {
+    return `${current}${next}`;
+  }
+  return `${current} ${next}`;
+}
+
+function normalizePdfText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function getPdfItemY(item: PdfTextItemLike) {
+  if (!Array.isArray(item.transform)) return null;
+  const y = item.transform[5];
+  return typeof y === "number" && Number.isFinite(y) ? y : null;
+}
+
+async function indexPdfStructure(
+  activeFile: PreviewFile,
+  blocks: PdfPageBlock[],
+  lastIndexSignatureRef: MutableRefObject<string>,
+) {
+  const searchableBlocks = blocks.filter((block) => block.text.trim() || block.paragraphs.some((paragraph) => paragraph.trim()));
+  if (!searchableBlocks.length) return;
+
+  const signature = JSON.stringify(searchableBlocks);
+  if (signature === lastIndexSignatureRef.current) return;
+
+  const request: DocumentIndexRequest = {
+    document_id: getDocumentIndexId(activeFile),
+    filename: activeFile.filename,
+    path: activeFile.diskPath,
+    original_path: activeFile.diskPath,
+    stored_path: activeFile.diskPath,
+    extension: "pdf",
+    file_type: "pdf",
+    size_bytes: activeFile.file.size,
+    parse_status: "parsed",
+    index_status: "indexed",
+    blocks: searchableBlocks,
+  };
+
+  await invoke<DocumentIndexResult>("index_document_structure", { request });
+  lastIndexSignatureRef.current = signature;
+}
+
+function getDocumentIndexId(activeFile: PreviewFile) {
+  return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
 }

@@ -167,6 +167,14 @@ export type DocxImageBlock = {
 
 export type DocxBlock = DocxParagraphBlock | DocxTableBlock | DocxImageBlock;
 
+export type PdfPageBlock = {
+  id: string;
+  type: "pdf_page";
+  page_number: number;
+  text: string;
+  paragraphs: string[];
+};
+
 export type DocxParseResponse = {
   filename: string;
   blocks: DocxBlock[];
