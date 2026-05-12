@@ -3,6 +3,7 @@ import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { DOCUMENT_SERVICE_URL } from "../../constants";
 import { fetchDocumentService } from "../../utils/documentService";
+import { normalizeFilePath } from "../../utils/fileUtils";
 import type {
   DocxBlock,
   DocxImageBlock,
@@ -554,7 +555,7 @@ export function DocxPreview({
 
   async function indexDocxStructure(blocks: DocxBlock[]) {
     const request: DocumentIndexRequest = {
-      document_id: activeFile.diskPath ?? activeFile.id,
+      document_id: getDocumentIndexId(activeFile),
       filename: activeFile.filename,
       path: activeFile.diskPath,
       original_path: activeFile.diskPath,
@@ -569,6 +570,10 @@ export function DocxPreview({
 
     await invoke<DocumentIndexResult>("index_document_structure", { request });
   }
+}
+
+function getDocumentIndexId(activeFile: PreviewFile) {
+  return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
 }
 
 function getTextOffsetWithinElement(element: HTMLElement, container: Node, offset: number) {

@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
 import type { DocumentIndexRequest, DocumentIndexResult } from "../../types";
+import { normalizeFilePath } from "../../utils/fileUtils";
 import type { DocumentSelectionContext, PreviewFile } from "./types";
 
 type SpreadsheetPreviewProps = {
@@ -179,7 +180,7 @@ export function SpreadsheetPreview({
     if (!signature || signature === lastIndexSignatureRef.current) return;
 
     const request: DocumentIndexRequest = {
-      document_id: activeFile.diskPath ?? activeFile.id,
+      document_id: getDocumentIndexId(activeFile),
       filename: activeFile.filename,
       path: activeFile.diskPath,
       original_path: activeFile.diskPath,
@@ -962,6 +963,10 @@ export function SpreadsheetPreview({
       }));
     });
   }
+}
+
+function getDocumentIndexId(activeFile: PreviewFile) {
+  return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
 }
 
 function buildSheetPreview(

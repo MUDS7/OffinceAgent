@@ -192,6 +192,7 @@ export type DocumentIndexRequest = {
 export type DocumentIndexResult = {
   document_id: string;
   nodes_indexed: number;
+  chunks_indexed: number;
   text_bytes_indexed: number;
 };
 

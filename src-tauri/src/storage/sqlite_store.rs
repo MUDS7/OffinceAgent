@@ -30,6 +30,7 @@ pub(crate) struct DocumentIndexRequest {
 pub(crate) struct DocumentIndexResult {
     document_id: String,
     nodes_indexed: usize,
+    chunks_indexed: usize,
     text_bytes_indexed: usize,
 }
 
@@ -170,7 +171,14 @@ fn index_document_structure_with_connection(
         )
         .map_err(|error| format!("cannot clear old document nodes: {error}"))?;
 
-    let indexed = build_document_index(&request.document_id, &request.blocks);
+    transaction
+        .execute(
+            "DELETE FROM chunks WHERE document_id = ?1",
+            params![request.document_id],
+        )
+        .map_err(|error| format!("cannot clear old document chunks: {error}"))?;
+
+    let indexed = build_document_index(&request.document_id, &request.filename, &request.blocks);
     let mut text_bytes_indexed = 0usize;
     for node in &indexed.nodes {
         if let Some(text) = &node.text {
@@ -198,6 +206,43 @@ fn index_document_structure_with_connection(
             .map_err(|error| format!("cannot insert document node {}: {error}", node.id))?;
     }
 
+    for chunk in &indexed.chunks {
+        if !chunk.plain_text.trim().is_empty() {
+            text_bytes_indexed += chunk.plain_text.len();
+        }
+        transaction
+            .execute(
+                "INSERT INTO chunks (
+                    id, document_id, file_id, file_name, chunk_type,
+                    title_level_1, title_level_2, title_level_3, title_path,
+                    heading_level, content, plain_text, images_json, tables_json,
+                    paragraph_start_index, paragraph_end_index, order_index,
+                    metadata_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
+                params![
+                    chunk.id,
+                    request.document_id,
+                    request.filename,
+                    chunk.chunk_type,
+                    chunk.title_level_1,
+                    chunk.title_level_2,
+                    chunk.title_level_3,
+                    chunk.title_path,
+                    chunk.heading_level.map(i64::from),
+                    chunk.content,
+                    chunk.plain_text,
+                    chunk.images_json,
+                    chunk.tables_json,
+                    chunk.paragraph_start_index.map(|index| index as i64),
+                    chunk.paragraph_end_index.map(|index| index as i64),
+                    chunk.order_index as i64,
+                    chunk.metadata_json,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("cannot insert document chunk {}: {error}", chunk.id))?;
+    }
+
     transaction
         .commit()
         .map_err(|error| format!("cannot commit SQLite document index: {error}"))?;
@@ -205,6 +250,7 @@ fn index_document_structure_with_connection(
     Ok(DocumentIndexResult {
         document_id: request.document_id,
         nodes_indexed: indexed.nodes.len(),
+        chunks_indexed: indexed.chunks.len(),
         text_bytes_indexed,
     })
 }
@@ -526,7 +572,6 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
 
             DROP TABLE IF EXISTS chunk_assets;
             DROP TABLE IF EXISTS assets;
-            DROP TABLE IF EXISTS chunks;
             DROP TABLE IF EXISTS document_blocks;
             DROP TABLE IF EXISTS document_fts;
             DROP TABLE IF EXISTS chunk_fts;
@@ -571,6 +616,35 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
                 ON doc_nodes(document_id, order_index);
             CREATE INDEX IF NOT EXISTS idx_doc_nodes_parent
                 ON doc_nodes(document_id, parent_id);
+
+            CREATE TABLE IF NOT EXISTS chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                chunk_type TEXT NOT NULL,
+                title_level_1 TEXT,
+                title_level_2 TEXT,
+                title_level_3 TEXT,
+                title_path TEXT NOT NULL,
+                heading_level INTEGER,
+                content TEXT NOT NULL,
+                plain_text TEXT NOT NULL,
+                images_json TEXT NOT NULL,
+                tables_json TEXT NOT NULL,
+                paragraph_start_index INTEGER,
+                paragraph_end_index INTEGER,
+                order_index INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chunks_document
+                ON chunks(document_id, order_index);
+            CREATE INDEX IF NOT EXISTS idx_chunks_title_path
+                ON chunks(document_id, title_path);
             ",
         )
         .map_err(|error| format!("cannot migrate SQLite document store: {error}"))?;
@@ -585,6 +659,24 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
     add_column_if_missing(connection, "documents", "updated_at", "INTEGER")?;
     add_column_if_missing(connection, "documents", "relative_path", "TEXT")?;
     add_column_if_missing(connection, "documents", "modified_at", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "file_id", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "file_name", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "chunk_type", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "title_level_1", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "title_level_2", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "title_level_3", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "title_path", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "heading_level", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "content", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "plain_text", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "images_json", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "tables_json", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "paragraph_start_index", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "paragraph_end_index", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "order_index", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "metadata_json", "TEXT")?;
+    add_column_if_missing(connection, "chunks", "created_at", "INTEGER")?;
+    add_column_if_missing(connection, "chunks", "updated_at", "INTEGER")?;
     let now = unix_timestamp_seconds();
     connection
         .execute(
@@ -655,7 +747,7 @@ mod tests {
 
         assert_eq!(table_count("documents"), 1);
         assert_eq!(table_count("doc_nodes"), 1);
-        assert_eq!(table_count("chunks"), 0);
+        assert_eq!(table_count("chunks"), 1);
         assert_eq!(table_count("chunk_fts"), 0);
         assert_eq!(table_count("assets"), 0);
         assert_eq!(table_count("chunk_assets"), 0);
@@ -664,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn indexes_only_documents_and_doc_nodes_for_now() {
+    fn indexes_documents_nodes_and_docx_chunks() {
         let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
         migrate_sqlite(&connection).expect("schema should migrate");
 
@@ -706,9 +798,22 @@ mod tests {
         .expect("document structure should index");
 
         assert_eq!(result.nodes_indexed, 3);
-        assert_eq!(result.text_bytes_indexed, 23);
+        assert_eq!(result.chunks_indexed, 1);
         assert_eq!(table_count(&connection, "documents"), 1);
         assert_eq!(table_count(&connection, "doc_nodes"), 3);
+        assert_eq!(table_count(&connection, "chunks"), 1);
+
+        let row: (String, String, String) = connection
+            .query_row(
+                "SELECT title_path, content, plain_text FROM chunks WHERE document_id = ?1",
+                params!["doc_001"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("chunk row should exist");
+        assert_eq!(row.0, "Heading");
+        assert!(row.1.contains("Body text"));
+        assert!(row.1.contains("[IMAGE:image_001.png]"));
+        assert!(row.2.contains("标题路径：Heading"));
     }
 
     #[test]
