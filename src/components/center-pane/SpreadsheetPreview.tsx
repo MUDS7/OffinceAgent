@@ -47,7 +47,16 @@ type SpreadsheetIndexBlock = {
   type: "excel_sheet";
   name: string;
   range: string;
+  merges: {
+    range: string;
+    start_row: number;
+    end_row: number;
+    start_col: number;
+    end_col: number;
+    value: string;
+  }[];
   rows: {
+    row_index: number;
     range: string;
     cells: {
       address: string;
@@ -173,9 +182,17 @@ export function SpreadsheetPreview({
   }, [activeSheetIndex, onSelectionContextChange]);
 
   useEffect(() => {
-    if (previewState.isLoading || previewState.error || !previewState.sheets.length) return;
+    if (
+      previewState.isLoading ||
+      previewState.error ||
+      !previewState.sheets.length ||
+      !previewState.workbook ||
+      !previewState.xlsx
+    ) {
+      return;
+    }
 
-    const blocks = buildSpreadsheetIndexBlocks(previewState.sheets);
+    const blocks = buildSpreadsheetIndexBlocks(previewState.workbook, previewState.xlsx);
     const signature = JSON.stringify(blocks);
     if (!signature || signature === lastIndexSignatureRef.current) return;
 
@@ -207,7 +224,9 @@ export function SpreadsheetPreview({
     activeFile.id,
     previewState.error,
     previewState.isLoading,
+    previewState.workbook,
     previewState.sheets,
+    previewState.xlsx,
   ]);
 
   useEffect(() => {
@@ -1014,28 +1033,61 @@ function buildSheetPreview(
   };
 }
 
-function buildSpreadsheetIndexBlocks(sheets: SheetPreview[]): SpreadsheetIndexBlock[] {
-  return sheets.map((sheet, sheetIndex) => ({
-    id: `sheet-${sheetIndex}`,
-    type: "excel_sheet",
-    name: sheet.name,
-    range: sheet.rangeLabel,
-    rows: sheet.rows.map((row) => {
-      const nonEmptyCells = row
-        .filter((cell) => cell.value.trim())
-        .map((cell) => ({
-          address: cell.address,
-          text: cell.value,
-        }));
-      const firstAddress = row[0]?.address ?? "A1";
-      const lastAddress = row[row.length - 1]?.address ?? firstAddress;
+function buildSpreadsheetIndexBlocks(
+  workbook: XLSXModule.WorkBook,
+  xlsx: typeof XLSXModule,
+): SpreadsheetIndexBlock[] {
+  return workbook.SheetNames.map((sheetName, sheetIndex) => {
+    const worksheet = workbook.Sheets[sheetName];
+    const fallbackRange = xlsx.utils.decode_range("A1:A1");
+    const usedRange = worksheet?.["!ref"] ? xlsx.utils.decode_range(worksheet["!ref"]) : fallbackRange;
+    const rangeLabel = `${encodeCellAddress(usedRange.s.r, usedRange.s.c)}:${encodeCellAddress(usedRange.e.r, usedRange.e.c)}`;
+    const merges = (((worksheet?.["!merges"] ?? []) as XLSXModule.Range[]) || []).map((merge) => {
+      const topLeftAddress = encodeCellAddress(merge.s.r, merge.s.c);
+      const topLeftCell = worksheet?.[topLeftAddress] as XLSXModule.CellObject | undefined;
 
       return {
-        range: `${firstAddress}:${lastAddress}`,
-        cells: nonEmptyCells,
+        range: xlsx.utils.encode_range(merge),
+        start_row: merge.s.r + 1,
+        end_row: merge.e.r + 1,
+        start_col: merge.s.c,
+        end_col: merge.e.c,
+        value: topLeftCell ? xlsx.utils.format_cell(topLeftCell) : "",
       };
-    }),
-  }));
+    });
+
+    return {
+      id: `sheet-${sheetIndex}`,
+      type: "excel_sheet",
+      name: sheetName,
+      range: rangeLabel,
+      merges,
+      rows: Array.from({ length: usedRange.e.r - usedRange.s.r + 1 }, (_, rowOffset) => {
+        const row = usedRange.s.r + rowOffset;
+        const nonEmptyCells = Array.from({ length: usedRange.e.c - usedRange.s.c + 1 }, (_, colOffset) => {
+          const col = usedRange.s.c + colOffset;
+          const address = encodeCellAddress(row, col);
+          const cell = worksheet?.[address] as XLSXModule.CellObject | undefined;
+          const text = cell ? xlsx.utils.format_cell(cell) : "";
+
+          return text.trim()
+            ? {
+                address,
+                text,
+              }
+            : null;
+        }).filter((cell): cell is { address: string; text: string } => Boolean(cell));
+        const firstAddress = encodeCellAddress(row, usedRange.s.c);
+        const lastAddress = encodeCellAddress(row, usedRange.e.c);
+
+        return {
+          row_index: row + 1,
+          range: `${firstAddress}:${lastAddress}`,
+          cells: nonEmptyCells,
+        };
+      }),
+    };
+  });
 }
 
 function setWorksheetCellValue(
