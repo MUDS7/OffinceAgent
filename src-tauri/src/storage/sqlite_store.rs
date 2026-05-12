@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -26,21 +29,39 @@ pub(crate) struct DocumentIndexRequest {
 #[derive(Debug, Serialize)]
 pub(crate) struct DocumentIndexResult {
     document_id: String,
-    blocks_indexed: usize,
     nodes_indexed: usize,
-    chunks_indexed: usize,
-    assets_indexed: usize,
     text_bytes_indexed: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct FullTextSearchHit {
     document_id: String,
-    block_id: String,
     filename: String,
     path: Option<String>,
     text: String,
-    rank: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WorkspaceFileMetadataRequest {
+    document_id: String,
+    filename: String,
+    path: String,
+    relative_path: Option<String>,
+    extension: Option<String>,
+    file_type: Option<String>,
+    size_bytes: Option<u64>,
+    modified_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceFileMetadataResult {
+    document_id: String,
+    saved: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceFilesMetadataResult {
+    files_indexed: usize,
 }
 
 pub(super) fn sqlite_db_path(app: &tauri::App) -> Result<PathBuf, String> {
@@ -183,10 +204,7 @@ fn index_document_structure_with_connection(
 
     Ok(DocumentIndexResult {
         document_id: request.document_id,
-        blocks_indexed: 0,
         nodes_indexed: indexed.nodes.len(),
-        chunks_indexed: 0,
-        assets_indexed: 0,
         text_bytes_indexed,
     })
 }
@@ -196,34 +214,36 @@ pub(crate) fn search_document_full_text(
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<FullTextSearchHit>, String> {
-    let query = build_safe_fts_query(&query).ok_or_else(|| "search query is empty".to_string())?;
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err("search query is empty".to_string());
+    }
     let connection = state
         .connection
         .lock()
         .map_err(|_| "SQLite store lock is poisoned".to_string())?;
     let mut statement = connection
         .prepare(
-            "SELECT chunk_fts.document_id, chunk_fts.chunk_id,
-                    COALESCE(documents.name, documents.filename, ''),
-                    COALESCE(documents.stored_path, documents.path),
-                    snippet(chunk_fts, 3, '[', ']', '...', 24), rank
-             FROM chunk_fts
-             JOIN documents ON documents.id = chunk_fts.document_id
-             WHERE chunk_fts MATCH ?1
-             ORDER BY rank
+            "SELECT d.id,
+                    COALESCE(d.name, d.filename, ''),
+                    COALESCE(d.stored_path, d.path),
+                    n.text
+             FROM doc_nodes n
+             JOIN documents d ON d.id = n.document_id
+             WHERE n.text LIKE ?1
+             ORDER BY n.order_index
              LIMIT ?2",
         )
         .map_err(|error| format!("cannot prepare SQLite full-text search: {error}"))?;
 
+    let like_query = format!("%{}%", trimmed.replace('%', "\\%").replace('_', "\\_"));
     let rows = statement
-        .query_map(params![query, limit.unwrap_or(20).min(100)], |row| {
+        .query_map(params![like_query, limit.unwrap_or(20).min(100)], |row| {
             Ok(FullTextSearchHit {
                 document_id: row.get(0)?,
-                block_id: row.get(1)?,
-                filename: row.get(2)?,
-                path: row.get(3)?,
-                text: row.get(4)?,
-                rank: row.get(5)?,
+                filename: row.get(1)?,
+                path: row.get(2)?,
+                text: row.get(3)?,
             })
         })
         .map_err(|error| format!("cannot run SQLite full-text search: {error}"))?;
@@ -232,12 +252,284 @@ pub(crate) fn search_document_full_text(
         .map_err(|error| format!("cannot read SQLite full-text results: {error}"))
 }
 
+pub(crate) fn save_workspace_file_metadata(
+    state: State<'_, DocumentStore>,
+    request: WorkspaceFileMetadataRequest,
+) -> Result<WorkspaceFileMetadataResult, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+    save_workspace_file_metadata_with_connection(&connection, request)
+}
+
+pub(crate) fn index_workspace_files(
+    state: State<'_, DocumentStore>,
+    path: String,
+) -> Result<WorkspaceFilesMetadataResult, String> {
+    let workspace_path = normalize_workspace_scan_path(&path)?;
+    let workspace_data_path = state
+        .workspace_data_path
+        .lock()
+        .map_err(|_| "workspace data path lock is poisoned".to_string())?
+        .clone();
+    let mut connection = state
+        .connection
+        .lock()
+        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+
+    index_workspace_files_with_connection(&mut connection, &workspace_path, &workspace_data_path)
+}
+
+fn save_workspace_file_metadata_with_connection(
+    connection: &Connection,
+    request: WorkspaceFileMetadataRequest,
+) -> Result<WorkspaceFileMetadataResult, String> {
+    upsert_workspace_file_metadata(connection, &request)?;
+
+    Ok(WorkspaceFileMetadataResult {
+        document_id: request.document_id,
+        saved: true,
+    })
+}
+
+fn index_workspace_files_with_connection(
+    connection: &mut Connection,
+    workspace_path: &Path,
+    workspace_data_path: &Path,
+) -> Result<WorkspaceFilesMetadataResult, String> {
+    let mut requests = Vec::new();
+    collect_workspace_file_metadata(
+        workspace_path,
+        workspace_path,
+        workspace_data_path,
+        &mut requests,
+    )?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("cannot start SQLite workspace metadata transaction: {error}"))?;
+    for request in &requests {
+        upsert_workspace_file_metadata(&transaction, request)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("cannot commit SQLite workspace metadata: {error}"))?;
+
+    Ok(WorkspaceFilesMetadataResult {
+        files_indexed: requests.len(),
+    })
+}
+
+fn upsert_workspace_file_metadata(
+    connection: &Connection,
+    request: &WorkspaceFileMetadataRequest,
+) -> Result<(), String> {
+    let extension = request
+        .extension
+        .clone()
+        .or_else(|| {
+            request
+                .filename
+                .rsplit_once('.')
+                .map(|(_, ext)| ext.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let file_type = request
+        .file_type
+        .clone()
+        .unwrap_or_else(|| extension.clone());
+    let disk_metadata = std::fs::metadata(&request.path).ok();
+    let size_bytes = request
+        .size_bytes
+        .or_else(|| disk_metadata.as_ref().map(|metadata| metadata.len()));
+    let modified_at = request.modified_at.or_else(|| {
+        disk_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64)
+    });
+    let now = unix_timestamp_seconds();
+
+    connection
+        .execute(
+            "INSERT INTO documents (
+                id, name, original_path, stored_path, file_type, size_bytes,
+                parse_status, index_status, sha256, created_at, updated_at,
+                path, filename, extension, indexed_at, relative_path, modified_at
+             ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, 'pending', 'pending', NULL, ?6, ?6, ?3, ?2, ?7, ?6, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                original_path = excluded.original_path,
+                stored_path = excluded.stored_path,
+                file_type = excluded.file_type,
+                size_bytes = excluded.size_bytes,
+                updated_at = excluded.updated_at,
+                path = excluded.path,
+                filename = excluded.filename,
+                extension = excluded.extension,
+                relative_path = excluded.relative_path,
+                modified_at = excluded.modified_at",
+            params![
+                request.document_id,
+                request.filename,
+                request.path,
+                file_type,
+                size_bytes.map(|size| size as i64),
+                now,
+                extension,
+                request.relative_path,
+                modified_at,
+            ],
+        )
+        .map_err(|error| format!("cannot save workspace file metadata: {error}"))?;
+
+    Ok(())
+}
+
+fn collect_workspace_file_metadata(
+    workspace_path: &Path,
+    dir: &Path,
+    workspace_data_path: &Path,
+    requests: &mut Vec<WorkspaceFileMetadataRequest>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("cannot scan workspace directory {}: {error}", dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "cannot read workspace directory entry {}: {error}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            format!("cannot inspect workspace entry {}: {error}", path.display())
+        })?;
+
+        if file_type.is_dir() {
+            if should_skip_workspace_dir(workspace_path, workspace_data_path, &path) {
+                continue;
+            }
+            collect_workspace_file_metadata(workspace_path, &path, workspace_data_path, requests)?;
+        } else if file_type.is_file() {
+            requests.push(build_workspace_file_metadata_request(
+                workspace_path,
+                &path,
+            )?);
+        }
+    }
+
+    Ok(())
+}
+
+fn build_workspace_file_metadata_request(
+    workspace_path: &Path,
+    file_path: &Path,
+) -> Result<WorkspaceFileMetadataRequest, String> {
+    let metadata = std::fs::metadata(file_path)
+        .map_err(|error| format!("cannot read file metadata {}: {error}", file_path.display()))?;
+    let path = file_path.display().to_string();
+    let filename = file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.clone());
+    let extension = file_path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .filter(|extension| !extension.is_empty());
+    let relative_path = build_workspace_relative_path(workspace_path, file_path);
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64);
+
+    Ok(WorkspaceFileMetadataRequest {
+        document_id: workspace_document_id(&path),
+        filename,
+        path,
+        relative_path: Some(relative_path),
+        extension: extension.clone(),
+        file_type: extension.or_else(|| Some("unknown".to_string())),
+        size_bytes: Some(metadata.len()),
+        modified_at,
+    })
+}
+
+fn build_workspace_relative_path(workspace_path: &Path, file_path: &Path) -> String {
+    let root_name = workspace_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    let relative_tail = file_path
+        .strip_prefix(workspace_path)
+        .ok()
+        .map(|path| normalize_document_path(&path.display().to_string()))
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| {
+            file_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| file_path.display().to_string())
+        });
+
+    format!("{root_name}/{relative_tail}")
+}
+
+fn should_skip_workspace_dir(
+    workspace_path: &Path,
+    workspace_data_path: &Path,
+    candidate: &Path,
+) -> bool {
+    let is_root_data_dir = candidate.file_name().is_some_and(|name| name == ".data")
+        && candidate.parent() == Some(workspace_path);
+    is_root_data_dir || candidate == workspace_data_path
+}
+
+fn normalize_workspace_scan_path(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("workspace path is empty".to_string());
+    }
+
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve workspace path {}: {error}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!(
+            "workspace path is not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn workspace_document_id(path: &str) -> String {
+    format!("path:{}", normalize_document_path(path).to_lowercase())
+}
+
+fn normalize_document_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
 pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "
             PRAGMA journal_mode = WAL;
             PRAGMA foreign_keys = ON;
+
+            DROP TABLE IF EXISTS chunk_assets;
+            DROP TABLE IF EXISTS assets;
+            DROP TABLE IF EXISTS chunks;
+            DROP TABLE IF EXISTS document_blocks;
+            DROP TABLE IF EXISTS document_fts;
+            DROP TABLE IF EXISTS chunk_fts;
 
             CREATE TABLE IF NOT EXISTS documents (
                 id TEXT PRIMARY KEY,
@@ -254,7 +546,9 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
                 path TEXT,
                 filename TEXT NOT NULL,
                 extension TEXT NOT NULL,
-                indexed_at INTEGER NOT NULL
+                indexed_at INTEGER NOT NULL,
+                relative_path TEXT,
+                modified_at INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS doc_nodes (
@@ -273,83 +567,10 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
                 FOREIGN KEY (parent_id) REFERENCES doc_nodes(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS chunks (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                node_ids_json TEXT NOT NULL,
-                heading_path_json TEXT NOT NULL,
-                chunk_type TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_for_embedding TEXT NOT NULL,
-                order_index INTEGER NOT NULL,
-                token_count INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS assets (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                node_id TEXT,
-                asset_type TEXT NOT NULL,
-                file_path TEXT,
-                caption TEXT,
-                description TEXT,
-                nearby_text TEXT,
-                metadata_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
-                FOREIGN KEY (node_id) REFERENCES doc_nodes(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chunk_assets (
-                chunk_id TEXT NOT NULL,
-                asset_id TEXT NOT NULL,
-                relation_type TEXT NOT NULL,
-                PRIMARY KEY (chunk_id, asset_id, relation_type),
-                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
-                FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS document_blocks (
-                document_id TEXT NOT NULL,
-                block_id TEXT NOT NULL,
-                block_type TEXT NOT NULL,
-                block_index INTEGER NOT NULL,
-                parent_id TEXT,
-                text TEXT NOT NULL,
-                metadata_json TEXT NOT NULL,
-                PRIMARY KEY (document_id, block_id),
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
-                document_id UNINDEXED,
-                block_id UNINDEXED,
-                filename,
-                path UNINDEXED,
-                text,
-                tokenize = 'trigram'
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-                chunk_id UNINDEXED,
-                document_id UNINDEXED,
-                heading_path,
-                content,
-                tokenize = 'trigram'
-            );
-
             CREATE INDEX IF NOT EXISTS idx_doc_nodes_document
                 ON doc_nodes(document_id, order_index);
             CREATE INDEX IF NOT EXISTS idx_doc_nodes_parent
                 ON doc_nodes(document_id, parent_id);
-            CREATE INDEX IF NOT EXISTS idx_chunks_document
-                ON chunks(document_id, order_index);
-            CREATE INDEX IF NOT EXISTS idx_assets_document
-                ON assets(document_id);
-            CREATE INDEX IF NOT EXISTS idx_document_blocks_document
-                ON document_blocks(document_id, block_index);
             ",
         )
         .map_err(|error| format!("cannot migrate SQLite document store: {error}"))?;
@@ -362,6 +583,8 @@ pub(super) fn migrate_sqlite(connection: &Connection) -> Result<(), String> {
     add_column_if_missing(connection, "documents", "index_status", "TEXT")?;
     add_column_if_missing(connection, "documents", "created_at", "INTEGER")?;
     add_column_if_missing(connection, "documents", "updated_at", "INTEGER")?;
+    add_column_if_missing(connection, "documents", "relative_path", "TEXT")?;
+    add_column_if_missing(connection, "documents", "modified_at", "INTEGER")?;
     let now = unix_timestamp_seconds();
     connection
         .execute(
@@ -410,59 +633,34 @@ fn add_column_if_missing(
         .map_err(|error| format!("cannot add column {table}.{column}: {error}"))
 }
 
-pub(super) fn build_safe_fts_query(query: &str) -> Option<String> {
-    let terms = query
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>();
-
-    if terms.is_empty() {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        return Some(format!("\"{}\"", trimmed.replace('"', "\"\"")));
-    }
-
-    Some(terms.join(" "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
-    fn builds_quoted_fts_query() {
-        assert_eq!(
-            build_safe_fts_query("alpha beta"),
-            Some("\"alpha\" \"beta\"".to_string())
-        );
-    }
-
-    #[test]
-    fn migrates_sqlite_schema_with_fts() {
+    fn migrates_sqlite_schema() {
         let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
         migrate_sqlite(&connection).expect("schema should migrate");
 
-        connection
-            .execute(
-                "INSERT INTO document_fts (document_id, block_id, filename, path, text)
-                 VALUES ('doc', 'block', 'demo.docx', NULL, 'alpha beta gamma')",
-                [],
-            )
-            .expect("FTS row should insert");
+        let table_count = |name: &str| -> i64 {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0)
+        };
 
-        let count: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM document_fts WHERE document_fts MATCH ?1",
-                params![build_safe_fts_query("alpha").unwrap()],
-                |row| row.get(0),
-            )
-            .expect("FTS query should run");
-        assert_eq!(count, 1);
+        assert_eq!(table_count("documents"), 1);
+        assert_eq!(table_count("doc_nodes"), 1);
+        assert_eq!(table_count("chunks"), 0);
+        assert_eq!(table_count("chunk_fts"), 0);
+        assert_eq!(table_count("assets"), 0);
+        assert_eq!(table_count("chunk_assets"), 0);
+        assert_eq!(table_count("document_blocks"), 0);
+        assert_eq!(table_count("document_fts"), 0);
     }
 
     #[test]
@@ -508,17 +706,157 @@ mod tests {
         .expect("document structure should index");
 
         assert_eq!(result.nodes_indexed, 3);
-        assert_eq!(result.blocks_indexed, 0);
-        assert_eq!(result.chunks_indexed, 0);
-        assert_eq!(result.assets_indexed, 0);
+        assert_eq!(result.text_bytes_indexed, 23);
         assert_eq!(table_count(&connection, "documents"), 1);
         assert_eq!(table_count(&connection, "doc_nodes"), 3);
-        assert_eq!(table_count(&connection, "chunks"), 0);
-        assert_eq!(table_count(&connection, "chunk_fts"), 0);
-        assert_eq!(table_count(&connection, "assets"), 0);
-        assert_eq!(table_count(&connection, "chunk_assets"), 0);
-        assert_eq!(table_count(&connection, "document_blocks"), 0);
-        assert_eq!(table_count(&connection, "document_fts"), 0);
+    }
+
+    #[test]
+    fn search_finds_nodes_by_text() {
+        let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+
+        index_document_structure_with_connection(
+            &mut connection,
+            DocumentIndexRequest {
+                document_id: "doc_search".to_string(),
+                filename: "search.docx".to_string(),
+                path: Some("/tmp/search.docx".to_string()),
+                original_path: None,
+                stored_path: None,
+                extension: Some("docx".to_string()),
+                file_type: Some("docx".to_string()),
+                size_bytes: Some(100),
+                sha256: None,
+                parse_status: None,
+                index_status: None,
+                blocks: json!([
+                    {"id": "b1", "type": "paragraph", "text": "hello world"},
+                    {"id": "b2", "type": "paragraph", "text": "goodbye universe"},
+                ]),
+            },
+        )
+        .expect("should index");
+
+        // We need to test search directly without State since we're in unit tests
+        let query = "hello".to_string();
+        let mut statement = connection
+            .prepare(
+                "SELECT d.id,
+                        COALESCE(d.name, d.filename, ''),
+                        COALESCE(d.stored_path, d.path),
+                        n.text
+                 FROM doc_nodes n
+                 JOIN documents d ON d.id = n.document_id
+                 WHERE n.text LIKE ?1
+                 ORDER BY n.order_index
+                 LIMIT 20",
+            )
+            .expect("should prepare");
+        let hits: Vec<(String, String, Option<String>, String)> = statement
+            .query_map(params![format!("%{}%", query)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .expect("should query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("should collect");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].3, "hello world");
+    }
+
+    #[test]
+    fn saves_workspace_file_metadata() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+
+        let result = save_workspace_file_metadata_with_connection(
+            &connection,
+            WorkspaceFileMetadataRequest {
+                document_id: "path:/tmp/readme.md".to_string(),
+                filename: "readme.md".to_string(),
+                path: "/tmp/readme.md".to_string(),
+                relative_path: Some("workspace/readme.md".to_string()),
+                extension: Some("md".to_string()),
+                file_type: Some("md".to_string()),
+                size_bytes: Some(42),
+                modified_at: Some(1_700_000_000),
+            },
+        )
+        .expect("metadata should save");
+
+        assert!(result.saved);
+        let row: (String, String, Option<String>, i64, Option<i64>) = connection
+            .query_row(
+                "SELECT filename, extension, relative_path, size_bytes, modified_at FROM documents WHERE id = ?1",
+                params!["path:/tmp/readme.md"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("metadata row should exist");
+
+        assert_eq!(row.0, "readme.md");
+        assert_eq!(row.1, "md");
+        assert_eq!(row.2.as_deref(), Some("workspace/readme.md"));
+        assert_eq!(row.3, 42);
+        assert_eq!(row.4, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn indexes_all_workspace_files_and_skips_workspace_data_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "office_agent_workspace_index_test_{}_{}",
+            std::process::id(),
+            unix_timestamp_seconds()
+        ));
+        let nested = root.join("nested");
+        let data_dir = root.join(".data");
+        std::fs::create_dir_all(&nested).expect("nested test directory should be created");
+        std::fs::create_dir_all(data_dir.join("sqlite")).expect("data directory should be created");
+        std::fs::write(root.join("readme.md"), "hello").expect("supported file should be written");
+        std::fs::write(nested.join("notes.tmp"), "temporary")
+            .expect("unsupported file should be written");
+        std::fs::write(data_dir.join("sqlite").join("office-agent.sqlite3"), "db")
+            .expect("workspace data file should be written");
+
+        let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+        let result = index_workspace_files_with_connection(&mut connection, &root, &data_dir)
+            .expect("workspace files should index");
+
+        assert_eq!(result.files_indexed, 2);
+        assert_eq!(table_count(&connection, "documents"), 2);
+        let unsupported_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM documents WHERE filename = ?1 AND extension = ?2",
+                params!["notes.tmp", "tmp"],
+                |row| row.get(0),
+            )
+            .expect("unsupported file metadata should be readable");
+        let data_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM documents WHERE path LIKE ?1",
+                params![format!("%{}%", ".data")],
+                |row| row.get(0),
+            )
+            .expect("workspace data metadata count should be readable");
+
+        assert_eq!(unsupported_count, 1);
+        assert_eq!(data_count, 0);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn table_count(connection: &Connection, table: &str) -> i64 {

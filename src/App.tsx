@@ -30,6 +30,8 @@ import type {
   TextEditOperation,
   TextSelectionIntentAction,
   WorkspaceFile,
+  WorkspaceFileMetadataResult,
+  WorkspaceFilesMetadataResult,
   WorkspaceStorageInfo,
 } from "./types";
 import {
@@ -98,7 +100,9 @@ function App() {
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const folderSelectionModeRef = useRef<"append" | "workspace">("append");
   const saveFileProvidersRef = useRef<Record<string, SaveFileProvider>>({});
+  const lazyLoadingFileIdsRef = useRef<Set<string>>(new Set());
   const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
   const [dirtyFileIds, setDirtyFileIds] = useState<string[]>([]);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
@@ -110,7 +114,7 @@ function App() {
 
   const activePreviewFile = useMemo(
     () =>
-      selectedWorkspaceFile
+      selectedWorkspaceFile && selectedWorkspaceFile.contentLoaded !== false
         ? {
             id: selectedWorkspaceFile.id,
             filename: selectedWorkspaceFile.file.name,
@@ -202,6 +206,7 @@ function App() {
       return;
     }
     // Fallback: browser / web preview mode
+    folderSelectionModeRef.current = "append";
     if (folderInputRef.current) folderInputRef.current.value = "";
     folderInputRef.current?.click();
   }
@@ -220,6 +225,7 @@ function App() {
       return;
     }
 
+    folderSelectionModeRef.current = "workspace";
     if (folderInputRef.current) folderInputRef.current.value = "";
     folderInputRef.current?.click();
   }
@@ -266,31 +272,7 @@ function App() {
         setErrorMessage("该文件夹中没有支持的文件类型");
         return;
       }
-      const nextFiles: WorkspaceFile[] = [];
-      for (const filePath of supported) {
-        const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
-        const extension = filename.split(".").pop()?.toLowerCase() ?? "";
-        const isBinaryPreview = BINARY_PREVIEW_EXTENSIONS.has(extension);
-        try {
-          const content = isBinaryPreview
-            ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
-            : await invoke<string>("read_file_text", { path: filePath });
-          const relativePath = buildFolderRelativePath(folderPath, rootName, filePath);
-          const file = new File([content], filename, {
-            type: getFileMimeType(filename),
-            lastModified: Date.now(),
-          });
-          nextFiles.push({
-            id: `${filePath}-${file.lastModified}`,
-            file,
-            relativePath,
-            diskPath: filePath,
-            analysis: null,
-          });
-        } catch {
-          // Skip unreadable files silently
-        }
-      }
+      const nextFiles = supported.map((filePath) => createLazyWorkspaceFile(folderPath, rootName, filePath));
       if (!nextFiles.length) return;
       const knownPaths = new Map(
         workspaceFiles
@@ -302,7 +284,6 @@ function App() {
         knownPaths.get(normalizeFilePath(nextFiles[0].diskPath ?? "").toLowerCase()) ??
         nextFiles[0];
 
-      setWorkspaceName((currentName) => (workspaceFiles.length ? currentName : rootName));
       setWorkspaceFiles((current) => {
         const currentPaths = new Set(
           current
@@ -317,6 +298,7 @@ function App() {
         ];
       });
       openWorkspaceFile(firstFileToOpen.id);
+      persistWorkspaceFileMetadata(nextFiles);
       setDocumentSelection(null);
       setErrorMessage("");
     } catch (error) {
@@ -327,35 +309,11 @@ function App() {
   async function openWorkspaceByPath(folderPath: string) {
     try {
       await invoke<WorkspaceStorageInfo>("open_workspace_storage", { path: folderPath });
+      await invoke<WorkspaceFilesMetadataResult>("index_workspace_files", { path: folderPath });
       const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
       const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
       const supported = entries.filter(isSupportedPreviewPath);
-      const nextFiles: WorkspaceFile[] = [];
-
-      for (const filePath of supported) {
-        const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
-        const extension = filename.split(".").pop()?.toLowerCase() ?? "";
-        const isBinaryPreview = BINARY_PREVIEW_EXTENSIONS.has(extension);
-        try {
-          const content = isBinaryPreview
-            ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: filePath }))
-            : await invoke<string>("read_file_text", { path: filePath });
-          const relativePath = buildFolderRelativePath(folderPath, rootName, filePath);
-          const file = new File([content], filename, {
-            type: getFileMimeType(filename),
-            lastModified: Date.now(),
-          });
-          nextFiles.push({
-            id: `${filePath}-${file.lastModified}`,
-            file,
-            relativePath,
-            diskPath: filePath,
-            analysis: null,
-          });
-        } catch {
-          // Skip unreadable files silently
-        }
-      }
+      const nextFiles = supported.map((filePath) => createLazyWorkspaceFile(folderPath, rootName, filePath));
 
       setWorkspaceName(rootName);
       setWorkspaceFiles(nextFiles);
@@ -369,6 +327,7 @@ function App() {
 
       if (nextFiles.length) {
         openWorkspaceFile(nextFiles[0].id);
+        persistWorkspaceFileMetadata(nextFiles);
         setErrorMessage("");
       } else {
         setErrorMessage("已打开工作区，但该文件夹中没有支持预览的文件类型");
@@ -398,6 +357,7 @@ function App() {
   function handleFolderSelection(files: FileList | null) {
     if (!files?.length) return;
 
+    const shouldSetWorkspaceRoot = folderSelectionModeRef.current === "workspace";
     const selectedFiles = Array.from(files).filter((file) => isSupportedPreviewPath(getFileRelativePath(file) || file.name));
     if (!selectedFiles.length) {
       setErrorMessage("该文件夹中没有支持预览的文件类型");
@@ -420,16 +380,27 @@ function App() {
     });
 
     const knownKeys = new Map(workspaceFiles.map((item) => [getWorkspaceFileKey(item), item]));
-    const firstFileToOpen =
-      nextFiles.find((item) => !knownKeys.has(getWorkspaceFileKey(item))) ??
-      knownKeys.get(getWorkspaceFileKey(nextFiles[0])) ??
-      nextFiles[0];
+    const firstFileToOpen = shouldSetWorkspaceRoot
+      ? nextFiles[0]
+      : nextFiles.find((item) => !knownKeys.has(getWorkspaceFileKey(item))) ??
+        knownKeys.get(getWorkspaceFileKey(nextFiles[0])) ??
+        nextFiles[0];
 
-    setWorkspaceName((currentName) => (workspaceFiles.length ? currentName : rootName));
-    setWorkspaceFiles((current) => {
-      const currentKeys = new Set(current.map(getWorkspaceFileKey));
-      return [...current, ...nextFiles.filter((item) => !currentKeys.has(getWorkspaceFileKey(item)))];
-    });
+    if (shouldSetWorkspaceRoot) {
+      setWorkspaceName(rootName);
+      setWorkspaceFiles(nextFiles);
+      setOpenFileIds([]);
+      setSelectedFileId("");
+      setUnsavedContents({});
+      setDirtyFileIds([]);
+      setPendingAgentTextEdit(null);
+      setPendingTextRestore(null);
+    } else {
+      setWorkspaceFiles((current) => {
+        const currentKeys = new Set(current.map(getWorkspaceFileKey));
+        return [...current, ...nextFiles.filter((item) => !currentKeys.has(getWorkspaceFileKey(item)))];
+      });
+    }
     openWorkspaceFile(firstFileToOpen.id);
     setDocumentSelection(null);
     setErrorMessage("");
@@ -505,7 +476,15 @@ function App() {
       }
     }
 
-    const sourceFile = fileToSave ?? currentItem.file;
+    let sourceFile = fileToSave ?? currentItem.file;
+    if (!fileToSave && currentItem.contentLoaded === false && currentItem.diskPath) {
+      try {
+        sourceFile = await readDiskFileAsFile(currentItem);
+      } catch (error) {
+        setErrorMessage(`Failed to lazy-load file before save (${currentItem.file.name}): ${getErrorMessage(error)}`);
+        return;
+      }
+    }
     const unsavedText = unsavedContents[fileId];
     const fileExtension = currentItem.file.name.split(".").pop()?.toLowerCase() ?? "";
     const isTextSave = unsavedText !== undefined || !BINARY_PREVIEW_EXTENSIONS.has(fileExtension);
@@ -569,7 +548,15 @@ function App() {
                 lastModified: Date.now(),
               });
 
-        return { ...item, file, diskPath: resolvedDiskPath, analysis: null };
+        return {
+          ...item,
+          file,
+          diskPath: resolvedDiskPath,
+          contentLoaded: true,
+          sizeBytes: file.size,
+          lastModifiedMs: file.lastModified,
+          analysis: null,
+        };
       }),
     );
 
@@ -589,6 +576,85 @@ function App() {
     if (!fileId) return;
 
     setOpenFileIds((current) => [fileId, ...current.filter((id) => id !== fileId)]);
+  }
+
+  async function loadWorkspaceFileContent(fileId: string) {
+    const item = workspaceFiles.find((candidate) => candidate.id === fileId);
+    if (!item || item.contentLoaded !== false || !item.diskPath) return;
+    if (lazyLoadingFileIdsRef.current.has(fileId)) return;
+
+    lazyLoadingFileIdsRef.current.add(fileId);
+    try {
+      const file = await readDiskFileAsFile(item);
+      setWorkspaceFiles((current) =>
+        current.map((candidate) =>
+          candidate.id === fileId
+            ? {
+                ...candidate,
+                file,
+                contentLoaded: true,
+                sizeBytes: file.size,
+                lastModifiedMs: file.lastModified,
+              }
+            : candidate,
+        ),
+      );
+    } catch (error) {
+      setErrorMessage(`Failed to lazy-load file (${item.file.name}): ${getErrorMessage(error)}`);
+    } finally {
+      lazyLoadingFileIdsRef.current.delete(fileId);
+    }
+  }
+
+  async function readDiskFileAsFile(item: WorkspaceFile) {
+    if (!item.diskPath) return item.file;
+
+    const filename = item.diskPath.replace(/\\/g, "/").split("/").pop() ?? item.file.name;
+    const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+    const content = BINARY_PREVIEW_EXTENSIONS.has(extension)
+      ? new Uint8Array(await invoke<number[]>("read_file_bytes", { path: item.diskPath }))
+      : await invoke<string>("read_file_text", { path: item.diskPath });
+
+    return new File([content], filename, {
+      type: item.file.type || getFileMimeType(filename),
+      lastModified: Date.now(),
+    });
+  }
+
+  async function persistWorkspaceFileMetadata(files: WorkspaceFile[]) {
+    if (!canUseTauriEvents() || !files.length) return;
+
+    for (const item of files) {
+      if (!item.diskPath) continue;
+
+      try {
+        await invoke<WorkspaceFileMetadataResult>("save_workspace_file_metadata", {
+          request: {
+            document_id: getWorkspaceDocumentId(item.diskPath),
+            filename: item.file.name,
+            path: item.diskPath,
+            relative_path: item.relativePath,
+            extension: item.file.name.split(".").pop()?.toLowerCase() || undefined,
+            file_type: item.file.name.split(".").pop()?.toLowerCase() || undefined,
+            size_bytes: item.sizeBytes,
+            modified_at: item.lastModifiedMs ? Math.floor(item.lastModifiedMs / 1000) : undefined,
+          },
+        });
+
+        setWorkspaceFiles((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id ? { ...candidate, metadataSaveStatus: "saved" } : candidate,
+          ),
+        );
+      } catch (error) {
+        console.warn(`Failed to save metadata for ${item.diskPath}`, error);
+        setWorkspaceFiles((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id ? { ...candidate, metadataSaveStatus: "error" } : candidate,
+          ),
+        );
+      }
+    }
   }
 
   function closePreviewTab(fileId: string) {
@@ -1449,6 +1515,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (selectedWorkspaceFile?.contentLoaded === false) {
+      void loadWorkspaceFileContent(selectedWorkspaceFile.id);
+    }
+  }, [selectedWorkspaceFile?.id, selectedWorkspaceFile?.contentLoaded]);
+
+  useEffect(() => {
     const folderInput = folderInputRef.current;
     if (!folderInput) return;
 
@@ -1480,6 +1552,7 @@ function App() {
         workspaceFileCount={workspaceFiles.length}
         onOpenFilePicker={openFilePicker}
         onOpenFolderPicker={openFolderPicker}
+        onAddFolderToWorkspacePicker={openWorkspacePicker}
         onOpenWorkspacePicker={openWorkspacePicker}
       />
 
@@ -1522,7 +1595,7 @@ function App() {
           onRefreshStatus={refreshStatus}
           onRegisterSaveFileProvider={registerSaveFileProvider}
           onSelectionContextChange={setDocumentSelection}
-          onSelectPreviewTab={setSelectedFileId}
+          onSelectPreviewTab={openWorkspaceFile}
           onUpdateSpreadsheetFile={updateSpreadsheetFile}
           onUpdateTextFile={updateTextFile}
           onSaveTextFile={saveWorkspaceFile}
@@ -1571,6 +1644,29 @@ function buildFolderRelativePath(folderPath: string, rootName: string, filePath:
   }
 
   return `${rootName}/${normalizedFilePath.split("/").pop() ?? normalizedFilePath}`;
+}
+
+function createLazyWorkspaceFile(folderPath: string, rootName: string, filePath: string): WorkspaceFile {
+  const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+  const relativePath = buildFolderRelativePath(folderPath, rootName, filePath);
+  const file = new File([""], filename, {
+    type: getFileMimeType(filename),
+    lastModified: Date.now(),
+  });
+
+  return {
+    id: getWorkspaceDocumentId(filePath),
+    file,
+    relativePath,
+    diskPath: filePath,
+    contentLoaded: false,
+    metadataSaveStatus: "pending",
+    analysis: null,
+  };
+}
+
+function getWorkspaceDocumentId(filePath: string) {
+  return `path:${normalizeFilePath(filePath).toLowerCase()}`;
 }
 
 function getWorkspaceFileKey(fileItem: WorkspaceFile) {

@@ -25,7 +25,20 @@ export type WorkspaceFile = {
   file: File;
   relativePath?: string;
   diskPath?: string;
+  contentLoaded?: boolean;
+  metadataSaveStatus?: "pending" | "saved" | "error";
+  sizeBytes?: number;
+  lastModifiedMs?: number;
   analysis: AnalyzeResult | null;
+};
+
+export type WorkspaceFileMetadataResult = {
+  document_id: string;
+  saved: boolean;
+};
+
+export type WorkspaceFilesMetadataResult = {
+  files_indexed: number;
 };
 
 export type WorkspaceStorageInfo = {
@@ -178,10 +191,7 @@ export type DocumentIndexRequest = {
 
 export type DocumentIndexResult = {
   document_id: string;
-  blocks_indexed: number;
   nodes_indexed: number;
-  chunks_indexed: number;
-  assets_indexed: number;
   text_bytes_indexed: number;
 };
 

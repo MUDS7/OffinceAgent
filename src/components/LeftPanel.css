@@ -277,6 +277,10 @@
   color: #c74c4c;
 }
 
+.metadata-save-spinner {
+  color: #4b89dc;
+}
+
 /* Modal Styles */
 .modal-overlay {
   position: fixed;

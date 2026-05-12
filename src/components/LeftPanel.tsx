@@ -29,6 +29,7 @@ type WorkspaceFile = {
   id: string;
   file: File;
   relativePath?: string;
+  metadataSaveStatus?: "pending" | "saved" | "error";
   analysis: unknown | null;
 };
 
@@ -367,7 +368,13 @@ export function LeftPanel({
         >
           <FileIcon filename={node.name} />
           <span>{node.name}</span>
-          {node.fileItem.analysis ? <Check size={14} /> : <Circle size={9} />}
+          {node.fileItem.metadataSaveStatus === "pending" ? (
+            <RefreshCw className="metadata-save-spinner spin" size={14} aria-label="保存文件数据中" />
+          ) : node.fileItem.analysis ? (
+            <Check size={14} />
+          ) : (
+            <Circle size={9} />
+          )}
           <div className="file-actions" onClick={(e) => {
             e.stopPropagation();
             setNodeToDelete({ id: node.id, name: node.name, kind: "file", fileIds: [node.fileItem.id] });

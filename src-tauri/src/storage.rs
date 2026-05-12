@@ -132,7 +132,23 @@ pub(crate) fn search_document_full_text(
     sqlite_store::search_document_full_text(state, query, limit)
 }
 
+#[tauri::command]
+pub(crate) fn save_workspace_file_metadata(
+    state: State<'_, DocumentStore>,
+    request: sqlite_store::WorkspaceFileMetadataRequest,
+) -> Result<sqlite_store::WorkspaceFileMetadataResult, String> {
+    sqlite_store::save_workspace_file_metadata(state, request)
+}
+
 /// 获取 Qdrant 向量数据库的运行状态（collection 数量等信息）。
+#[tauri::command]
+pub(crate) fn index_workspace_files(
+    state: State<'_, DocumentStore>,
+    path: String,
+) -> Result<sqlite_store::WorkspaceFilesMetadataResult, String> {
+    sqlite_store::index_workspace_files(state, path)
+}
+
 #[tauri::command]
 pub(crate) async fn get_qdrant_status(
     state: State<'_, DocumentStore>,

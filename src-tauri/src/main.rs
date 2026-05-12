@@ -34,6 +34,8 @@ fn main() {
             document_service::restart_document_service,
             storage::index_document_structure,
             storage::search_document_full_text,
+            storage::save_workspace_file_metadata,
+            storage::index_workspace_files,
             storage::open_workspace_storage,
             storage::get_qdrant_status,
             storage::ensure_qdrant_collection,

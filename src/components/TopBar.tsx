@@ -18,7 +18,7 @@ type FileMenuItem = {
   shortcut?: string;
   hasSubmenu?: boolean;
   disabled?: boolean;
-  action?: "open-file" | "open-folder" | "open-workspace";
+  action?: "open-file" | "open-folder" | "add-folder-to-workspace" | "open-workspace";
 };
 
 type TopBarProps = {
@@ -27,6 +27,7 @@ type TopBarProps = {
   workspaceFileCount: number;
   onOpenFilePicker: () => void;
   onOpenFolderPicker: () => void;
+  onAddFolderToWorkspacePicker: () => void;
   onOpenWorkspacePicker: () => void;
 };
 
@@ -43,7 +44,11 @@ const fileMenuGroups: FileMenuItem[][] = [
     { label: "从文件打开工作区...", action: "open-workspace" },
     { label: "打开最近的文件", hasSubmenu: true },
   ],
-  [{ label: "将文件夹添加到工作区..." }, { label: "将工作区另存为..." }, { label: "复制工作区" }],
+  [
+    { label: "将文件夹添加到工作区...", action: "add-folder-to-workspace" },
+    { label: "将工作区另存为..." },
+    { label: "复制工作区" },
+  ],
   [
     { label: "保存", shortcut: "Ctrl+S" },
     { label: "另存为...", shortcut: "Ctrl+Shift+S" },
@@ -66,6 +71,7 @@ export function TopBar({
   workspaceFileCount,
   onOpenFilePicker,
   onOpenFolderPicker,
+  onAddFolderToWorkspacePicker,
   onOpenWorkspacePicker,
 }: TopBarProps) {
   const fileMenuRef = useRef<HTMLDivElement | null>(null);
@@ -83,6 +89,12 @@ export function TopBar({
     if (item.action === "open-folder") {
       setIsFileMenuOpen(false);
       onOpenFolderPicker();
+      return;
+    }
+
+    if (item.action === "add-folder-to-workspace") {
+      setIsFileMenuOpen(false);
+      onAddFolderToWorkspacePicker();
       return;
     }
 
