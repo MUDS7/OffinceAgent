@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { DOCUMENT_SERVICE_URL } from "../../constants";
 import { fetchDocumentService } from "../../utils/documentService";
 import { normalizeFilePath } from "../../utils/fileUtils";
@@ -31,9 +40,16 @@ type SelectedDocxTarget =
 
 type SelectedDocxTextTarget = Exclude<SelectedDocxTarget, { kind: "image" }>;
 
+type PendingDocxCaret = {
+  end: number;
+  start: number;
+  target: SelectedDocxTextTarget;
+};
+
 const RENDER_DEBOUNCE_MS = 450;
 const INDEX_DEBOUNCE_MS = 800;
 const EMU_PER_PIXEL = 9525;
+const TRAILING_LINE_BREAK_MARKER = "\u200b";
 
 export function DocxPreview({
   activeFile,
@@ -50,6 +66,8 @@ export function DocxPreview({
   const latestActiveFileRef = useRef(activeFile);
   const latestBlocksRef = useRef<DocxBlock[]>([]);
   const latestBlocksSignatureRef = useRef("");
+  const pendingCaretRef = useRef<PendingDocxCaret | null>(null);
+  const textElementRefs = useRef(new Map<string, HTMLElement>());
   const [state, setState] = useState<{
     blocks: DocxBlock[];
     error: string;
@@ -67,6 +85,10 @@ export function DocxPreview({
   const documentText = useMemo(() => getDocumentText(state.blocks), [state.blocks]);
   latestActiveFileRef.current = activeFile;
   latestBlocksRef.current = state.blocks;
+
+  useLayoutEffect(() => {
+    restorePendingCaret();
+  }, [state.blocks]);
 
   useEffect(() => {
     if (loadedFileIdRef.current === activeFile.id && lastPublishedFileRef.current === activeFile.file) {
@@ -104,17 +126,19 @@ export function DocxPreview({
         const result = (await response.json()) as DocxParseResponse;
         if (isCancelled) return;
 
-        const signature = getBlocksSignature(result.blocks);
-        await indexDocxStructure(result.blocks);
+        const blocks = normalizeParsedDocxBlocks(result.blocks);
+        const warnings = normalizeDocxWarnings(result.warnings, result.blocks, blocks);
+        const signature = getBlocksSignature(blocks);
+        await indexDocxStructure(blocks);
         if (isCancelled) return;
 
         lastIndexSignatureRef.current = signature;
         setState({
-          blocks: result.blocks,
+          blocks,
           error: "",
           isLoading: false,
           renderError: "",
-          warnings: result.warnings,
+          warnings,
         });
         lastRenderSignatureRef.current = signature;
         blocksSourceFileRef.current = activeFile.file;
@@ -304,12 +328,14 @@ export function DocxPreview({
         <p
           className="docx-paragraph-text"
           contentEditable
+          ref={(element) => setTextElementRef(getParagraphTextKey(block.id), element)}
           suppressContentEditableWarning
           onFocus={() => setSelectedTarget({ blockId: block.id, kind: "paragraph" })}
-          onInput={(event) => updateParagraphText(block.id, event.currentTarget.textContent ?? "")}
+          onInput={(event) => handleParagraphInput(event, block.id)}
+          onKeyDown={(event) => handleParagraphKeyDown(event, block.id)}
           onMouseUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
         >
-          {block.text}
+          {getEditableDisplayText(block.text)}
         </p>
       </section>
     );
@@ -354,12 +380,12 @@ export function DocxPreview({
                       <div
                         className="docx-cell-text"
                         contentEditable
+                        ref={(element) => setTextElementRef(getCellTextKey(block.id, cell.id), element)}
                         suppressContentEditableWarning
                         aria-label={`DOCX table cell ${rowIndex + 1}, ${cellIndex + 1}`}
                         onFocus={() => setSelectedTarget({ blockId: block.id, cellId: cell.id, kind: "cell" })}
-                        onInput={(event) =>
-                          updateTableCellText(block.id, cell.id, event.currentTarget.textContent ?? "")
-                        }
+                        onInput={(event) => handleTableCellInput(event, block.id, cell.id)}
+                        onKeyDown={(event) => handleTableCellKeyDown(event, block.id, cell.id)}
                         onMouseUp={(event) =>
                           publishElementTextSelection(event.currentTarget, {
                             blockId: block.id,
@@ -368,7 +394,7 @@ export function DocxPreview({
                           })
                         }
                       >
-                        {cell.text}
+                        {getEditableDisplayText(cell.text)}
                       </div>
                     </td>
                   );
@@ -392,6 +418,42 @@ export function DocxPreview({
           : block,
       ),
     );
+  }
+
+  function handleParagraphInput(event: FormEvent<HTMLElement>, blockId: string) {
+    const target = { blockId, kind: "paragraph" } satisfies SelectedDocxTextTarget;
+    captureCaret(event.currentTarget, target);
+    updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+  }
+
+  function handleParagraphKeyDown(event: ReactKeyboardEvent<HTMLElement>, blockId: string) {
+    const target = { blockId, kind: "paragraph" } satisfies SelectedDocxTextTarget;
+    if (insertLineBreak(event, target)) {
+      updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+      return;
+    }
+
+    if (deleteLineBreakBeforeCaret(event, target)) {
+      updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+    }
+  }
+
+  function handleTableCellInput(event: FormEvent<HTMLElement>, blockId: string, cellId: string) {
+    const target = { blockId, cellId, kind: "cell" } satisfies SelectedDocxTextTarget;
+    captureCaret(event.currentTarget, target);
+    updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+  }
+
+  function handleTableCellKeyDown(event: ReactKeyboardEvent<HTMLElement>, blockId: string, cellId: string) {
+    const target = { blockId, cellId, kind: "cell" } satisfies SelectedDocxTextTarget;
+    if (insertLineBreak(event, target)) {
+      updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+      return;
+    }
+
+    if (deleteLineBreakBeforeCaret(event, target)) {
+      updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+    }
   }
 
   function updateTableCellText(blockId: string, cellId: string, text: string) {
@@ -425,6 +487,89 @@ export function DocxPreview({
     });
   }
 
+  function setTextElementRef(key: string, element: HTMLElement | null) {
+    if (element) {
+      textElementRefs.current.set(key, element);
+      return;
+    }
+
+    textElementRefs.current.delete(key);
+  }
+
+  function captureCaret(element: HTMLElement, target: SelectedDocxTextTarget) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return;
+
+    pendingCaretRef.current = {
+      target,
+      start: getTextOffsetWithinElement(element, range.startContainer, range.startOffset),
+      end: getTextOffsetWithinElement(element, range.endContainer, range.endOffset),
+    };
+  }
+
+  function insertLineBreak(event: ReactKeyboardEvent<HTMLElement>, target: SelectedDocxTextTarget) {
+    if (event.key !== "Enter" || event.ctrlKey || event.metaKey || event.altKey) return false;
+
+    const element = event.currentTarget;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return false;
+
+    event.preventDefault();
+    const start = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
+    const end = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
+    const text = getEditablePlainText(element.textContent ?? "");
+    const nextText = `${text.slice(0, start)}\n${text.slice(end)}`;
+    element.textContent = getEditableDisplayText(nextText);
+    pendingCaretRef.current = {
+      target,
+      start: start + 1,
+      end: start + 1,
+    };
+    return true;
+  }
+
+  function deleteLineBreakBeforeCaret(event: ReactKeyboardEvent<HTMLElement>, target: SelectedDocxTextTarget) {
+    if (event.key !== "Backspace" || event.ctrlKey || event.metaKey || event.altKey) return false;
+
+    const element = event.currentTarget;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer)) return false;
+
+    const caretOffset = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
+    const text = getEditablePlainText(element.textContent ?? "");
+    if (caretOffset <= 0 || text[caretOffset - 1] !== "\n") return false;
+
+    event.preventDefault();
+    const nextText = `${text.slice(0, caretOffset - 1)}${text.slice(caretOffset)}`;
+    element.textContent = getEditableDisplayText(nextText);
+    pendingCaretRef.current = {
+      target,
+      start: caretOffset - 1,
+      end: caretOffset - 1,
+    };
+    return true;
+  }
+
+  function restorePendingCaret() {
+    const pendingCaret = pendingCaretRef.current;
+    if (!pendingCaret) return;
+
+    pendingCaretRef.current = null;
+    const element = textElementRefs.current.get(getTextTargetKey(pendingCaret.target));
+    if (!element || document.activeElement !== element) return;
+
+    restoreTextSelection(element, pendingCaret.start, pendingCaret.end);
+  }
+
   function selectImage(block: DocxImageBlock) {
     setSelectedTarget({ blockId: block.id, kind: "image" });
     const text = getDocxImageText(block);
@@ -445,7 +590,7 @@ export function DocxPreview({
       return;
     }
 
-    const selectedText = selection.toString();
+    const selectedText = getEditablePlainText(selection.toString());
     if (!selectedText.trim()) {
       clearDocxSelectionContext();
       return;
@@ -584,13 +729,107 @@ function getTextOffsetWithinElement(element: HTMLElement, container: Node, offse
   const range = document.createRange();
   range.selectNodeContents(element);
   range.setEnd(container, offset);
-  const textOffset = range.toString().length;
+  const textOffset = getEditablePlainText(range.toString()).length;
   range.detach();
   return textOffset;
 }
 
+function restoreTextSelection(element: HTMLElement, start: number, end: number) {
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  const range = document.createRange();
+  const startPosition = getTextNodePosition(element, start);
+  const endPosition = getTextNodePosition(element, end);
+  range.setStart(startPosition.node, startPosition.offset);
+  range.setEnd(endPosition.node, endPosition.offset);
+
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function getTextNodePosition(element: HTMLElement, textOffset: number) {
+  const plainTextLength = getEditablePlainText(element.textContent ?? "").length;
+  const targetOffset = clampTextOffset(textOffset, plainTextLength);
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let remaining = targetOffset;
+  let lastTextNode: Text | null = null;
+
+  while (walker.nextNode()) {
+    const textNode = walker.currentNode as Text;
+    lastTextNode = textNode;
+    const position = getTextNodeDomOffset(textNode.data, remaining);
+    if (position.isInsideNode) {
+      return { node: textNode, offset: position.offset };
+    }
+    remaining = position.remaining;
+  }
+
+  if (lastTextNode) {
+    return { node: lastTextNode, offset: lastTextNode.length };
+  }
+
+  return { node: element, offset: element.childNodes.length };
+}
+
+function getTextNodeDomOffset(text: string, plainOffset: number) {
+  let remaining = plainOffset;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === TRAILING_LINE_BREAK_MARKER) continue;
+    if (remaining === 0) return { isInsideNode: true, offset: index, remaining: 0 };
+    remaining -= 1;
+  }
+
+  return remaining === 0
+    ? { isInsideNode: true, offset: text.length, remaining: 0 }
+    : { isInsideNode: false, offset: text.length, remaining };
+}
+
+function getEditableDisplayText(text: string) {
+  return text.endsWith("\n") ? `${text}${TRAILING_LINE_BREAK_MARKER}` : text;
+}
+
+function getEditablePlainText(text: string) {
+  return text.split(TRAILING_LINE_BREAK_MARKER).join("");
+}
+
+function getParagraphTextKey(blockId: string) {
+  return `paragraph:${blockId}`;
+}
+
+function getCellTextKey(blockId: string, cellId: string) {
+  return `cell:${blockId}:${cellId}`;
+}
+
+function getTextTargetKey(target: SelectedDocxTextTarget) {
+  if (target.kind === "paragraph") return getParagraphTextKey(target.blockId);
+  return getCellTextKey(target.blockId, target.cellId);
+}
+
 function getBlocksSignature(blocks: DocxBlock[]) {
   return JSON.stringify(blocks);
+}
+
+function normalizeParsedDocxBlocks(blocks: DocxBlock[]) {
+  if (blocks.length) return blocks;
+
+  return [
+    {
+      id: "p-0",
+      type: "paragraph",
+      text: "",
+      style: null,
+      style_id: null,
+      alignment: null,
+    } satisfies DocxParagraphBlock,
+  ];
+}
+
+function normalizeDocxWarnings(warnings: string[], originalBlocks: DocxBlock[], normalizedBlocks: DocxBlock[]) {
+  if (originalBlocks.length || normalizedBlocks.length === originalBlocks.length) return warnings;
+
+  return warnings.filter((warning) => !warning.includes("未提取到可显示文本"));
 }
 
 function getDocumentText(blocks: DocxBlock[]) {

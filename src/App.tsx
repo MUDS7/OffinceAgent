@@ -20,6 +20,7 @@ import type {
   ChatMessage,
   DeepSeekStreamEvent,
   DocumentSelectionContext,
+  DocxBlock,
   DocxCommandsResponse,
   DocxExecuteResponse,
   ExcelCommandsResponse,
@@ -71,6 +72,7 @@ import {
 } from "./utils/chatMessages";
 import { decodeBase64Bytes, getFileMimeType, getFileRelativePath, normalizeFilePath } from "./utils/fileUtils";
 import { buildCompressedFileContext } from "./utils/fileContext";
+import { fetchDocumentService } from "./utils/documentService";
 import type { CompressedFileContext } from "./utils/fileContext";
 import type { SaveFileProvider } from "./components/center-pane/types";
 import { restoreTextEditPayload } from "./utils/textCompression";
@@ -446,7 +448,7 @@ function App() {
     setErrorMessage("");
   }
 
-  function createEmptyFile(filename: string) {
+  async function createEmptyFile(filename: string) {
     const trimmedFilename = filename.trim();
     if (!trimmedFilename) return;
 
@@ -455,10 +457,14 @@ function App() {
       return;
     }
 
-    const file = new File([""], trimmedFilename, {
-      type: getFileMimeType(trimmedFilename),
-      lastModified: Date.now(),
-    });
+    let file: File;
+    try {
+      file = await createInitialWorkspaceFile(trimmedFilename);
+    } catch (error) {
+      setErrorMessage(`Failed to create ${trimmedFilename}: ${getErrorMessage(error)}`);
+      return;
+    }
+
     const nextFile = {
       id: `${file.name}-${file.size}-${file.lastModified}`,
       file,
@@ -1747,6 +1753,43 @@ function App() {
 function isSupportedPreviewPath(path: string) {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return DOCUMENT_EXTENSIONS.includes(extension);
+}
+
+async function createInitialWorkspaceFile(filename: string) {
+  const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+  const content = extension === "docx" ? await createBlankDocxBytes(filename) : "";
+
+  return new File([content], filename, {
+    type: getFileMimeType(filename),
+    lastModified: Date.now(),
+  });
+}
+
+async function createBlankDocxBytes(filename: string) {
+  const blocks: DocxBlock[] = [];
+
+  try {
+    const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/render`, () => ({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, blocks }),
+    }));
+
+    if (response.ok) {
+      return await response.blob();
+    }
+
+    throw new Error(`DOCX render service returned ${response.status}`);
+  } catch (fetchError) {
+    try {
+      const bytes = await invoke<number[]>("render_docx_document", { filename, blocks });
+      return new Uint8Array(bytes);
+    } catch (invokeError) {
+      throw new Error(
+        `HTTP render failed: ${getErrorMessage(fetchError)}; Tauri render failed: ${getErrorMessage(invokeError)}`,
+      );
+    }
+  }
 }
 
 function buildFolderRelativePath(folderPath: string, rootName: string, filePath: string) {

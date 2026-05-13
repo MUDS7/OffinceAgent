@@ -24,6 +24,7 @@ def extract_docx_blocks(content: bytes, warnings: list[str]) -> list[DocxBlock]:
 
         document = Document(BytesIO(content))
         blocks: list[DocxBlock] = []
+        fallback_empty_paragraph: DocxParagraphBlock | None = None
         paragraph_index = 0
         table_index = 0
         body = document._body
@@ -44,6 +45,14 @@ def extract_docx_blocks(content: bytes, warnings: list[str]) -> list[DocxBlock]:
                             style_id=style_id,
                             alignment=alignment,
                         )
+                    )
+                elif fallback_empty_paragraph is None:
+                    fallback_empty_paragraph = DocxParagraphBlock(
+                        id=f"p-{paragraph_index}",
+                        text="",
+                        style=style,
+                        style_id=style_id,
+                        alignment=alignment,
                     )
                 blocks.extend(extract_docx_paragraph_images(paragraph, f"p-{paragraph_index}", alignment))
                 paragraph_index += 1
@@ -71,6 +80,9 @@ def extract_docx_blocks(content: bytes, warnings: list[str]) -> list[DocxBlock]:
                         )
                     )
                 table_index += 1
+
+        if not blocks and fallback_empty_paragraph is not None:
+            blocks.append(fallback_empty_paragraph)
 
         if not blocks:
             warnings.append("DOCX 中未提取到可显示文本")
