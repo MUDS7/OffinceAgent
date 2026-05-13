@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, path::PathBuf, time::Instant};
+use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use super::{document_index::IndexedChunk, unix_timestamp_seconds, DocumentStore}
 const DEFAULT_QDRANT_COLLECTION: &str = "office_agent_chunks";
 const DEFAULT_QDRANT_DB_NAME: &str = "office-agent-qdrant.sqlite3";
 const LOCAL_CHUNK_EMBEDDING_DIMENSIONS: usize = 384;
+const LOCAL_CHUNK_EMBEDDING_MODEL: &str = "office-agent-local-hash-v1";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct QdrantCollectionRequest {
@@ -190,39 +191,27 @@ pub(super) fn upsert_document_chunk_embeddings(
         .qdrant_connection
         .lock()
         .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
-    println!(
-        "[qdrant] start document chunk vectorization: document_id={document_id}, document_name={document_name}, collection={}, chunks={}",
-        config.collection,
-        chunks.len()
-    );
-
-    let deleted = delete_qdrant_document_points(&connection, &config.collection, document_id)?;
-    if deleted > 0 {
-        println!(
-            "[qdrant] removed stale document vectors: document_id={document_id}, collection={}, removed={deleted}",
-            config.collection
-        );
-    }
 
     let embeddable_chunks = chunks
         .iter()
         .filter(|chunk| !chunk.plain_text.trim().is_empty())
         .collect::<Vec<_>>();
     let total = embeddable_chunks.len();
-    if total != chunks.len() {
-        println!(
-            "[qdrant] skipped empty chunks before vectorization: document_id={document_id}, skipped={}, remaining={total}",
-            chunks.len() - total
-        );
-    }
     if total == 0 {
-        println!(
-            "[qdrant] finish document chunk vectorization: document_id={document_id}, vectors=0"
-        );
         return Ok(0);
     }
 
-    let started_at = Instant::now();
+    if document_chunk_vectors_are_current(
+        &connection,
+        &config.collection,
+        document_id,
+        &embeddable_chunks,
+    )? {
+        return Ok(0);
+    }
+
+    delete_qdrant_document_points(&connection, &config.collection, document_id)?;
+
     let mut points = Vec::with_capacity(total);
     for (index, chunk) in embeddable_chunks.into_iter().enumerate() {
         let current = index + 1;
@@ -239,16 +228,8 @@ pub(super) fn upsert_document_chunk_embeddings(
             chunk,
         )?);
     }
-    println!(
-        "[qdrant] finish document chunk vectorization: document_id={document_id}, vectors={total}, elapsed_ms={}",
-        started_at.elapsed().as_millis()
-    );
 
     let result = upsert_qdrant_points_with_connection(&mut connection, &config.collection, points)?;
-    println!(
-        "[qdrant] finish document vector upsert: document_id={document_id}, collection={}, points_upserted={}",
-        result.collection, result.points_upserted
-    );
     Ok(result.points_upserted)
 }
 
@@ -322,7 +303,7 @@ fn indexed_chunk_to_qdrant_point(
     document_name: &str,
     chunk: &IndexedChunk,
 ) -> Result<QdrantVectorPoint, String> {
-    let payload = qdrant_chunk_payload(
+    let mut payload = qdrant_chunk_payload(
         &chunk.id,
         document_id,
         Some(document_name),
@@ -330,6 +311,14 @@ fn indexed_chunk_to_qdrant_point(
         Some(&Value::String(chunk.title_path.clone())),
         chunk.order_index as i64,
     )?;
+    payload.insert(
+        "content_hash".to_string(),
+        Value::String(chunk_content_hash(chunk)),
+    );
+    payload.insert(
+        "embedding_model".to_string(),
+        Value::String(LOCAL_CHUNK_EMBEDDING_MODEL.to_string()),
+    );
 
     Ok(QdrantVectorPoint {
         id: chunk.id.clone(),
@@ -392,6 +381,112 @@ fn delete_qdrant_document_points(
     }
 
     Ok(stale_point_ids.len())
+}
+
+fn document_chunk_vectors_are_current(
+    connection: &Connection,
+    collection: &str,
+    document_id: &str,
+    chunks: &[&IndexedChunk],
+) -> Result<bool, String> {
+    let Some(collection_metadata) = get_qdrant_collection(connection, collection)? else {
+        return Ok(false);
+    };
+    if collection_metadata.vector_size != LOCAL_CHUNK_EMBEDDING_DIMENSIONS as u64 {
+        return Ok(false);
+    }
+
+    let mut existing = HashMap::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT point_id, vector_json, payload_json
+             FROM qdrant_points
+             WHERE collection = ?1",
+        )
+        .map_err(|error| format!("cannot prepare embedded Qdrant vector cache lookup: {error}"))?;
+    let rows = statement
+        .query_map(params![collection], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("cannot scan embedded Qdrant vector cache: {error}"))?;
+
+    for row in rows {
+        let (point_id, vector_json, payload_json) =
+            row.map_err(|error| format!("cannot read embedded Qdrant vector cache: {error}"))?;
+        let payload = serde_json::from_str::<Value>(&payload_json).map_err(|error| {
+            format!("cannot parse embedded Qdrant vector cache payload: {error}")
+        })?;
+        if !payload
+            .get("document_id")
+            .and_then(Value::as_str)
+            .map(|value| value == document_id)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let Some(chunk_id) = payload.get("chunk_id").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(content_hash) = payload.get("content_hash").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(embedding_model) = payload.get("embedding_model").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        if embedding_model != LOCAL_CHUNK_EMBEDDING_MODEL {
+            return Ok(false);
+        }
+
+        let vector = serde_json::from_str::<Vec<f32>>(&vector_json)
+            .map_err(|error| format!("cannot parse embedded Qdrant cached vector: {error}"))?;
+        if vector.len() != LOCAL_CHUNK_EMBEDDING_DIMENSIONS {
+            return Ok(false);
+        }
+
+        existing.insert(
+            chunk_id.to_string(),
+            ExistingChunkVector {
+                point_id,
+                content_hash: content_hash.to_string(),
+            },
+        );
+    }
+
+    if existing.len() != chunks.len() {
+        return Ok(false);
+    }
+
+    Ok(chunks.iter().all(|chunk| {
+        existing
+            .get(&chunk.id)
+            .map(|vector| {
+                vector.point_id == chunk.id && vector.content_hash == chunk_content_hash(chunk)
+            })
+            .unwrap_or(false)
+    }))
+}
+
+struct ExistingChunkVector {
+    point_id: String,
+    content_hash: String,
+}
+
+fn chunk_content_hash(chunk: &IndexedChunk) -> String {
+    stable_content_hash(&chunk.plain_text)
+}
+
+fn stable_content_hash(value: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let hash = value.bytes().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    });
+    format!("{hash:016x}")
 }
 
 fn embed_chunk_text(text: &str) -> Vec<f32> {
@@ -1418,9 +1513,23 @@ mod tests {
             .expect("chunks should upsert");
         assert_eq!(inserted, 2);
 
+        let skipped = upsert_document_chunk_embeddings(&store, "doc_1", "demo.pdf", &chunks)
+            .expect("unchanged chunks should be skipped");
+        assert_eq!(skipped, 0);
+
         let replacement = vec![test_indexed_chunk("chunk_3", "Page 3", 0)];
         let inserted = upsert_document_chunk_embeddings(&store, "doc_1", "demo.pdf", &replacement)
             .expect("replacement chunks should upsert");
+        assert_eq!(inserted, 1);
+
+        let changed_replacement = vec![{
+            let mut chunk = test_indexed_chunk("chunk_3", "Page 3", 0);
+            chunk.plain_text.push_str("\nupdated content");
+            chunk
+        }];
+        let inserted =
+            upsert_document_chunk_embeddings(&store, "doc_1", "demo.pdf", &changed_replacement)
+                .expect("changed chunks should upsert");
         assert_eq!(inserted, 1);
 
         let connection = store
