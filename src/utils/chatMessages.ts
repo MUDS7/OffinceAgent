@@ -12,6 +12,7 @@ import type {
 import { MAX_SELECTION_CONTEXT_CHARS } from "../constants";
 import type { CompressedFileContext } from "./fileContext";
 import { compressTextEditPayload } from "./textCompression";
+import { buildUploadedDocumentReferenceSystemMessage } from "./documentReference";
 
 // ─── DeepSeek message building ────────────────────────────────────────────────
 
@@ -19,15 +20,22 @@ export function buildDeepSeekMessages(
   chatMessages: ChatMessage[],
   documentSelection: DocumentSelectionContext | null,
   fileContext: CompressedFileContext | null = null,
+  uploadedDocumentReferenceContext = "",
 ): DeepSeekApiMessage[] {
   const messages = chatMessages.map((message) => ({
     role: message.role,
     content: message.text,
   }));
+  const uploadedDocumentReferenceMessage = buildUploadedDocumentReferenceSystemMessage(
+    uploadedDocumentReferenceContext,
+  );
+  const referenceMessages: DeepSeekApiMessage[] = uploadedDocumentReferenceMessage
+    ? [{ role: "system", content: uploadedDocumentReferenceMessage }]
+    : [];
 
   if (!documentSelection?.text.trim()) {
     if (!fileContext?.content.trim()) {
-      return messages;
+      return [...referenceMessages, ...messages];
     }
 
     const contextMessage: DeepSeekApiMessage = {
@@ -48,7 +56,7 @@ export function buildDeepSeekMessages(
         .join("\n"),
     };
 
-    return [contextMessage, ...messages];
+    return [contextMessage, ...referenceMessages, ...messages];
   }
 
   const rawSelectionText = documentSelection.text.trim();
@@ -66,7 +74,7 @@ export function buildDeepSeekMessages(
     ].join("\n"),
   };
 
-  return [contextMessage, ...messages];
+  return [contextMessage, ...referenceMessages, ...messages];
 }
 
 export function truncateSelectionContext(text: string): string {
@@ -141,6 +149,7 @@ export function buildTextEditAgentRequest(
   intent: TextSelectionIntentAction,
   fileContext: CompressedFileContext | null = null,
   fullDocumentText?: string,
+  uploadedDocumentReferenceContext = "",
 ): TextEditAgentRequest | null {
   if (
     (intent !== "replace_selection" && intent !== "insert_after_selection") ||
@@ -166,6 +175,7 @@ export function buildTextEditAgentRequest(
     end,
     selectedText: compressedPayload.text,
     fileContext: shouldReplaceFullDocument || documentSelection.text.trim() ? undefined : fileContext?.content,
+    uploadedDocumentContext: uploadedDocumentReferenceContext || undefined,
     isFullDocument: shouldReplaceFullDocument,
     contentEncoding: compressedPayload.encoding,
     instruction,

@@ -11,6 +11,7 @@ import {
   SUPPORTED_EXCEL_COMMANDS,
 } from "../constants";
 import { truncateSelectionContext } from "./chatMessages";
+import { buildUploadedDocumentReferenceSystemMessage } from "./documentReference";
 import type { CompressedFileContext } from "./fileContext";
 
 // ─── Command spec fetching ────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ export function buildExcelAgentMessages({
   instruction,
   selectionText,
   fileContext,
+  uploadedDocumentReferenceContext,
   chatMessages,
 }: {
   commandSpecs: ExcelCommandsResponse;
@@ -56,6 +58,7 @@ export function buildExcelAgentMessages({
   instruction: string;
   selectionText: string;
   fileContext?: CompressedFileContext | null;
+  uploadedDocumentReferenceContext?: string;
   chatMessages: ChatMessage[];
 }) {
   const commandNames = [...getExcelCommandNames(commandSpecs)].join(", ");
@@ -70,6 +73,9 @@ export function buildExcelAgentMessages({
     .slice(-6)
     .map((message) => `${message.role}: ${message.text}`)
     .join("\n");
+  const uploadedDocumentReferenceMessage = buildUploadedDocumentReferenceSystemMessage(
+    uploadedDocumentReferenceContext ?? "",
+  );
 
   return [
     {
@@ -78,6 +84,7 @@ export function buildExcelAgentMessages({
         EXCEL_AGENT_SYSTEM_PROMPT,
         `Only choose one of these currently available commands for action=excel_execute: ${commandNames}.`,
         "If the user asks for an unavailable Excel operation, use action=ask_confirm and explain briefly in Chinese that the current document service needs to be restarted or updated.",
+        uploadedDocumentReferenceMessage,
       ].join("\n"),
     },
     {

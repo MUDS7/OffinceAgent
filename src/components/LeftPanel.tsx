@@ -33,6 +33,18 @@ type WorkspaceFile = {
   analysis: unknown | null;
 };
 
+type WorkspaceTreeNodeRecord = {
+  id: string;
+  parent_id?: string | null;
+  workspace_path: string;
+  node_type: "root" | "folder" | "file";
+  name: string;
+  relative_path: string;
+  document_id?: string | null;
+  order_index: number;
+  is_expanded: boolean;
+};
+
 type WorkspaceFolder = {
   id: string;
   name: string;
@@ -60,6 +72,7 @@ type WorkspaceTreeNode = WorkspaceTreeFile | WorkspaceTreeFolder;
 type LeftPanelProps = {
   workspaceName: string;
   workspaceFiles: WorkspaceFile[];
+  workspaceTreeNodes: WorkspaceTreeNodeRecord[];
   selectedFileId: string;
   explorerWidth: number;
   onSelectFile: (fileId: string) => void;
@@ -72,6 +85,7 @@ type LeftPanelProps = {
 export function LeftPanel({
   workspaceName,
   workspaceFiles,
+  workspaceTreeNodes,
   selectedFileId,
   explorerWidth,
   onSelectFile,
@@ -94,8 +108,8 @@ export function LeftPanel({
   const newFileInputRef = useRef<HTMLInputElement | null>(null);
   const newFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceTree = useMemo(
-    () => buildWorkspaceTree(workspaceFiles, workspaceName),
-    [workspaceFiles, workspaceName],
+    () => buildWorkspaceTree(workspaceFiles, workspaceName, workspaceTreeNodes),
+    [workspaceFiles, workspaceName, workspaceTreeNodes],
   );
 
   useEffect(() => {
@@ -552,34 +566,23 @@ function collectWorkspaceTreeFileIds(nodes: WorkspaceTreeNode[]) {
   return fileIds;
 }
 
-function buildWorkspaceTree(workspaceFiles: WorkspaceFile[], workspaceName: string) {
+function buildWorkspaceTree(
+  workspaceFiles: WorkspaceFile[],
+  workspaceName: string,
+  workspaceTreeNodes: WorkspaceTreeNodeRecord[],
+) {
   const rootNodes: WorkspaceTreeNode[] = [];
   const folderByPath = new Map<string, WorkspaceTreeFolder>();
+
+  for (const treeNode of workspaceTreeNodes) {
+    if (treeNode.node_type !== "folder") continue;
+    ensureWorkspaceTreeFolder(rootNodes, folderByPath, getDisplayPathPartsFromPath(treeNode.relative_path, workspaceName));
+  }
 
   for (const fileItem of workspaceFiles) {
     const parts = getDisplayPathParts(fileItem, workspaceName);
     const filename = parts[parts.length - 1] ?? fileItem.file.name;
-    let siblings = rootNodes;
-    let currentPath = "";
-
-    for (const folderName of parts.slice(0, -1)) {
-      currentPath = currentPath ? `${currentPath}/${folderName}` : folderName;
-      let folder = folderByPath.get(currentPath);
-
-      if (!folder) {
-        folder = {
-          kind: "folder",
-          id: `tree-folder:${currentPath}`,
-          name: folderName,
-          path: currentPath,
-          children: [],
-        };
-        folderByPath.set(currentPath, folder);
-        siblings.push(folder);
-      }
-
-      siblings = folder.children;
-    }
+    const siblings = ensureWorkspaceTreeFolder(rootNodes, folderByPath, parts.slice(0, -1));
 
     siblings.push({
       kind: "file",
@@ -593,15 +596,53 @@ function buildWorkspaceTree(workspaceFiles: WorkspaceFile[], workspaceName: stri
   return rootNodes;
 }
 
+function ensureWorkspaceTreeFolder(
+  rootNodes: WorkspaceTreeNode[],
+  folderByPath: Map<string, WorkspaceTreeFolder>,
+  folderParts: string[],
+) {
+  let siblings = rootNodes;
+  let currentPath = "";
+
+  for (const folderName of folderParts) {
+    currentPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+    let folder = folderByPath.get(currentPath);
+
+    if (!folder) {
+      folder = {
+        kind: "folder",
+        id: `tree-folder:${currentPath}`,
+        name: folderName,
+        path: currentPath,
+        children: [],
+      };
+      folderByPath.set(currentPath, folder);
+      siblings.push(folder);
+    }
+
+    siblings = folder.children;
+  }
+
+  return siblings;
+}
+
 function getDisplayPathParts(fileItem: WorkspaceFile, workspaceName: string) {
   const rawPath = fileItem.relativePath || fileItem.file.name;
+  return getDisplayPathPartsFromPath(rawPath, workspaceName, fileItem.file.name);
+}
+
+function getDisplayPathPartsFromPath(rawPath: string, workspaceName: string, fallbackName = "") {
   const parts = rawPath.replace(/\\/g, "/").split("/").filter(Boolean);
 
   if (parts.length > 1 && parts[0] === workspaceName) {
     return parts.slice(1);
   }
 
-  return parts.length ? parts : [fileItem.file.name];
+  if (parts.length === 1 && parts[0] === workspaceName) {
+    return [];
+  }
+
+  return parts.length ? parts : fallbackName ? [fallbackName] : [];
 }
 
 function sortWorkspaceNodes(nodes: WorkspaceTreeNode[]) {

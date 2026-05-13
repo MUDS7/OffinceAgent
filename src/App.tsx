@@ -30,9 +30,12 @@ import type {
   TextEditOperation,
   TextSelectionIntentAction,
   WorkspaceFile,
+  WorkspaceFileMetadataRecord,
   WorkspaceFileMetadataResult,
   WorkspaceFilesMetadataResult,
+  WorkspaceSnapshotResult,
   WorkspaceStorageInfo,
+  WorkspaceTreeNodeRecord,
 } from "./types";
 import {
   buildExcelAgentMessages,
@@ -72,6 +75,11 @@ import type { SaveFileProvider } from "./components/center-pane/types";
 import { restoreTextEditPayload } from "./utils/textCompression";
 import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
+  formatUploadedDocumentReferenceContext,
+  searchUploadedDocumentReference,
+  shouldReferenceUploadedDocuments,
+} from "./utils/documentReference";
+import {
   getInitialLayoutWidths,
   getUiScale,
   MIN_CODEX_WIDTH,
@@ -84,6 +92,7 @@ function App() {
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [workspaceTreeNodes, setWorkspaceTreeNodes] = useState<WorkspaceTreeNodeRecord[]>([]);
   const [workspaceName, setWorkspaceName] = useState("工作区");
   const [selectedFileId, setSelectedFileId] = useState("");
   const [openFileIds, setOpenFileIds] = useState<string[]>([]);
@@ -230,6 +239,33 @@ function App() {
     folderInputRef.current?.click();
   }
 
+  async function loadPersistedWorkspaceSnapshot() {
+    if (!canUseTauriEvents()) return;
+
+    try {
+      const snapshot = await invoke<WorkspaceSnapshotResult>("load_workspace_snapshot");
+      const restoredFiles = snapshot.files
+        .filter((record) => isSupportedPreviewPath(record.filename || record.path))
+        .map(createLazyWorkspaceFileFromMetadata);
+
+      setWorkspaceTreeNodes(snapshot.tree_nodes);
+      if (!restoredFiles.length) return;
+
+      setWorkspaceName(snapshot.workspace_name || "工作区");
+      setWorkspaceFiles(restoredFiles);
+      setOpenFileIds([]);
+      setSelectedFileId("");
+      setUnsavedContents({});
+      setDirtyFileIds([]);
+      setDocumentSelection(null);
+      setPendingAgentTextEdit(null);
+      setPendingTextRestore(null);
+      setErrorMessage("");
+    } catch (error) {
+      console.warn("Failed to load workspace snapshot.", error);
+    }
+  }
+
   async function openFilesByPath(filePaths: string[]) {
     const nextFiles: WorkspaceFile[] = [];
     for (const filePath of filePaths) {
@@ -310,6 +346,7 @@ function App() {
     try {
       await invoke<WorkspaceStorageInfo>("open_workspace_storage", { path: folderPath });
       await invoke<WorkspaceFilesMetadataResult>("index_workspace_files", { path: folderPath });
+      const snapshot = await invoke<WorkspaceSnapshotResult>("load_workspace_snapshot");
       const entries = await invoke<string[]>("list_dir_files", { path: folderPath });
       const rootName = folderPath.replace(/\\/g, "/").split("/").pop() ?? "工作区";
       const supported = entries.filter(isSupportedPreviewPath);
@@ -317,6 +354,7 @@ function App() {
 
       setWorkspaceName(rootName);
       setWorkspaceFiles(nextFiles);
+      setWorkspaceTreeNodes(snapshot.tree_nodes);
       setOpenFileIds([]);
       setSelectedFileId("");
       setUnsavedContents({});
@@ -726,6 +764,7 @@ function App() {
     assistantMessageId: string,
     streamId: string,
     fileContext: CompressedFileContext | null,
+    uploadedDocumentReferenceContext: string,
   ) {
     const targetFile = selectedWorkspaceFile;
     if (!targetFile) return;
@@ -745,6 +784,7 @@ function App() {
         instruction,
         selectionText,
         fileContext,
+        uploadedDocumentReferenceContext,
         chatMessages: nextMessages,
       });
 
@@ -837,6 +877,7 @@ function App() {
     assistantMessageId: string,
     streamId: string,
     fileContext: CompressedFileContext | null,
+    uploadedDocumentReferenceContext: string,
   ) {
     const targetFile = selectedWorkspaceFile;
     if (!targetFile) return;
@@ -855,6 +896,7 @@ function App() {
         instruction,
         selectionText,
         fileContext,
+        uploadedDocumentReferenceContext,
         chatMessages: nextMessages,
       });
 
@@ -1164,6 +1206,7 @@ function App() {
       contentEncoding?: TextEditContentEncoding;
     } | null = null;
     let fileContext: CompressedFileContext | null = null;
+    let uploadedDocumentReferenceContext = "";
 
     function applyAgentTextResult() {
       if (!textEditTarget || hasAppliedAgentText) return;
@@ -1215,13 +1258,42 @@ function App() {
         }
       }
 
+      if (shouldReferenceUploadedDocuments(text)) {
+        try {
+          const hits = await searchUploadedDocumentReference(text);
+          uploadedDocumentReferenceContext = hits.length
+            ? formatUploadedDocumentReferenceContext(hits)
+            : "No matching uploaded-document chunks were found for this request.";
+        } catch (error) {
+          console.warn("Failed to search uploaded document reference chunks.", error);
+          uploadedDocumentReferenceContext =
+            "Uploaded document reference search failed; no uploaded-document chunks are available for this request.";
+        }
+      }
+
       if (shouldUseSpreadsheetAgent(selectedWorkspaceFile)) {
-        await handleSpreadsheetAgentCommand(model, text, nextMessages, assistantMessageId, streamId, fileContext);
+        await handleSpreadsheetAgentCommand(
+          model,
+          text,
+          nextMessages,
+          assistantMessageId,
+          streamId,
+          fileContext,
+          uploadedDocumentReferenceContext,
+        );
         return;
       }
 
       if (shouldUseDocxAgent(selectedWorkspaceFile)) {
-        await handleDocxAgentCommand(model, text, nextMessages, assistantMessageId, streamId, fileContext);
+        await handleDocxAgentCommand(
+          model,
+          text,
+          nextMessages,
+          assistantMessageId,
+          streamId,
+          fileContext,
+          uploadedDocumentReferenceContext,
+        );
         return;
       }
 
@@ -1247,7 +1319,14 @@ function App() {
         return;
       }
 
-      const textEditRequest = buildTextEditAgentRequest(text, textSelection, intent, fileContext, fullDocumentText);
+      const textEditRequest = buildTextEditAgentRequest(
+        text,
+        textSelection,
+        intent,
+        fileContext,
+        fullDocumentText,
+        uploadedDocumentReferenceContext,
+      );
       textEditTarget =
         textEditRequest && textSelection
           ? {
@@ -1261,7 +1340,9 @@ function App() {
               contentEncoding: textEditRequest.contentEncoding,
             }
           : null;
-      const apiMessages = textEditRequest ? [] : buildDeepSeekMessages(nextMessages, textSelection, fileContext);
+      const apiMessages = textEditRequest
+        ? []
+        : buildDeepSeekMessages(nextMessages, textSelection, fileContext, uploadedDocumentReferenceContext);
       const assistantContentTone = textEditRequest ? "file-edit" : "default";
 
       setChatMessages((current) =>
@@ -1512,6 +1593,7 @@ function App() {
 
   useEffect(() => {
     refreshStatus();
+    void loadPersistedWorkspaceSnapshot();
   }, []);
 
   useEffect(() => {
@@ -1560,6 +1642,7 @@ function App() {
         <LeftPanel
           workspaceName={workspaceName}
           workspaceFiles={workspaceFiles}
+          workspaceTreeNodes={workspaceTreeNodes}
           selectedFileId={selectedFileId}
           explorerWidth={layoutWidths.explorer}
           onSelectFile={openWorkspaceFile}
@@ -1661,6 +1744,27 @@ function createLazyWorkspaceFile(folderPath: string, rootName: string, filePath:
     diskPath: filePath,
     contentLoaded: false,
     metadataSaveStatus: "pending",
+    analysis: null,
+  };
+}
+
+function createLazyWorkspaceFileFromMetadata(record: WorkspaceFileMetadataRecord): WorkspaceFile {
+  const filename = record.filename || record.path.replace(/\\/g, "/").split("/").pop() || record.path;
+  const lastModified = record.modified_at ? record.modified_at * 1000 : Date.now();
+  const file = new File([""], filename, {
+    type: getFileMimeType(filename),
+    lastModified,
+  });
+
+  return {
+    id: record.document_id || getWorkspaceDocumentId(record.path),
+    file,
+    relativePath: record.relative_path || undefined,
+    diskPath: record.path,
+    contentLoaded: false,
+    metadataSaveStatus: "saved",
+    sizeBytes: record.size_bytes ?? undefined,
+    lastModifiedMs: lastModified,
     analysis: null,
   };
 }

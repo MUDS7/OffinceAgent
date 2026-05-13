@@ -14,6 +14,7 @@ import {
   SUPPORTED_DOCX_COMMANDS,
 } from "../constants";
 import { truncateSelectionContext } from "./chatMessages";
+import { buildUploadedDocumentReferenceSystemMessage } from "./documentReference";
 import { fetchDocumentService } from "./documentService";
 import type { CompressedFileContext } from "./fileContext";
 
@@ -49,6 +50,7 @@ export function buildDocxAgentMessages({
   instruction,
   selectionText,
   fileContext,
+  uploadedDocumentReferenceContext,
   chatMessages,
 }: {
   commandSpecs: DocxCommandsResponse;
@@ -56,6 +58,7 @@ export function buildDocxAgentMessages({
   instruction: string;
   selectionText: string;
   fileContext?: CompressedFileContext | null;
+  uploadedDocumentReferenceContext?: string;
   chatMessages: ChatMessage[];
 }) {
   const commandNames = [...getDocxCommandNames(commandSpecs)].join(", ");
@@ -70,6 +73,9 @@ export function buildDocxAgentMessages({
     .slice(-6)
     .map((message) => `${message.role}: ${message.text}`)
     .join("\n");
+  const uploadedDocumentReferenceMessage = buildUploadedDocumentReferenceSystemMessage(
+    uploadedDocumentReferenceContext ?? "",
+  );
 
   return [
     {
@@ -78,6 +84,7 @@ export function buildDocxAgentMessages({
         DOCX_AGENT_SYSTEM_PROMPT,
         `Only choose one of these currently available commands for action=docx_execute: ${commandNames}.`,
         "If the user asks for an unavailable DOCX operation, use action=ask_confirm and explain briefly in Chinese that this operation is not supported yet.",
+        uploadedDocumentReferenceMessage,
       ].join("\n"),
     },
     {

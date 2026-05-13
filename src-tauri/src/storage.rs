@@ -42,10 +42,21 @@ pub(crate) struct WorkspaceStorageInfo {
 
 /// 应用启动时初始化默认存储。创建 SQLite 和 Qdrant 连接，并将 `DocumentStore` 注入 Tauri 状态管理。
 pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
-    let db_path = sqlite_store::sqlite_db_path(app)?;
+    let current_workspace_path = std::env::current_dir()
+        .ok()
+        .filter(|path| path.join(".data").exists());
+    let db_path = if let Some(path) = &current_workspace_path {
+        workspace_sqlite_path(&path.join(".data"))
+    } else {
+        sqlite_store::sqlite_db_path(app)?
+    };
     let connection = open_sqlite_connection(&db_path)?;
 
-    let qdrant_path = qdrant::qdrant_db_path(app)?;
+    let qdrant_path = if let Some(path) = &current_workspace_path {
+        workspace_qdrant_path(&path.join(".data"))
+    } else {
+        qdrant::qdrant_db_path(app)?
+    };
     let qdrant_connection = open_qdrant_connection(&qdrant_path)?;
     let workspace_data_path = db_path
         .parent()
@@ -58,7 +69,7 @@ pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
         sqlite_path: Mutex::new(db_path),
         qdrant_connection: Mutex::new(qdrant_connection),
         qdrant_path: Mutex::new(qdrant_path),
-        workspace_path: Mutex::new(None),
+        workspace_path: Mutex::new(current_workspace_path),
         workspace_data_path: Mutex::new(workspace_data_path),
     });
     Ok(())
@@ -150,6 +161,13 @@ pub(crate) fn index_workspace_files(
 }
 
 #[tauri::command]
+pub(crate) fn load_workspace_snapshot(
+    state: State<'_, DocumentStore>,
+) -> Result<sqlite_store::WorkspaceSnapshotResult, String> {
+    sqlite_store::load_workspace_snapshot(state)
+}
+
+#[tauri::command]
 pub(crate) async fn get_qdrant_status(
     state: State<'_, DocumentStore>,
 ) -> Result<qdrant::QdrantStatus, String> {
@@ -190,6 +208,17 @@ pub(crate) async fn search_qdrant_vectors(
     request: qdrant::QdrantSearchRequest,
 ) -> Result<serde_json::Value, String> {
     qdrant::search_qdrant_vectors(state, request).await
+}
+
+/// Search indexed uploaded-document chunks and return their stored text content.
+#[tauri::command]
+pub(crate) fn search_uploaded_document_chunks(
+    state: State<'_, DocumentStore>,
+    query: String,
+    limit: Option<u32>,
+    min_score: Option<f64>,
+) -> Result<Vec<qdrant::UploadedDocumentChunkHit>, String> {
+    qdrant::search_uploaded_document_chunks(state, query, limit, min_score)
 }
 
 /// 当前 Unix 时间戳（秒），用于给索引记录打时间标记。

@@ -41,6 +41,36 @@ export type WorkspaceFilesMetadataResult = {
   files_indexed: number;
 };
 
+export type WorkspaceFileMetadataRecord = {
+  document_id: string;
+  filename: string;
+  path: string;
+  relative_path?: string | null;
+  extension?: string | null;
+  file_type?: string | null;
+  size_bytes?: number | null;
+  modified_at?: number | null;
+};
+
+export type WorkspaceTreeNodeRecord = {
+  id: string;
+  parent_id?: string | null;
+  workspace_path: string;
+  node_type: "root" | "folder" | "file";
+  name: string;
+  relative_path: string;
+  document_id?: string | null;
+  order_index: number;
+  is_expanded: boolean;
+};
+
+export type WorkspaceSnapshotResult = {
+  workspace_path?: string | null;
+  workspace_name: string;
+  files: WorkspaceFileMetadataRecord[];
+  tree_nodes: WorkspaceTreeNodeRecord[];
+};
+
 export type WorkspaceStorageInfo = {
   workspace_path: string;
   data_path: string;
@@ -283,10 +313,23 @@ export type TextEditAgentRequest = {
   end: number;
   selectedText: string;
   fileContext?: string;
+  uploadedDocumentContext?: string;
   isFullDocument?: boolean;
   contentEncoding?: "json_minified" | "text_whitespace_compacted";
   instruction: string;
   operation: TextEditOperation;
+};
+
+export type UploadedDocumentChunkHit = {
+  chunk_id: string;
+  document_id: string;
+  document_name: string;
+  chunk_type: string;
+  title_path: string;
+  score: number;
+  content: string;
+  plain_text: string;
+  order_index: number;
 };
 
 export type TextSelectionIntentAction =

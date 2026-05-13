@@ -21,6 +21,7 @@ pub(crate) struct TextEditAgentRequest {
     pub(super) selected_text: String,
     /// 可选的压缩全文上下文，帮助模型在无选区时判断插入位置和风格。
     pub(super) file_context: Option<String>,
+    pub(super) uploaded_document_context: Option<String>,
     #[serde(default)]
     /// 是否要求模型返回完整文件内容。
     pub(super) is_full_document: bool,

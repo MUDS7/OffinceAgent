@@ -71,6 +71,19 @@ pub(crate) struct QdrantUpsertResult {
     points_upserted: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct UploadedDocumentChunkHit {
+    chunk_id: String,
+    document_id: String,
+    document_name: String,
+    chunk_type: String,
+    title_path: String,
+    score: f64,
+    content: String,
+    plain_text: String,
+    order_index: i64,
+}
+
 pub(super) fn qdrant_db_path(app: &tauri::App) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("OFFICE_AGENT_QDRANT_PATH") {
         if !path.trim().is_empty() {
@@ -701,6 +714,190 @@ pub(crate) async fn search_qdrant_vectors(
         "status": "ok",
         "time": 0.0,
     }))
+}
+
+pub(crate) fn search_uploaded_document_chunks(
+    state: State<'_, DocumentStore>,
+    query: String,
+    limit: Option<u32>,
+    min_score: Option<f64>,
+) -> Result<Vec<UploadedDocumentChunkHit>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let config = QdrantConfig::from_store(&state, None)?;
+    let query_vector = embed_chunk_text(query);
+    if query_vector.iter().all(|value| *value == 0.0) {
+        return Ok(Vec::new());
+    }
+
+    let candidates = {
+        let connection = state
+            .qdrant_connection
+            .lock()
+            .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
+        let Some(collection) = get_qdrant_collection(&connection, &config.collection)? else {
+            return Ok(Vec::new());
+        };
+        if query_vector.len() as u64 != collection.vector_size {
+            return Err(format!(
+                "cannot search uploaded document chunks: expected vector dimension {}, got {}",
+                collection.vector_size,
+                query_vector.len()
+            ));
+        }
+
+        search_chunk_candidates(
+            &connection,
+            &config.collection,
+            &collection,
+            &query_vector,
+            limit.unwrap_or(5).min(20) as usize,
+            min_score,
+        )?
+    };
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+    hydrate_uploaded_document_hits(&connection, candidates)
+}
+
+struct UploadedChunkCandidate {
+    chunk_id: String,
+    score: f64,
+}
+
+fn search_chunk_candidates(
+    connection: &Connection,
+    collection_name: &str,
+    collection: &QdrantCollection,
+    query_vector: &[f32],
+    limit: usize,
+    min_score: Option<f64>,
+) -> Result<Vec<UploadedChunkCandidate>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT point_id, external_id, vector_json, payload_json
+             FROM qdrant_points
+             WHERE collection = ?1",
+        )
+        .map_err(|error| format!("cannot prepare embedded Qdrant chunk search: {error}"))?;
+    let rows = statement
+        .query_map(params![collection_name], |row| {
+            Ok(QdrantStoredPoint {
+                point_id: row.get(0)?,
+                external_id: row.get(1)?,
+                vector_json: row.get(2)?,
+                payload_json: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("cannot scan embedded Qdrant chunk points: {error}"))?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let point = row.map_err(|error| format!("cannot read embedded Qdrant point: {error}"))?;
+        let vector = serde_json::from_str::<Vec<f32>>(&point.vector_json)
+            .map_err(|error| format!("cannot parse embedded Qdrant vector: {error}"))?;
+        let payload = serde_json::from_str::<Value>(&point.payload_json)
+            .map_err(|error| format!("cannot parse embedded Qdrant payload: {error}"))?;
+        let Some(chunk_id) = payload
+            .get("chunk_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+
+        let score = score_vectors(query_vector, &vector, &collection.distance);
+        if !passes_relevance_threshold(score, &collection.distance, min_score) {
+            continue;
+        }
+
+        candidates.push(UploadedChunkCandidate { chunk_id, score });
+    }
+
+    sort_uploaded_chunk_candidates(&mut candidates, &collection.distance);
+    candidates.truncate(limit.max(1));
+    Ok(candidates)
+}
+
+fn passes_relevance_threshold(score: f64, distance: &str, min_score: Option<f64>) -> bool {
+    let Some(min_score) = min_score else {
+        return true;
+    };
+    match normalize_distance(distance).as_str() {
+        "Euclid" | "Manhattan" => score <= min_score,
+        _ => score >= min_score,
+    }
+}
+
+fn sort_uploaded_chunk_candidates(candidates: &mut [UploadedChunkCandidate], distance: &str) {
+    let normalized = normalize_distance(distance);
+    candidates.sort_by(|left, right| {
+        let ordering = left
+            .score
+            .partial_cmp(&right.score)
+            .unwrap_or(Ordering::Equal);
+        if normalized == "Euclid" || normalized == "Manhattan" {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+}
+
+fn hydrate_uploaded_document_hits(
+    connection: &Connection,
+    candidates: Vec<UploadedChunkCandidate>,
+) -> Result<Vec<UploadedDocumentChunkHit>, String> {
+    let mut hits = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let mut statement = connection
+            .prepare(
+                "SELECT c.id,
+                        c.document_id,
+                        COALESCE(d.name, d.filename, c.file_name, ''),
+                        c.chunk_type,
+                        c.title_path,
+                        c.content,
+                        c.plain_text,
+                        c.order_index
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.document_id
+                 WHERE c.id = ?1",
+            )
+            .map_err(|error| format!("cannot prepare uploaded document chunk lookup: {error}"))?;
+        let row = statement.query_row(params![candidate.chunk_id], |row| {
+            Ok(UploadedDocumentChunkHit {
+                chunk_id: row.get(0)?,
+                document_id: row.get(1)?,
+                document_name: row.get(2)?,
+                chunk_type: row.get(3)?,
+                title_path: row.get(4)?,
+                score: candidate.score,
+                content: row.get(5)?,
+                plain_text: row.get(6)?,
+                order_index: row.get(7)?,
+            })
+        });
+
+        match row {
+            Ok(hit) => hits.push(hit),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(format!("cannot read uploaded document chunk: {error}")),
+        }
+    }
+    Ok(hits)
 }
 
 pub(super) fn migrate_qdrant(connection: &Connection) -> Result<(), String> {

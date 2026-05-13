@@ -73,6 +73,9 @@ pub(super) fn build_text_edit_messages(
         }
         _ => String::new(),
     };
+    let uploaded_document_section = build_text_edit_uploaded_document_context_section(
+        request.uploaded_document_context.as_deref(),
+    );
     // 执行器的响应会按标签解析，因此系统消息要约束模型只输出需要写入文件的内容。
     let system_content = format!("{}{}", "You are OfficeAgent's text edit executor. The intent/planning step has already finished in a separate model call. Your only job now is to produce the exact file-edit payload. Never explain your reasoning, never mention the classifier, and never describe the operation. Put the exact text to write between <officeagent_edit> and </officeagent_edit>. Text outside those tags will be ignored.", compression_note);
     let content = match (operation, request.is_full_document, selected_text_is_empty) {
@@ -92,6 +95,7 @@ pub(super) fn build_text_edit_messages(
             request.selected_text
         ),
     };
+    let content = append_uploaded_document_context(content, &uploaded_document_section);
 
     Ok(vec![
         DeepSeekMessage {
@@ -106,6 +110,24 @@ pub(super) fn build_text_edit_messages(
 }
 
 /// 在修改任何文件内容前，构造轻量级规划提示词，用于分类用户请求。
+fn build_text_edit_uploaded_document_context_section(context: Option<&str>) -> String {
+    context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_model_context(value, 16_000, "uploaded document context"))
+        .unwrap_or_default()
+}
+
+fn append_uploaded_document_context(content: String, uploaded_document_section: &str) -> String {
+    if uploaded_document_section.trim().is_empty() {
+        return content;
+    }
+
+    format!(
+        "{content}\n\nUploaded document reference context:\n<<<\n{uploaded_document_section}\n>>>\n\nUse this context as source material when the user asks to reference uploaded documents. If it is relevant to a supplement/add/fill request, write the matching uploaded-document content into the edit payload instead of merely describing it."
+    )
+}
+
 pub(super) fn build_text_selection_intent_messages(
     request: TextSelectionIntentRequest,
 ) -> Result<Vec<DeepSeekMessage>, String> {
