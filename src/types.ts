@@ -41,6 +41,16 @@ export type WorkspaceFilesMetadataResult = {
   files_indexed: number;
 };
 
+export type WorkspaceDocumentsRemovalResult = {
+  document_ids: string[];
+  sqlite_documents_deleted: number;
+  sqlite_tree_nodes_deleted: number;
+  sqlite_document_nodes_deleted: number;
+  sqlite_chunks_deleted: number;
+  sqlite_empty_folders_pruned: number;
+  qdrant_points_deleted: number;
+};
+
 export type WorkspaceFileMetadataRecord = {
   document_id: string;
   filename: string;

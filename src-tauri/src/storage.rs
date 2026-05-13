@@ -40,6 +40,17 @@ pub(crate) struct WorkspaceStorageInfo {
     created_data_dir: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceDocumentsRemovalResult {
+    document_ids: Vec<String>,
+    sqlite_documents_deleted: usize,
+    sqlite_tree_nodes_deleted: usize,
+    sqlite_document_nodes_deleted: usize,
+    sqlite_chunks_deleted: usize,
+    sqlite_empty_folders_pruned: usize,
+    qdrant_points_deleted: usize,
+}
+
 /// 应用启动时初始化默认存储。创建 SQLite 和 Qdrant 连接，并将 `DocumentStore` 注入 Tauri 状态管理。
 pub(crate) fn setup_storage(app: &mut tauri::App) -> Result<(), String> {
     let current_workspace_path = std::env::current_dir()
@@ -168,6 +179,38 @@ pub(crate) fn load_workspace_snapshot(
 }
 
 #[tauri::command]
+pub(crate) fn remove_workspace_documents(
+    state: State<'_, DocumentStore>,
+    document_ids: Vec<String>,
+) -> Result<WorkspaceDocumentsRemovalResult, String> {
+    let document_ids = normalize_document_ids(document_ids);
+    if document_ids.is_empty() {
+        return Ok(WorkspaceDocumentsRemovalResult {
+            document_ids,
+            sqlite_documents_deleted: 0,
+            sqlite_tree_nodes_deleted: 0,
+            sqlite_document_nodes_deleted: 0,
+            sqlite_chunks_deleted: 0,
+            sqlite_empty_folders_pruned: 0,
+            qdrant_points_deleted: 0,
+        });
+    }
+
+    let qdrant_points_deleted = qdrant::delete_document_chunk_embeddings(&state, &document_ids)?;
+    let sqlite_result = sqlite_store::remove_workspace_documents(state, document_ids.clone())?;
+
+    Ok(WorkspaceDocumentsRemovalResult {
+        document_ids,
+        sqlite_documents_deleted: sqlite_result.documents_deleted,
+        sqlite_tree_nodes_deleted: sqlite_result.tree_nodes_deleted,
+        sqlite_document_nodes_deleted: sqlite_result.document_nodes_deleted,
+        sqlite_chunks_deleted: sqlite_result.chunks_deleted,
+        sqlite_empty_folders_pruned: sqlite_result.empty_folders_pruned,
+        qdrant_points_deleted,
+    })
+}
+
+#[tauri::command]
 pub(crate) async fn get_qdrant_status(
     state: State<'_, DocumentStore>,
 ) -> Result<qdrant::QdrantStatus, String> {
@@ -246,6 +289,17 @@ fn normalize_workspace_path(path: String) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+fn normalize_document_ids(document_ids: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for document_id in document_ids {
+        let document_id = document_id.trim();
+        if !document_id.is_empty() && !normalized.iter().any(|existing| existing == document_id) {
+            normalized.push(document_id.to_string());
+        }
+    }
+    normalized
 }
 
 /// 工作区内的 SQLite 数据库路径：`<data_path>/sqlite/office-agent.sqlite3`。

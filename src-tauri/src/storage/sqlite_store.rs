@@ -17,7 +17,8 @@ mod workspace;
 pub(crate) use document::{index_document_structure, search_document_full_text};
 pub(super) use migration::migrate_sqlite;
 pub(crate) use workspace::{
-    index_workspace_files, load_workspace_snapshot, save_workspace_file_metadata,
+    index_workspace_files, load_workspace_snapshot, remove_workspace_documents,
+    save_workspace_file_metadata,
 };
 
 #[cfg(test)]
@@ -83,6 +84,16 @@ pub(crate) struct WorkspaceFileMetadataRequest {
 pub(crate) struct WorkspaceFileMetadataResult {
     document_id: String,
     saved: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceDocumentsRemovalResult {
+    pub(super) document_ids: Vec<String>,
+    pub(super) documents_deleted: usize,
+    pub(super) tree_nodes_deleted: usize,
+    pub(super) document_nodes_deleted: usize,
+    pub(super) chunks_deleted: usize,
+    pub(super) empty_folders_pruned: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -378,6 +389,69 @@ mod tests {
         assert!(table_count(&connection, "workspace_tree_nodes") >= 4);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removes_workspace_document_metadata_and_index_rows() {
+        let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        migrate_sqlite(&connection).expect("schema should migrate");
+
+        save_workspace_file_metadata_with_connection(
+            &connection,
+            WorkspaceFileMetadataRequest {
+                document_id: "path:/tmp/workspace/readme.md".to_string(),
+                filename: "readme.md".to_string(),
+                path: "/tmp/workspace/readme.md".to_string(),
+                relative_path: Some("workspace/docs/readme.md".to_string()),
+                extension: Some("md".to_string()),
+                file_type: Some("md".to_string()),
+                size_bytes: Some(42),
+                modified_at: Some(1_700_000_000),
+            },
+        )
+        .expect("metadata should save");
+
+        index_document_structure_with_connection(
+            &mut connection,
+            DocumentIndexRequest {
+                document_id: "path:/tmp/workspace/readme.md".to_string(),
+                filename: "readme.md".to_string(),
+                path: Some("/tmp/workspace/readme.md".to_string()),
+                original_path: None,
+                stored_path: None,
+                extension: Some("md".to_string()),
+                file_type: Some("md".to_string()),
+                size_bytes: Some(42),
+                sha256: None,
+                parse_status: None,
+                index_status: None,
+                blocks: json!([
+                    {"id": "p1", "type": "paragraph", "text": "hello workspace"}
+                ]),
+            },
+        )
+        .expect("document should index");
+
+        let result = workspace::remove_workspace_documents_with_connection(
+            &mut connection,
+            &["path:/tmp/workspace/readme.md".to_string()],
+        )
+        .expect("workspace document should remove");
+
+        assert_eq!(result.documents_deleted, 1);
+        assert_eq!(result.tree_nodes_deleted, 1);
+        assert_eq!(table_count(&connection, "documents"), 0);
+        assert_eq!(table_count(&connection, "doc_nodes"), 0);
+        assert_eq!(table_count(&connection, "chunks"), 0);
+
+        let file_tree_nodes: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM workspace_tree_nodes WHERE node_type = 'file'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("file tree node count should read");
+        assert_eq!(file_tree_nodes, 0);
     }
 
     fn table_count(connection: &Connection, table: &str) -> i64 {

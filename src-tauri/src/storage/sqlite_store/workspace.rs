@@ -8,8 +8,9 @@ use tauri::State;
 
 use super::super::{unix_timestamp_seconds, DocumentStore};
 use super::{
-    WorkspaceFileMetadataRecord, WorkspaceFileMetadataRequest, WorkspaceFileMetadataResult,
-    WorkspaceFilesMetadataResult, WorkspaceSnapshotResult, WorkspaceTreeNodeRecord,
+    WorkspaceDocumentsRemovalResult, WorkspaceFileMetadataRecord, WorkspaceFileMetadataRequest,
+    WorkspaceFileMetadataResult, WorkspaceFilesMetadataResult, WorkspaceSnapshotResult,
+    WorkspaceTreeNodeRecord,
 };
 pub(crate) fn save_workspace_file_metadata(
     state: State<'_, DocumentStore>,
@@ -76,6 +77,17 @@ pub(crate) fn load_workspace_snapshot(
     })
 }
 
+pub(crate) fn remove_workspace_documents(
+    state: State<'_, DocumentStore>,
+    document_ids: Vec<String>,
+) -> Result<WorkspaceDocumentsRemovalResult, String> {
+    let mut connection = state
+        .connection
+        .lock()
+        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+    remove_workspace_documents_with_connection(&mut connection, &document_ids)
+}
+
 pub(super) fn save_workspace_file_metadata_with_connection(
     connection: &Connection,
     request: WorkspaceFileMetadataRequest,
@@ -125,6 +137,69 @@ pub(super) fn index_workspace_files_with_connection(
 
     Ok(WorkspaceFilesMetadataResult {
         files_indexed: requests.len(),
+    })
+}
+
+pub(super) fn remove_workspace_documents_with_connection(
+    connection: &mut Connection,
+    document_ids: &[String],
+) -> Result<WorkspaceDocumentsRemovalResult, String> {
+    let document_ids = normalize_document_ids(document_ids);
+    if document_ids.is_empty() {
+        return Ok(WorkspaceDocumentsRemovalResult {
+            document_ids,
+            documents_deleted: 0,
+            tree_nodes_deleted: 0,
+            document_nodes_deleted: 0,
+            chunks_deleted: 0,
+            empty_folders_pruned: 0,
+        });
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("cannot start SQLite workspace removal transaction: {error}"))?;
+    let mut documents_deleted = 0usize;
+    let mut tree_nodes_deleted = 0usize;
+    let mut document_nodes_deleted = 0usize;
+    let mut chunks_deleted = 0usize;
+
+    for document_id in &document_ids {
+        tree_nodes_deleted += transaction
+            .execute(
+                "DELETE FROM workspace_tree_nodes WHERE document_id = ?1",
+                params![document_id],
+            )
+            .map_err(|error| format!("cannot remove workspace tree node: {error}"))?;
+        document_nodes_deleted += transaction
+            .execute(
+                "DELETE FROM doc_nodes WHERE document_id = ?1",
+                params![document_id],
+            )
+            .map_err(|error| format!("cannot remove document nodes: {error}"))?;
+        chunks_deleted += transaction
+            .execute(
+                "DELETE FROM chunks WHERE document_id = ?1",
+                params![document_id],
+            )
+            .map_err(|error| format!("cannot remove document chunks: {error}"))?;
+        documents_deleted += transaction
+            .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
+            .map_err(|error| format!("cannot remove document metadata: {error}"))?;
+    }
+
+    let empty_folders_pruned = prune_empty_workspace_folders(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("cannot commit SQLite workspace removal: {error}"))?;
+
+    Ok(WorkspaceDocumentsRemovalResult {
+        document_ids,
+        documents_deleted,
+        tree_nodes_deleted,
+        document_nodes_deleted,
+        chunks_deleted,
+        empty_folders_pruned,
     })
 }
 
@@ -392,6 +467,33 @@ fn upsert_workspace_tree_node(
         )
         .map(|_| ())
         .map_err(|error| format!("cannot save workspace tree node: {error}"))
+}
+
+fn prune_empty_workspace_folders(connection: &Connection) -> Result<usize, String> {
+    let mut total_deleted = 0usize;
+
+    loop {
+        let deleted = connection
+            .execute(
+                "DELETE FROM workspace_tree_nodes
+                 WHERE node_type = 'folder'
+                   AND document_id IS NULL
+                   AND id NOT IN (
+                       SELECT DISTINCT parent_id
+                       FROM workspace_tree_nodes
+                       WHERE parent_id IS NOT NULL
+                   )",
+                [],
+            )
+            .map_err(|error| format!("cannot prune empty workspace folders: {error}"))?;
+
+        if deleted == 0 {
+            break;
+        }
+        total_deleted += deleted;
+    }
+
+    Ok(total_deleted)
 }
 
 fn load_workspace_file_records(
@@ -717,6 +819,17 @@ fn normalize_workspace_scan_path(path: &str) -> Result<PathBuf, String> {
 
 fn workspace_document_id(path: &str) -> String {
     format!("path:{}", normalize_document_path(path).to_lowercase())
+}
+
+fn normalize_document_ids(document_ids: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for document_id in document_ids {
+        let document_id = document_id.trim();
+        if !document_id.is_empty() && !normalized.iter().any(|existing| existing == document_id) {
+            normalized.push(document_id.to_string());
+        }
+    }
+    normalized
 }
 
 fn normalize_document_path(path: &str) -> String {

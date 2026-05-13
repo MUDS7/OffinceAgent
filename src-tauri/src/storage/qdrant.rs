@@ -233,6 +233,24 @@ pub(super) fn upsert_document_chunk_embeddings(
     Ok(result.points_upserted)
 }
 
+pub(super) fn delete_document_chunk_embeddings(
+    store: &DocumentStore,
+    document_ids: &[String],
+) -> Result<usize, String> {
+    let config = QdrantConfig::from_store(store, None)?;
+    let connection = store
+        .qdrant_connection
+        .lock()
+        .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
+
+    let mut deleted = 0usize;
+    for document_id in document_ids {
+        deleted += delete_qdrant_document_points(&connection, &config.collection, document_id)?;
+    }
+
+    Ok(deleted)
+}
+
 fn upsert_qdrant_points_with_connection(
     connection: &mut Connection,
     collection_name: &str,
@@ -1545,6 +1563,60 @@ mod tests {
 
         assert_eq!(point_count, 1);
         assert_eq!(remaining_point_id, "chunk_3");
+    }
+
+    #[test]
+    fn deleting_document_chunk_embeddings_removes_only_matching_document_points() {
+        let qdrant_connection = Connection::open_in_memory().expect("in-memory Qdrant should open");
+        migrate_qdrant(&qdrant_connection).expect("qdrant schema should migrate");
+        let store = DocumentStore {
+            connection: Mutex::new(Connection::open_in_memory().expect("sqlite should open")),
+            sqlite_path: Mutex::new(PathBuf::from("office-agent.sqlite3")),
+            qdrant_connection: Mutex::new(qdrant_connection),
+            qdrant_path: Mutex::new(PathBuf::from(".data/qdrant/office-agent-qdrant.sqlite3")),
+            workspace_path: Mutex::new(None),
+            workspace_data_path: Mutex::new(PathBuf::from(".data")),
+        };
+
+        upsert_document_chunk_embeddings(
+            &store,
+            "doc_1",
+            "first.pdf",
+            &[test_indexed_chunk("doc_1_chunk_1", "Page 1", 0)],
+        )
+        .expect("first document chunks should upsert");
+        upsert_document_chunk_embeddings(
+            &store,
+            "doc_2",
+            "second.pdf",
+            &[test_indexed_chunk("doc_2_chunk_1", "Page 1", 0)],
+        )
+        .expect("second document chunks should upsert");
+
+        let deleted = delete_document_chunk_embeddings(&store, &["doc_1".to_string()])
+            .expect("document embeddings should delete");
+
+        let connection = store
+            .qdrant_connection
+            .lock()
+            .expect("qdrant lock should open");
+        let point_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM qdrant_points", [], |row| row.get(0))
+            .expect("point count should read");
+        let remaining_document_id: String = connection
+            .query_row("SELECT payload_json FROM qdrant_points", [], |row| {
+                let payload_json: String = row.get(0)?;
+                let payload: Value = serde_json::from_str(&payload_json).expect("payload json");
+                Ok(payload["document_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string())
+            })
+            .expect("payload should read");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(point_count, 1);
+        assert_eq!(remaining_document_id, "doc_2");
     }
 
     fn test_indexed_chunk(id: &str, title_path: &str, order_index: usize) -> IndexedChunk {

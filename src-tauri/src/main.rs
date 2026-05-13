@@ -37,6 +37,7 @@ fn main() {
             storage::save_workspace_file_metadata,
             storage::index_workspace_files,
             storage::load_workspace_snapshot,
+            storage::remove_workspace_documents,
             storage::open_workspace_storage,
             storage::get_qdrant_status,
             storage::ensure_qdrant_collection,

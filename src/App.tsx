@@ -30,6 +30,7 @@ import type {
   TextEditOperation,
   TextSelectionIntentAction,
   WorkspaceFile,
+  WorkspaceDocumentsRemovalResult,
   WorkspaceFileMetadataRecord,
   WorkspaceFileMetadataResult,
   WorkspaceFilesMetadataResult,
@@ -714,10 +715,24 @@ function App() {
     });
   }
 
-  function deleteFiles(fileIds: string[]) {
+  async function deleteFiles(fileIds: string[]) {
     const idsSet = new Set(fileIds);
+    const filesToRemove = workspaceFiles.filter((item) => idsSet.has(item.id));
+    const documentIds = filesToRemove.map((item) => (item.diskPath ? getWorkspaceDocumentId(item.diskPath) : item.id));
+
+    if (canUseTauriEvents() && documentIds.length) {
+      try {
+        await invoke<WorkspaceDocumentsRemovalResult>("remove_workspace_documents", { documentIds });
+        const snapshot = await invoke<WorkspaceSnapshotResult>("load_workspace_snapshot");
+        setWorkspaceTreeNodes(snapshot.tree_nodes);
+      } catch (error) {
+        setErrorMessage(`移出工作区失败：${getErrorMessage(error)}`);
+        return;
+      }
+    }
+
     setWorkspaceFiles((current) => current.filter((item) => !idsSet.has(item.id)));
-    
+
     setOpenFileIds((current) => {
       const nextOpenFileIds = current.filter((id) => !idsSet.has(id));
       if (idsSet.has(selectedFileId)) {
@@ -725,6 +740,18 @@ function App() {
       }
       return nextOpenFileIds;
     });
+    setDirtyFileIds((current) => current.filter((id) => !idsSet.has(id)));
+    setUnsavedContents((current) => {
+      const next = { ...current };
+      for (const fileId of idsSet) {
+        delete next[fileId];
+      }
+      return next;
+    });
+    setDocumentSelection((current) => (current && idsSet.has(current.fileId) ? null : current));
+    setPendingAgentTextEdit((current) => (current && idsSet.has(current.fileId) ? null : current));
+    setPendingTextRestore((current) => (current && idsSet.has(current.fileId) ? null : current));
+    setErrorMessage("");
   }
 
   async function analyzeDocument() {
