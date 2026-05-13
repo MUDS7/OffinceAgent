@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -846,6 +850,15 @@ pub(crate) fn search_uploaded_document_chunks(
         return Ok(Vec::new());
     }
 
+    let exact_chunk_ids = {
+        let connection = state
+            .connection
+            .lock()
+            .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+        exact_match_chunk_ids(&connection, query)?
+    };
+    let result_limit = limit.unwrap_or(5).min(20) as usize;
+    let search_distance;
     let candidates = {
         let connection = state
             .qdrant_connection
@@ -861,14 +874,15 @@ pub(crate) fn search_uploaded_document_chunks(
                 query_vector.len()
             ));
         }
+        search_distance = collection.distance.clone();
 
         search_chunk_candidates(
             &connection,
             &config.collection,
             &collection,
             &query_vector,
-            limit.unwrap_or(5).min(20) as usize,
             min_score,
+            &exact_chunk_ids,
         )?
     };
 
@@ -880,7 +894,10 @@ pub(crate) fn search_uploaded_document_chunks(
         .connection
         .lock()
         .map_err(|_| "SQLite store lock is poisoned".to_string())?;
-    hydrate_uploaded_document_hits(&connection, candidates)
+    let mut hits = hydrate_uploaded_document_hits(&connection, candidates)?;
+    rerank_uploaded_document_hits(query, &search_distance, &mut hits);
+    hits.truncate(result_limit.max(1));
+    Ok(hits)
 }
 
 struct UploadedChunkCandidate {
@@ -893,8 +910,8 @@ fn search_chunk_candidates(
     collection_name: &str,
     collection: &QdrantCollection,
     query_vector: &[f32],
-    limit: usize,
     min_score: Option<f64>,
+    force_chunk_ids: &HashSet<String>,
 ) -> Result<Vec<UploadedChunkCandidate>, String> {
     let mut statement = connection
         .prepare(
@@ -932,7 +949,9 @@ fn search_chunk_candidates(
         };
 
         let score = score_vectors(query_vector, &vector, &collection.distance);
-        if !passes_relevance_threshold(score, &collection.distance, min_score) {
+        if !passes_relevance_threshold(score, &collection.distance, min_score)
+            && !force_chunk_ids.contains(&chunk_id)
+        {
             continue;
         }
 
@@ -940,7 +959,6 @@ fn search_chunk_candidates(
     }
 
     sort_uploaded_chunk_candidates(&mut candidates, &collection.distance);
-    candidates.truncate(limit.max(1));
     Ok(candidates)
 }
 
@@ -967,6 +985,108 @@ fn sort_uploaded_chunk_candidates(candidates: &mut [UploadedChunkCandidate], dis
             ordering.reverse()
         }
     });
+}
+
+fn exact_match_chunk_ids(connection: &Connection, query: &str) -> Result<HashSet<String>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let like_query = format!("%{query}%");
+    let mut statement = connection
+        .prepare(
+            "SELECT id
+             FROM chunks
+             WHERE title_path LIKE ?1
+                OR content LIKE ?1
+                OR plain_text LIKE ?1",
+        )
+        .map_err(|error| format!("cannot prepare uploaded document exact chunk lookup: {error}"))?;
+    let rows = statement
+        .query_map(params![like_query], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("cannot scan uploaded document exact chunk matches: {error}"))?;
+
+    let mut chunk_ids = HashSet::new();
+    for row in rows {
+        chunk_ids.insert(
+            row.map_err(|error| format!("cannot read uploaded document exact chunk id: {error}"))?,
+        );
+    }
+    Ok(chunk_ids)
+}
+
+fn rerank_uploaded_document_hits(
+    query: &str,
+    distance: &str,
+    hits: &mut [UploadedDocumentChunkHit],
+) {
+    let reverse_vector = !matches!(
+        normalize_distance(distance).as_str(),
+        "Euclid" | "Manhattan"
+    );
+    hits.sort_by(|left, right| {
+        let left_lexical = lexical_relevance(query, left);
+        let right_lexical = lexical_relevance(query, right);
+        right_lexical
+            .partial_cmp(&left_lexical)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                if reverse_vector {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(Ordering::Equal)
+                } else {
+                    left.score
+                        .partial_cmp(&right.score)
+                        .unwrap_or(Ordering::Equal)
+                }
+            })
+            .then_with(|| left.order_index.cmp(&right.order_index))
+    });
+}
+
+fn lexical_relevance(query: &str, hit: &UploadedDocumentChunkHit) -> f64 {
+    let compact_query = compact_match_text(query);
+    if compact_query.is_empty() {
+        return 0.0;
+    }
+
+    let title = compact_match_text(&hit.title_path);
+    let content = compact_match_text(&hit.content);
+    let plain_text = compact_match_text(&hit.plain_text);
+
+    let mut relevance = 0.0;
+    if title.contains(&compact_query) {
+        relevance += 100.0;
+    }
+    if content.contains(&compact_query) {
+        relevance += 40.0;
+    } else if plain_text.contains(&compact_query) {
+        relevance += 20.0;
+    }
+
+    let terms = query
+        .split_whitespace()
+        .map(compact_match_text)
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.len() > 1 {
+        for term in terms {
+            if title.contains(&term) {
+                relevance += 5.0;
+            } else if content.contains(&term) || plain_text.contains(&term) {
+                relevance += 1.0;
+            }
+        }
+    }
+
+    relevance
+}
+
+fn compact_match_text(value: &str) -> String {
+    value.to_lowercase().split_whitespace().collect::<String>()
 }
 
 fn hydrate_uploaded_document_hits(
@@ -1495,6 +1615,19 @@ mod tests {
     }
 
     #[test]
+    fn uploaded_chunk_rerank_prefers_exact_title_match() {
+        let mut hits = vec![
+            test_uploaded_hit("chunk_vector", "7.5.1 系统架构概述", 0.25, 8),
+            test_uploaded_hit("chunk_exact", "7.1 整体服务方案", 0.16, 0),
+        ];
+
+        rerank_uploaded_document_hits("整体服务方案", "Cosine", &mut hits);
+
+        assert_eq!(hits[0].chunk_id, "chunk_exact");
+        assert_eq!(hits[0].title_path, "7.1 整体服务方案");
+    }
+
+    #[test]
     fn chunk_embedding_is_stable_and_normalized() {
         let first = embed_chunk_text("Document: demo.pdf\nPage: 1\n\nhello vector world");
         let second = embed_chunk_text("Document: demo.pdf\nPage: 1\n\nhello vector world");
@@ -1636,6 +1769,25 @@ mod tests {
             paragraph_end_index: Some(order_index + 1),
             order_index,
             metadata_json: json!({ "chunk_id": id }).to_string(),
+        }
+    }
+
+    fn test_uploaded_hit(
+        chunk_id: &str,
+        title_path: &str,
+        score: f64,
+        order_index: i64,
+    ) -> UploadedDocumentChunkHit {
+        UploadedDocumentChunkHit {
+            chunk_id: chunk_id.to_string(),
+            document_id: "doc_1".to_string(),
+            document_name: "响应方案.docx".to_string(),
+            chunk_type: "docx_section".to_string(),
+            title_path: title_path.to_string(),
+            score,
+            content: "content".to_string(),
+            plain_text: format!("标题路径：{title_path}\n\n正文：content"),
+            order_index,
         }
     }
 }

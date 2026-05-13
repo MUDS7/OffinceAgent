@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# python scripts\search-vector-chunks.py 技术保障 --limit 3 --json
 
 DEFAULT_SQLITE_PATH = Path(".data/sqlite/office-agent.sqlite3")
 DEFAULT_QDRANT_PATH = Path(".data/qdrant/office-agent-qdrant.sqlite3")
@@ -127,9 +128,10 @@ def search_candidates(
     collection: str,
     distance: str,
     query_vector: list[float],
-    limit: int,
     min_score: float | None,
+    force_chunk_ids: set[str] | None = None,
 ) -> list[tuple[str, float]]:
+    force_chunk_ids = force_chunk_ids or set()
     rows = qdrant.execute(
         "SELECT vector_json, payload_json FROM qdrant_points WHERE collection = ?1",
         (collection,),
@@ -143,12 +145,31 @@ def search_candidates(
             continue
 
         score = score_vectors(query_vector, vector, distance)
-        if passes_threshold(score, distance, min_score):
+        if passes_threshold(score, distance, min_score) or chunk_id in force_chunk_ids:
             candidates.append((chunk_id, score))
 
     reverse = normalize_distance(distance) not in {"Euclid", "Manhattan"}
     candidates.sort(key=lambda item: item[1], reverse=reverse)
-    return candidates[: max(1, limit)]
+    return candidates
+
+
+def exact_match_chunk_ids(sqlite: sqlite3.Connection, query: str) -> set[str]:
+    query = query.strip()
+    if not query:
+        return set()
+
+    like_query = f"%{query}%"
+    rows = sqlite.execute(
+        """
+        SELECT id
+        FROM chunks
+        WHERE title_path LIKE ?1
+           OR content LIKE ?1
+           OR plain_text LIKE ?1
+        """,
+        (like_query,),
+    )
+    return {str(row[0]) for row in rows}
 
 
 def hydrate_hits(
@@ -190,6 +211,61 @@ def hydrate_hits(
             }
         )
     return hits
+
+
+def compact_match_text(value: object) -> str:
+    return "".join(str(value or "").lower().split())
+
+
+def lexical_relevance(query: str, hit: dict[str, object]) -> float:
+    compact_query = compact_match_text(query)
+    if not compact_query:
+        return 0.0
+
+    title = compact_match_text(hit.get("title_path"))
+    content = compact_match_text(hit.get("content"))
+    plain_text = compact_match_text(hit.get("plain_text"))
+
+    relevance = 0.0
+    if compact_query in title:
+        relevance += 100.0
+    if compact_query in content:
+        relevance += 40.0
+    elif compact_query in plain_text:
+        relevance += 20.0
+
+    terms = [compact_match_text(term) for term in query.split() if term.strip()]
+    if len(terms) > 1:
+        for term in terms:
+            if not term:
+                continue
+            if term in title:
+                relevance += 5.0
+            elif term in content or term in plain_text:
+                relevance += 1.0
+
+    return relevance
+
+
+def rerank_hits(
+    query: str,
+    hits: list[dict[str, object]],
+    distance: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    reverse_vector = normalize_distance(distance) not in {"Euclid", "Manhattan"}
+
+    def rank_key(hit: dict[str, object]) -> tuple[float, float, int]:
+        vector_score = float(hit["score"])
+        comparable_score = vector_score if reverse_vector else -vector_score
+        return (
+            lexical_relevance(query, hit),
+            comparable_score,
+            -int(hit["order_index"]),
+        )
+
+    hits.sort(key=rank_key, reverse=True)
+    return hits[: max(1, limit)]
 
 
 def main() -> int:
@@ -234,15 +310,16 @@ def main() -> int:
             f"Vector dimension mismatch: collection={vector_size}, query={len(query_vector)}"
         )
 
+    exact_chunk_ids = exact_match_chunk_ids(sqlite, args.query)
     candidates = search_candidates(
         qdrant,
         args.collection,
         distance,
         query_vector,
-        args.limit,
         args.min_score,
+        exact_chunk_ids,
     )
-    hits = hydrate_hits(sqlite, candidates)
+    hits = rerank_hits(args.query, hydrate_hits(sqlite, candidates), distance, args.limit)
 
     if args.json:
         print(json.dumps(hits, ensure_ascii=False, indent=2))
