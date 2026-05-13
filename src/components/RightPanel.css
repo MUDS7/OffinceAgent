@@ -452,6 +452,24 @@
   background: #f1f1f1;
 }
 
+.reference-docs-button {
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.icon-button.reference-docs-button.active {
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.14);
+}
+
+.icon-button.reference-docs-button:hover:not(.active) {
+  color: #7b7b7b;
+  background: #f1f1f1;
+}
+
+.icon-button.reference-docs-button.active {
+  box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.34);
+}
+
 .permission-menu {
   position: relative;
   flex: 0 1 auto;

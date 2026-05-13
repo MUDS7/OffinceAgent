@@ -1,11 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { UploadedDocumentChunkHit } from "../types";
 
-const UPLOADED_DOCUMENT_REFERENCE_TRIGGER = "参考上传文档";
+export const UPLOADED_DOCUMENT_REFERENCE_TRIGGER = "参考上传文档";
 const MAX_REFERENCE_CHARS_PER_CHUNK = 2400;
 
 export function shouldReferenceUploadedDocuments(instruction: string): boolean {
   return instruction.includes(UPLOADED_DOCUMENT_REFERENCE_TRIGGER);
+}
+
+export function buildUploadedDocumentReferenceInstruction(instruction: string): string {
+  const trimmedInstruction = instruction.trim();
+  if (shouldReferenceUploadedDocuments(trimmedInstruction)) {
+    return trimmedInstruction;
+  }
+
+  return `${UPLOADED_DOCUMENT_REFERENCE_TRIGGER} ${trimmedInstruction}`;
 }
 
 export function buildUploadedDocumentReferenceQuery(instruction: string): string {

@@ -4,6 +4,7 @@ import {
   Check,
   ChevronRight,
   FileText,
+  Folder,
   Hand,
   Maximize2,
   Paperclip,
@@ -27,7 +28,7 @@ type RightPanelProps = {
   onDraftMessageChange: (message: string) => void;
   onOpenFilePicker: () => void;
   onUndoFileChanges: (messageId: string) => void;
-  onSendMessage: (model: string) => void;
+  onSendMessage: (model: string, referenceUploadedDocuments: boolean) => void;
 };
 
 const modelOptions = [
@@ -51,6 +52,7 @@ export function RightPanel({
 }: RightPanelProps) {
   const [selectedModel, setSelectedModel] = useState("deepseek-reasoner");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [isReferenceDocsActive, setIsReferenceDocsActive] = useState(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModelLabel = modelOptions.find((option) => option.id === selectedModel)?.label ?? modelOptions[0].label;
@@ -101,7 +103,7 @@ export function RightPanel({
     if (event.shiftKey) return;
 
     event.preventDefault();
-    onSendMessage(selectedModel);
+    onSendMessage(selectedModel, isReferenceDocsActive);
   }
 
   return (
@@ -173,6 +175,16 @@ export function RightPanel({
             <button className="icon-button" type="button" title="Attach context" onClick={onOpenFilePicker}>
               <Paperclip size={19} />
             </button>
+            <button
+              className={isReferenceDocsActive ? "icon-button reference-docs-button active" : "icon-button reference-docs-button"}
+              type="button"
+              title="参考文档"
+              aria-label="参考文档"
+              aria-pressed={isReferenceDocsActive}
+              onClick={() => setIsReferenceDocsActive((isActive) => !isActive)}
+            >
+              <Folder size={19} />
+            </button>
             <div
               className="permission-menu"
               onBlur={(event) => {
@@ -222,7 +234,7 @@ export function RightPanel({
             <button
               className="send-button"
               type="button"
-              onClick={() => onSendMessage(selectedModel)}
+              onClick={() => onSendMessage(selectedModel, isReferenceDocsActive)}
               disabled={!draftMessage.trim() || isSendingMessage}
               title="Send"
             >

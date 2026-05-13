@@ -77,6 +77,7 @@ import { restoreTextEditPayload } from "./utils/textCompression";
 import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
   formatUploadedDocumentReferenceContext,
+  buildUploadedDocumentReferenceInstruction,
   searchUploadedDocumentReference,
   shouldReferenceUploadedDocuments,
 } from "./utils/documentReference";
@@ -1193,9 +1194,12 @@ function App() {
     });
   }
 
-  async function sendMessage(model: string) {
-    const text = draftMessage.trim();
-    if (!text || isSendingMessage) return;
+  async function sendMessage(model: string, referenceUploadedDocuments = false) {
+    const draftText = draftMessage.trim();
+    if (!draftText || isSendingMessage) return;
+    const text = referenceUploadedDocuments
+      ? buildUploadedDocumentReferenceInstruction(draftText)
+      : draftText;
 
     if (!canUseTauriEvents()) {
       const message = "DeepSeek streaming requires the Tauri desktop runtime. Start the app with npm run tauri:dev.";
