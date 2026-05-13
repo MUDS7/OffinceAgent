@@ -1,14 +1,15 @@
-use std::{cmp::Ordering, path::PathBuf};
+use std::{cmp::Ordering, path::PathBuf, time::Instant};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{Manager, State};
 
-use super::{unix_timestamp_seconds, DocumentStore};
+use super::{document_index::IndexedChunk, unix_timestamp_seconds, DocumentStore};
 
 const DEFAULT_QDRANT_COLLECTION: &str = "office_agent_chunks";
 const DEFAULT_QDRANT_DB_NAME: &str = "office-agent-qdrant.sqlite3";
+const LOCAL_CHUNK_EMBEDDING_DIMENSIONS: usize = 384;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct QdrantCollectionRequest {
@@ -157,13 +158,94 @@ fn upsert_qdrant_points(
     points: Vec<QdrantVectorPoint>,
 ) -> Result<QdrantUpsertResult, String> {
     let config = QdrantConfig::from_store(store, collection)?;
-    let point_count = points.len();
     let mut connection = store
         .qdrant_connection
         .lock()
         .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
 
-    let collection = get_or_create_collection(&connection, &config.collection, &points)?;
+    upsert_qdrant_points_with_connection(&mut connection, &config.collection, points)
+}
+
+pub(super) fn upsert_document_chunk_embeddings(
+    store: &DocumentStore,
+    document_id: &str,
+    document_name: &str,
+    chunks: &[IndexedChunk],
+) -> Result<usize, String> {
+    let config = QdrantConfig::from_store(store, None)?;
+    let mut connection = store
+        .qdrant_connection
+        .lock()
+        .map_err(|_| "embedded Qdrant store lock is poisoned".to_string())?;
+    println!(
+        "[qdrant] start document chunk vectorization: document_id={document_id}, document_name={document_name}, collection={}, chunks={}",
+        config.collection,
+        chunks.len()
+    );
+
+    let deleted = delete_qdrant_document_points(&connection, &config.collection, document_id)?;
+    if deleted > 0 {
+        println!(
+            "[qdrant] removed stale document vectors: document_id={document_id}, collection={}, removed={deleted}",
+            config.collection
+        );
+    }
+
+    let embeddable_chunks = chunks
+        .iter()
+        .filter(|chunk| !chunk.plain_text.trim().is_empty())
+        .collect::<Vec<_>>();
+    let total = embeddable_chunks.len();
+    if total != chunks.len() {
+        println!(
+            "[qdrant] skipped empty chunks before vectorization: document_id={document_id}, skipped={}, remaining={total}",
+            chunks.len() - total
+        );
+    }
+    if total == 0 {
+        println!(
+            "[qdrant] finish document chunk vectorization: document_id={document_id}, vectors=0"
+        );
+        return Ok(0);
+    }
+
+    let started_at = Instant::now();
+    let mut points = Vec::with_capacity(total);
+    for (index, chunk) in embeddable_chunks.into_iter().enumerate() {
+        let current = index + 1;
+        println!(
+            "[qdrant] vectorizing chunk {current}/{total} ({:.1}%): document_id={document_id}, chunk_id={}, chunk_type={}, text_bytes={}",
+            progress_percent(current, total),
+            chunk.id,
+            chunk.chunk_type,
+            chunk.plain_text.len()
+        );
+        points.push(indexed_chunk_to_qdrant_point(
+            document_id,
+            document_name,
+            chunk,
+        )?);
+    }
+    println!(
+        "[qdrant] finish document chunk vectorization: document_id={document_id}, vectors={total}, elapsed_ms={}",
+        started_at.elapsed().as_millis()
+    );
+
+    let result = upsert_qdrant_points_with_connection(&mut connection, &config.collection, points)?;
+    println!(
+        "[qdrant] finish document vector upsert: document_id={document_id}, collection={}, points_upserted={}",
+        result.collection, result.points_upserted
+    );
+    Ok(result.points_upserted)
+}
+
+fn upsert_qdrant_points_with_connection(
+    connection: &mut Connection,
+    collection_name: &str,
+    points: Vec<QdrantVectorPoint>,
+) -> Result<QdrantUpsertResult, String> {
+    let point_count = points.len();
+    let collection = get_or_create_collection(connection, collection_name, &points)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("cannot start embedded Qdrant transaction: {error}"))?;
@@ -202,7 +284,7 @@ fn upsert_qdrant_points(
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at",
                 params![
-                    &config.collection,
+                    collection_name,
                     &point_id,
                     &point.id,
                     &vector_json,
@@ -217,8 +299,159 @@ fn upsert_qdrant_points(
         .map_err(|error| format!("cannot commit embedded Qdrant vectors: {error}"))?;
 
     Ok(QdrantUpsertResult {
-        collection: config.collection,
+        collection: collection_name.to_string(),
         points_upserted: point_count,
+    })
+}
+
+fn indexed_chunk_to_qdrant_point(
+    document_id: &str,
+    document_name: &str,
+    chunk: &IndexedChunk,
+) -> Result<QdrantVectorPoint, String> {
+    let payload = qdrant_chunk_payload(
+        &chunk.id,
+        document_id,
+        Some(document_name),
+        &chunk.chunk_type,
+        Some(&Value::String(chunk.title_path.clone())),
+        chunk.order_index as i64,
+    )?;
+
+    Ok(QdrantVectorPoint {
+        id: chunk.id.clone(),
+        vector: embed_chunk_text(&chunk.plain_text),
+        payload: Some(Value::Object(payload)),
+    })
+}
+
+fn progress_percent(current: usize, total: usize) -> f64 {
+    if total == 0 {
+        100.0
+    } else {
+        current as f64 * 100.0 / total as f64
+    }
+}
+
+fn delete_qdrant_document_points(
+    connection: &Connection,
+    collection: &str,
+    document_id: &str,
+) -> Result<usize, String> {
+    let mut stale_point_ids = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT point_id, payload_json
+                 FROM qdrant_points
+                 WHERE collection = ?1",
+            )
+            .map_err(|error| format!("cannot prepare embedded Qdrant document cleanup: {error}"))?;
+        let rows = statement
+            .query_map(params![collection], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("cannot scan embedded Qdrant document points: {error}"))?;
+
+        for row in rows {
+            let (point_id, payload_json) =
+                row.map_err(|error| format!("cannot read embedded Qdrant point: {error}"))?;
+            let payload = serde_json::from_str::<Value>(&payload_json)
+                .map_err(|error| format!("cannot parse embedded Qdrant payload: {error}"))?;
+            if payload
+                .get("document_id")
+                .and_then(Value::as_str)
+                .map(|value| value == document_id)
+                .unwrap_or(false)
+            {
+                stale_point_ids.push(point_id);
+            }
+        }
+    }
+
+    for point_id in &stale_point_ids {
+        connection
+            .execute(
+                "DELETE FROM qdrant_points WHERE collection = ?1 AND point_id = ?2",
+                params![collection, point_id],
+            )
+            .map_err(|error| format!("cannot delete stale embedded Qdrant point: {error}"))?;
+    }
+
+    Ok(stale_point_ids.len())
+}
+
+fn embed_chunk_text(text: &str) -> Vec<f32> {
+    let mut vector = vec![0.0; LOCAL_CHUNK_EMBEDDING_DIMENSIONS];
+    let mut ascii_word = String::new();
+    let mut previous_cjk = None;
+
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() {
+            ascii_word.push(character.to_ascii_lowercase());
+            previous_cjk = None;
+            continue;
+        }
+
+        flush_ascii_embedding_word(&mut vector, &mut ascii_word);
+
+        if character.is_alphanumeric() {
+            add_embedding_token(&mut vector, &format!("c:{character}"), 0.7);
+            if let Some(previous) = previous_cjk {
+                add_embedding_token(&mut vector, &format!("b:{previous}{character}"), 1.0);
+            }
+            previous_cjk = Some(character);
+        } else {
+            previous_cjk = None;
+        }
+    }
+
+    flush_ascii_embedding_word(&mut vector, &mut ascii_word);
+    normalize_embedding_vector(&mut vector);
+    vector
+}
+
+fn flush_ascii_embedding_word(vector: &mut [f32], word: &mut String) {
+    if word.is_empty() {
+        return;
+    }
+
+    add_embedding_token(vector, &format!("w:{word}"), 1.0);
+    let chars = word.chars().collect::<Vec<_>>();
+    for ngram in chars.windows(3) {
+        let token = ngram.iter().collect::<String>();
+        add_embedding_token(vector, &format!("g:{token}"), 0.45);
+    }
+    word.clear();
+}
+
+fn add_embedding_token(vector: &mut [f32], token: &str, weight: f32) {
+    let hash = stable_embedding_hash(token);
+    let index = (hash as usize) % vector.len();
+    let sign = if hash & (1 << 63) == 0 { 1.0 } else { -1.0 };
+    vector[index] += weight * sign;
+}
+
+fn normalize_embedding_vector(vector: &mut [f32]) {
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 {
+        return;
+    }
+
+    for value in vector {
+        *value = (f64::from(*value) / norm) as f32;
+    }
+}
+
+fn stable_embedding_hash(value: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    value.bytes().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
     })
 }
 
@@ -874,6 +1107,7 @@ fn values_equal(actual: &Value, expected: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn embedded_qdrant_sorts_cosine_hits() {
@@ -948,5 +1182,82 @@ mod tests {
                 "order_index": 33
             })
         );
+    }
+
+    #[test]
+    fn chunk_embedding_is_stable_and_normalized() {
+        let first = embed_chunk_text("Document: demo.pdf\nPage: 1\n\nhello vector world");
+        let second = embed_chunk_text("Document: demo.pdf\nPage: 1\n\nhello vector world");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), LOCAL_CHUNK_EMBEDDING_DIMENSIONS);
+
+        let norm = first
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum::<f64>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn upserting_document_chunk_embeddings_replaces_stale_points() {
+        let qdrant_connection = Connection::open_in_memory().expect("in-memory Qdrant should open");
+        migrate_qdrant(&qdrant_connection).expect("qdrant schema should migrate");
+        let store = DocumentStore {
+            connection: Mutex::new(Connection::open_in_memory().expect("sqlite should open")),
+            sqlite_path: Mutex::new(PathBuf::from("office-agent.sqlite3")),
+            qdrant_connection: Mutex::new(qdrant_connection),
+            qdrant_path: Mutex::new(PathBuf::from(".data/qdrant/office-agent-qdrant.sqlite3")),
+            workspace_path: Mutex::new(None),
+            workspace_data_path: Mutex::new(PathBuf::from(".data")),
+        };
+
+        let chunks = vec![
+            test_indexed_chunk("chunk_1", "Page 1", 0),
+            test_indexed_chunk("chunk_2", "Page 2", 1),
+        ];
+        let inserted = upsert_document_chunk_embeddings(&store, "doc_1", "demo.pdf", &chunks)
+            .expect("chunks should upsert");
+        assert_eq!(inserted, 2);
+
+        let replacement = vec![test_indexed_chunk("chunk_3", "Page 3", 0)];
+        let inserted = upsert_document_chunk_embeddings(&store, "doc_1", "demo.pdf", &replacement)
+            .expect("replacement chunks should upsert");
+        assert_eq!(inserted, 1);
+
+        let connection = store
+            .qdrant_connection
+            .lock()
+            .expect("qdrant lock should open");
+        let point_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM qdrant_points", [], |row| row.get(0))
+            .expect("point count should read");
+        let remaining_point_id: String = connection
+            .query_row("SELECT point_id FROM qdrant_points", [], |row| row.get(0))
+            .expect("point id should read");
+
+        assert_eq!(point_count, 1);
+        assert_eq!(remaining_point_id, "chunk_3");
+    }
+
+    fn test_indexed_chunk(id: &str, title_path: &str, order_index: usize) -> IndexedChunk {
+        IndexedChunk {
+            id: id.to_string(),
+            chunk_type: "pdf_paragraph".to_string(),
+            title_level_1: Some(title_path.to_string()),
+            title_level_2: None,
+            title_level_3: None,
+            title_path: title_path.to_string(),
+            heading_level: Some(1),
+            content: format!("content for {id}"),
+            plain_text: format!("Document: demo.pdf\n{title_path}\n\ncontent for {id}"),
+            images_json: Value::Array(Vec::new()).to_string(),
+            tables_json: Value::Array(Vec::new()).to_string(),
+            paragraph_start_index: Some(order_index + 1),
+            paragraph_end_index: Some(order_index + 1),
+            order_index,
+            metadata_json: json!({ "chunk_id": id }).to_string(),
+        }
     }
 }

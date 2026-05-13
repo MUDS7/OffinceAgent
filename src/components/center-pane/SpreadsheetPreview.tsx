@@ -148,6 +148,30 @@ export function SpreadsheetPreview({
 
         if (isCancelled) return;
 
+        if (sheets.length) {
+          const blocks = buildSpreadsheetIndexBlocks(workbook, XLSX);
+          const signature = JSON.stringify(blocks);
+          if (signature) {
+            const request: DocumentIndexRequest = {
+              document_id: getDocumentIndexId(activeFile),
+              filename: activeFile.filename,
+              path: activeFile.diskPath,
+              original_path: activeFile.diskPath,
+              stored_path: activeFile.diskPath,
+              extension: activeFile.filename.split(".").pop()?.toLowerCase() ?? "xlsx",
+              file_type: "spreadsheet",
+              size_bytes: activeFile.file.size,
+              parse_status: "parsed",
+              index_status: "indexed",
+              blocks,
+            };
+
+            await invoke<DocumentIndexResult>("index_document_structure", { request });
+            if (isCancelled) return;
+            lastIndexSignatureRef.current = signature;
+          }
+        }
+
         setPreviewState({
           error: sheets.length ? "" : "Workbook does not contain visible sheets.",
           isLoading: false,

@@ -104,6 +104,11 @@ export function DocxPreview({
         const result = (await response.json()) as DocxParseResponse;
         if (isCancelled) return;
 
+        const signature = getBlocksSignature(result.blocks);
+        await indexDocxStructure(result.blocks);
+        if (isCancelled) return;
+
+        lastIndexSignatureRef.current = signature;
         setState({
           blocks: result.blocks,
           error: "",
@@ -111,7 +116,6 @@ export function DocxPreview({
           renderError: "",
           warnings: result.warnings,
         });
-        const signature = getBlocksSignature(result.blocks);
         lastRenderSignatureRef.current = signature;
         blocksSourceFileRef.current = activeFile.file;
       } catch (error) {

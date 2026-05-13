@@ -123,10 +123,11 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
         }
 
         if (!isCancelled) {
+          await indexPdfStructure(activeFile, indexBlocks, lastIndexSignatureRef);
+        }
+
+        if (!isCancelled) {
           setPdfState({ isLoading: false, error: "" });
-          void indexPdfStructure(activeFile, indexBlocks, lastIndexSignatureRef).catch((error) => {
-            console.warn("Failed to index PDF structure:", error);
-          });
         }
       } catch (error) {
         if (isCancelled || isPdfRenderCancelled(error)) return;

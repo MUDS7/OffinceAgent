@@ -201,6 +201,7 @@ export type DocumentIndexResult = {
   document_id: string;
   nodes_indexed: number;
   chunks_indexed: number;
+  qdrant_vectors_indexed: number;
   text_bytes_indexed: number;
 };
 

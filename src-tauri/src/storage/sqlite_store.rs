@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Manager, State};
 
-use super::{document_index::build_document_index, unix_timestamp_seconds, DocumentStore};
+use super::{
+    document_index::{build_document_index, IndexedChunk},
+    qdrant, unix_timestamp_seconds, DocumentStore,
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DocumentIndexRequest {
@@ -31,7 +34,15 @@ pub(crate) struct DocumentIndexResult {
     document_id: String,
     nodes_indexed: usize,
     chunks_indexed: usize,
+    qdrant_vectors_indexed: usize,
     text_bytes_indexed: usize,
+}
+
+struct PersistedDocumentIndex {
+    result: DocumentIndexResult,
+    document_id: String,
+    filename: String,
+    chunks: Vec<IndexedChunk>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,17 +95,28 @@ pub(crate) fn index_document_structure(
     state: State<'_, DocumentStore>,
     request: DocumentIndexRequest,
 ) -> Result<DocumentIndexResult, String> {
-    let mut connection = state
-        .connection
-        .lock()
-        .map_err(|_| "SQLite store lock is poisoned".to_string())?;
-    index_document_structure_with_connection(&mut connection, request)
+    let mut persisted = {
+        let mut connection = state
+            .connection
+            .lock()
+            .map_err(|_| "SQLite store lock is poisoned".to_string())?;
+        index_document_structure_with_connection(&mut connection, request)?
+    };
+
+    persisted.result.qdrant_vectors_indexed = qdrant::upsert_document_chunk_embeddings(
+        &state,
+        &persisted.document_id,
+        &persisted.filename,
+        &persisted.chunks,
+    )?;
+
+    Ok(persisted.result)
 }
 
 fn index_document_structure_with_connection(
     connection: &mut Connection,
     request: DocumentIndexRequest,
-) -> Result<DocumentIndexResult, String> {
+) -> Result<PersistedDocumentIndex, String> {
     let transaction = connection
         .transaction()
         .map_err(|error| format!("cannot start SQLite transaction: {error}"))?;
@@ -247,11 +269,17 @@ fn index_document_structure_with_connection(
         .commit()
         .map_err(|error| format!("cannot commit SQLite document index: {error}"))?;
 
-    Ok(DocumentIndexResult {
+    Ok(PersistedDocumentIndex {
+        result: DocumentIndexResult {
+            document_id: request.document_id.clone(),
+            nodes_indexed: indexed.nodes.len(),
+            chunks_indexed: indexed.chunks.len(),
+            qdrant_vectors_indexed: 0,
+            text_bytes_indexed,
+        },
         document_id: request.document_id,
-        nodes_indexed: indexed.nodes.len(),
-        chunks_indexed: indexed.chunks.len(),
-        text_bytes_indexed,
+        filename: request.filename,
+        chunks: indexed.chunks,
     })
 }
 
@@ -760,7 +788,7 @@ mod tests {
         let mut connection = Connection::open_in_memory().expect("in-memory SQLite should open");
         migrate_sqlite(&connection).expect("schema should migrate");
 
-        let result = index_document_structure_with_connection(
+        let persisted = index_document_structure_with_connection(
             &mut connection,
             DocumentIndexRequest {
                 document_id: "doc_001".to_string(),
@@ -796,6 +824,7 @@ mod tests {
             },
         )
         .expect("document structure should index");
+        let result = persisted.result;
 
         assert_eq!(result.nodes_indexed, 3);
         assert_eq!(result.chunks_indexed, 1);
