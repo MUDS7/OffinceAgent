@@ -635,6 +635,8 @@
   line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .docx-paragraph-text,
@@ -754,6 +756,15 @@
 .docx-paragraph-text::selection,
 .docx-cell-text::selection {
   background: rgba(31, 111, 235, 0.22);
+}
+
+.docx-text-selection-highlight {
+  padding: 0;
+  border-radius: 2px;
+  color: inherit;
+  background: rgba(31, 111, 235, 0.22);
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .text-editor-layout {

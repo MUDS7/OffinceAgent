@@ -4,6 +4,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -46,6 +47,10 @@ type PendingDocxCaret = {
   target: SelectedDocxTextTarget;
 };
 
+type PersistedDocxTextSelection = PendingDocxCaret & {
+  text: string;
+};
+
 const RENDER_DEBOUNCE_MS = 450;
 const INDEX_DEBOUNCE_MS = 800;
 const EMU_PER_PIXEL = 9525;
@@ -67,6 +72,8 @@ export function DocxPreview({
   const latestBlocksRef = useRef<DocxBlock[]>([]);
   const latestBlocksSignatureRef = useRef("");
   const pendingCaretRef = useRef<PendingDocxCaret | null>(null);
+  const docxPreviewRef = useRef<HTMLDivElement | null>(null);
+  const isPointerSelectingRef = useRef(false);
   const textElementRefs = useRef(new Map<string, HTMLElement>());
   const [state, setState] = useState<{
     blocks: DocxBlock[];
@@ -82,6 +89,7 @@ export function DocxPreview({
     warnings: [],
   });
   const [selectedTarget, setSelectedTarget] = useState<SelectedDocxTarget | null>(null);
+  const [persistedTextSelection, setPersistedTextSelection] = useState<PersistedDocxTextSelection | null>(null);
   const documentText = useMemo(() => getDocumentText(state.blocks), [state.blocks]);
   latestActiveFileRef.current = activeFile;
   latestBlocksRef.current = state.blocks;
@@ -89,6 +97,10 @@ export function DocxPreview({
   useLayoutEffect(() => {
     restorePendingCaret();
   }, [state.blocks]);
+
+  useLayoutEffect(() => {
+    restorePersistedTextSelection();
+  }, [persistedTextSelection]);
 
   useEffect(() => {
     if (loadedFileIdRef.current === activeFile.id && lastPublishedFileRef.current === activeFile.file) {
@@ -106,6 +118,7 @@ export function DocxPreview({
     latestBlocksSignatureRef.current = "";
     setState({ blocks: [], error: "", isLoading: true, renderError: "", warnings: [] });
     setSelectedTarget(null);
+    setPersistedTextSelection(null);
     onSelectionContextChange(null);
 
     async function parseDocx() {
@@ -235,6 +248,26 @@ export function DocxPreview({
   }, [activeFile.id, onRegisterSaveFileProvider, state.error, state.isLoading]);
 
   useEffect(() => {
+    function handleSelectionChange() {
+      if (isPointerSelectingRef.current) return;
+      window.requestAnimationFrame(publishCurrentDocxTextSelection);
+    }
+
+    function handlePointerUp() {
+      if (!isPointerSelectingRef.current) return;
+      isPointerSelectingRef.current = false;
+      window.requestAnimationFrame(publishCurrentDocxTextSelection);
+    }
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    document.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      document.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [state.blocks, activeFile.id]);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -271,14 +304,14 @@ export function DocxPreview({
     : state.warnings;
 
   return (
-    <div className="editor-content docx-preview">
+    <div className="editor-content docx-preview" ref={docxPreviewRef} onPointerDown={handleDocxPreviewPointerDown}>
       <div className="docx-toolbar">
         <div className="docx-summary">
           <FileText size={16} />
           <span>{state.blocks.length} 个内容块</span>
         </div>
         <span className="docx-selection-summary">
-          {selectedTarget ? getSelectedTargetLabel(selectedTarget) : "未选中"}
+          {getDocxSelectionSummary()}
         </span>
       </div>
 
@@ -333,9 +366,10 @@ export function DocxPreview({
           onFocus={() => setSelectedTarget({ blockId: block.id, kind: "paragraph" })}
           onInput={(event) => handleParagraphInput(event, block.id)}
           onKeyDown={(event) => handleParagraphKeyDown(event, block.id)}
+          onKeyUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
           onMouseUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
         >
-          {getEditableDisplayText(block.text)}
+          {renderEditableText(block.text, { blockId: block.id, kind: "paragraph" })}
         </p>
       </section>
     );
@@ -386,6 +420,13 @@ export function DocxPreview({
                         onFocus={() => setSelectedTarget({ blockId: block.id, cellId: cell.id, kind: "cell" })}
                         onInput={(event) => handleTableCellInput(event, block.id, cell.id)}
                         onKeyDown={(event) => handleTableCellKeyDown(event, block.id, cell.id)}
+                        onKeyUp={(event) =>
+                          publishElementTextSelection(event.currentTarget, {
+                            blockId: block.id,
+                            cellId: cell.id,
+                            kind: "cell",
+                          })
+                        }
                         onMouseUp={(event) =>
                           publishElementTextSelection(event.currentTarget, {
                             blockId: block.id,
@@ -394,7 +435,7 @@ export function DocxPreview({
                           })
                         }
                       >
-                        {getEditableDisplayText(cell.text)}
+                        {renderEditableText(cell.text, { blockId: block.id, cellId: cell.id, kind: "cell" })}
                       </div>
                     </td>
                   );
@@ -422,6 +463,7 @@ export function DocxPreview({
 
   function handleParagraphInput(event: FormEvent<HTMLElement>, blockId: string) {
     const target = { blockId, kind: "paragraph" } satisfies SelectedDocxTextTarget;
+    setPersistedTextSelection(null);
     captureCaret(event.currentTarget, target);
     updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
   }
@@ -440,6 +482,7 @@ export function DocxPreview({
 
   function handleTableCellInput(event: FormEvent<HTMLElement>, blockId: string, cellId: string) {
     const target = { blockId, cellId, kind: "cell" } satisfies SelectedDocxTextTarget;
+    setPersistedTextSelection(null);
     captureCaret(event.currentTarget, target);
     updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
   }
@@ -570,8 +613,19 @@ export function DocxPreview({
     restoreTextSelection(element, pendingCaret.start, pendingCaret.end);
   }
 
+  function restorePersistedTextSelection() {
+    const selection = persistedTextSelection;
+    if (!selection?.text.trim()) return;
+
+    const element = textElementRefs.current.get(getTextTargetKey(selection.target));
+    if (!element || document.activeElement !== element) return;
+
+    restoreTextSelection(element, selection.start, selection.end);
+  }
+
   function selectImage(block: DocxImageBlock) {
     setSelectedTarget({ blockId: block.id, kind: "image" });
+    setPersistedTextSelection(null);
     const text = getDocxImageText(block);
     const start = getBlockStartOffset(block.id);
     publishSelectionContext(text, start, start === undefined ? undefined : start + text.length);
@@ -580,35 +634,118 @@ export function DocxPreview({
   function publishElementTextSelection(element: HTMLElement, target: SelectedDocxTextTarget) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-      clearDocxSelectionContext();
+      setSelectedTarget(target);
+      setPersistedTextSelection(null);
+      onSelectionContextChange(null);
       return;
     }
 
     const range = selection.getRangeAt(0);
     if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
-      clearDocxSelectionContext();
+      setSelectedTarget(target);
+      setPersistedTextSelection(null);
+      onSelectionContextChange(null);
       return;
     }
 
     const selectedText = getEditablePlainText(selection.toString());
     if (!selectedText.trim()) {
-      clearDocxSelectionContext();
+      setSelectedTarget(target);
+      setPersistedTextSelection(null);
+      onSelectionContextChange(null);
       return;
     }
 
     const selectionStart = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
     const selectionEnd = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
+    const start = Math.min(selectionStart, selectionEnd);
+    const end = Math.max(selectionStart, selectionEnd);
     setSelectedTarget(target);
+    updatePersistedTextSelection({ target, start, end, text: selectedText });
     publishSelectionContext(
       selectedText,
-      getTextTargetOffset(target, selectionStart),
-      getTextTargetOffset(target, selectionEnd),
+      getTextTargetOffset(target, start),
+      getTextTargetOffset(target, end),
     );
   }
 
   function clearDocxSelectionContext() {
+    isPointerSelectingRef.current = false;
     setSelectedTarget(null);
+    setPersistedTextSelection(null);
     onSelectionContextChange(null);
+  }
+
+  function handleDocxPreviewPointerDown(event: ReactPointerEvent<HTMLElement>) {
+    const target = event.target;
+    isPointerSelectingRef.current =
+      target instanceof Element && Boolean(target.closest(".docx-paragraph-text, .docx-cell-text"));
+  }
+
+  function updatePersistedTextSelection(nextSelection: PersistedDocxTextSelection) {
+    setPersistedTextSelection((current) =>
+      isSamePersistedTextSelection(current, nextSelection) ? current : nextSelection,
+    );
+  }
+
+  function publishCurrentDocxTextSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+
+    const range = selection.getRangeAt(0);
+    if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) return;
+
+    const match = getTextSelectionTarget(range);
+    if (!match) return;
+
+    publishElementTextSelection(match.element, match.target);
+  }
+
+  function getTextSelectionTarget(range: Range) {
+    for (const [key, element] of textElementRefs.current.entries()) {
+      if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) continue;
+
+      const target = getTextTargetFromKey(key);
+      if (!target) return null;
+      return { element, target };
+    }
+
+    return null;
+  }
+
+  function getDocxSelectionSummary() {
+    if (persistedTextSelection?.text.trim()) {
+      return `已选中 ${persistedTextSelection.text.length} 字`;
+    }
+
+    return selectedTarget ? getSelectedTargetLabel(selectedTarget) : "未选中";
+  }
+
+  function renderEditableText(text: string, target: SelectedDocxTextTarget) {
+    const selection = persistedTextSelection;
+    const plainTextLength = text.length;
+
+    if (
+      !selection?.text.trim() ||
+      !isSameTextTarget(selection.target, target) ||
+      selection.start === selection.end ||
+      selection.start > plainTextLength
+    ) {
+      return getEditableDisplayText(text);
+    }
+
+    const start = clampTextOffset(selection.start, plainTextLength);
+    const end = clampTextOffset(Math.max(selection.end, start), plainTextLength);
+    const trailingMarker = text.endsWith("\n") ? TRAILING_LINE_BREAK_MARKER : "";
+
+    return (
+      <>
+        {text.slice(0, start)}
+        <mark className="docx-text-selection-highlight">{text.slice(start, end)}</mark>
+        {text.slice(end)}
+        {trailingMarker}
+      </>
+    );
   }
 
   function publishSelectionContext(text: string, start?: number, end?: number) {
@@ -805,6 +942,37 @@ function getCellTextKey(blockId: string, cellId: string) {
 function getTextTargetKey(target: SelectedDocxTextTarget) {
   if (target.kind === "paragraph") return getParagraphTextKey(target.blockId);
   return getCellTextKey(target.blockId, target.cellId);
+}
+
+function getTextTargetFromKey(key: string): SelectedDocxTextTarget | null {
+  if (key.startsWith("paragraph:")) {
+    return { blockId: key.slice("paragraph:".length), kind: "paragraph" };
+  }
+
+  if (!key.startsWith("cell:")) return null;
+
+  const [blockId, cellId] = key.slice("cell:".length).split(":");
+  if (!blockId || !cellId) return null;
+  return { blockId, cellId, kind: "cell" };
+}
+
+function isSameTextTarget(left: SelectedDocxTextTarget, right: SelectedDocxTextTarget) {
+  if (left.kind !== right.kind || left.blockId !== right.blockId) return false;
+  if (left.kind === "paragraph" && right.kind === "paragraph") return true;
+  return left.kind === "cell" && right.kind === "cell" && left.cellId === right.cellId;
+}
+
+function isSamePersistedTextSelection(
+  left: PersistedDocxTextSelection | null,
+  right: PersistedDocxTextSelection,
+) {
+  return (
+    !!left &&
+    left.start === right.start &&
+    left.end === right.end &&
+    left.text === right.text &&
+    isSameTextTarget(left.target, right.target)
+  );
 }
 
 function getBlocksSignature(blocks: DocxBlock[]) {
