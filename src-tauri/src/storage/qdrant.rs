@@ -850,12 +850,13 @@ pub(crate) fn search_uploaded_document_chunks(
         return Ok(Vec::new());
     }
 
+    let lexical_terms = lexical_match_terms(query);
     let exact_chunk_ids = {
         let connection = state
             .connection
             .lock()
             .map_err(|_| "SQLite store lock is poisoned".to_string())?;
-        exact_match_chunk_ids(&connection, query)?
+        exact_match_chunk_ids(&connection, &lexical_terms)?
     };
     let result_limit = limit.unwrap_or(5).min(20) as usize;
     let search_distance;
@@ -987,13 +988,14 @@ fn sort_uploaded_chunk_candidates(candidates: &mut [UploadedChunkCandidate], dis
     });
 }
 
-fn exact_match_chunk_ids(connection: &Connection, query: &str) -> Result<HashSet<String>, String> {
-    let query = query.trim();
-    if query.is_empty() {
+fn exact_match_chunk_ids(
+    connection: &Connection,
+    terms: &[String],
+) -> Result<HashSet<String>, String> {
+    if terms.is_empty() {
         return Ok(HashSet::new());
     }
 
-    let like_query = format!("%{query}%");
     let mut statement = connection
         .prepare(
             "SELECT id
@@ -1003,15 +1005,20 @@ fn exact_match_chunk_ids(connection: &Connection, query: &str) -> Result<HashSet
                 OR plain_text LIKE ?1",
         )
         .map_err(|error| format!("cannot prepare uploaded document exact chunk lookup: {error}"))?;
-    let rows = statement
-        .query_map(params![like_query], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("cannot scan uploaded document exact chunk matches: {error}"))?;
-
     let mut chunk_ids = HashSet::new();
-    for row in rows {
-        chunk_ids.insert(
-            row.map_err(|error| format!("cannot read uploaded document exact chunk id: {error}"))?,
-        );
+    for term in terms {
+        let like_query = format!("%{term}%");
+        let rows = statement
+            .query_map(params![like_query], |row| row.get::<_, String>(0))
+            .map_err(|error| {
+                format!("cannot scan uploaded document exact chunk matches: {error}")
+            })?;
+
+        for row in rows {
+            chunk_ids.insert(row.map_err(|error| {
+                format!("cannot read uploaded document exact chunk id: {error}")
+            })?);
+        }
     }
     Ok(chunk_ids)
 }
@@ -1067,22 +1074,76 @@ fn lexical_relevance(query: &str, hit: &UploadedDocumentChunkHit) -> f64 {
         relevance += 20.0;
     }
 
-    let terms = query
-        .split_whitespace()
-        .map(compact_match_text)
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
-    if terms.len() > 1 {
-        for term in terms {
-            if title.contains(&term) {
-                relevance += 5.0;
-            } else if content.contains(&term) || plain_text.contains(&term) {
-                relevance += 1.0;
-            }
+    for term in lexical_match_terms(query) {
+        if term == compact_query {
+            continue;
+        }
+        let length_bonus = term.chars().count() as f64;
+        if title.contains(&term) {
+            relevance += 30.0 + length_bonus * 2.0;
+        } else if content.contains(&term) {
+            relevance += 8.0 + length_bonus;
+        } else if plain_text.contains(&term) {
+            relevance += 4.0 + length_bonus;
         }
     }
 
     relevance
+}
+
+fn lexical_match_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = String::new();
+
+    for character in query.chars() {
+        if character.is_alphanumeric() {
+            current.push(character);
+        } else {
+            push_lexical_terms_from_token(&current, &mut terms, &mut seen);
+            current.clear();
+        }
+    }
+    push_lexical_terms_from_token(&current, &mut terms, &mut seen);
+
+    terms
+}
+
+fn push_lexical_terms_from_token(token: &str, terms: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let compact = compact_match_text(token);
+    if compact.is_empty() {
+        return;
+    }
+
+    push_unique_lexical_term(compact.clone(), terms, seen);
+
+    if compact.is_ascii() {
+        return;
+    }
+
+    let chars = compact.chars().collect::<Vec<_>>();
+    if chars.len() < 4 {
+        return;
+    }
+
+    for start in 1..chars.len().saturating_sub(3) {
+        let term = chars[start..].iter().collect::<String>();
+        push_unique_lexical_term(term, terms, seen);
+    }
+
+    for window_len in (4..=chars.len().min(12)).rev() {
+        for start in 0..=chars.len() - window_len {
+            let term = chars[start..start + window_len].iter().collect::<String>();
+            push_unique_lexical_term(term, terms, seen);
+        }
+    }
+}
+
+fn push_unique_lexical_term(term: String, terms: &mut Vec<String>, seen: &mut HashSet<String>) {
+    if term.chars().count() < 2 || !seen.insert(term.clone()) {
+        return;
+    }
+    terms.push(term);
 }
 
 fn compact_match_text(value: &str) -> String {
@@ -1625,6 +1686,21 @@ mod tests {
 
         assert_eq!(hits[0].chunk_id, "chunk_exact");
         assert_eq!(hits[0].title_path, "7.1 整体服务方案");
+    }
+
+    #[test]
+    fn uploaded_chunk_rerank_extracts_title_phrase_from_instruction() {
+        let mut hits = vec![
+            test_uploaded_hit("chunk_vector", "7.3 合理化建议及特色服务", 0.25, 5),
+            test_uploaded_hit("chunk_exact", "7.1 整体服务方案", 0.16, 0),
+        ];
+
+        rerank_uploaded_document_hits("写一个整体服务方案", "Cosine", &mut hits);
+
+        assert_eq!(hits[0].chunk_id, "chunk_exact");
+        assert!(lexical_match_terms("写一个整体服务方案")
+            .iter()
+            .any(|term| term == "整体服务方案"));
     }
 
     #[test]

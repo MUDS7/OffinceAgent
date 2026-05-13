@@ -154,22 +154,25 @@ def search_candidates(
 
 
 def exact_match_chunk_ids(sqlite: sqlite3.Connection, query: str) -> set[str]:
-    query = query.strip()
-    if not query:
+    terms = lexical_match_terms(query)
+    if not terms:
         return set()
 
-    like_query = f"%{query}%"
-    rows = sqlite.execute(
-        """
-        SELECT id
-        FROM chunks
-        WHERE title_path LIKE ?1
-           OR content LIKE ?1
-           OR plain_text LIKE ?1
-        """,
-        (like_query,),
-    )
-    return {str(row[0]) for row in rows}
+    chunk_ids: set[str] = set()
+    for term in terms:
+        like_query = f"%{term}%"
+        rows = sqlite.execute(
+            """
+            SELECT id
+            FROM chunks
+            WHERE title_path LIKE ?1
+               OR content LIKE ?1
+               OR plain_text LIKE ?1
+            """,
+            (like_query,),
+        )
+        chunk_ids.update(str(row[0]) for row in rows)
+    return chunk_ids
 
 
 def hydrate_hits(
@@ -234,17 +237,60 @@ def lexical_relevance(query: str, hit: dict[str, object]) -> float:
     elif compact_query in plain_text:
         relevance += 20.0
 
-    terms = [compact_match_text(term) for term in query.split() if term.strip()]
-    if len(terms) > 1:
-        for term in terms:
-            if not term:
-                continue
-            if term in title:
-                relevance += 5.0
-            elif term in content or term in plain_text:
-                relevance += 1.0
+    for term in lexical_match_terms(query):
+        if term == compact_query:
+            continue
+        length_bonus = len(term)
+        if term in title:
+            relevance += 30.0 + length_bonus * 2.0
+        elif term in content:
+            relevance += 8.0 + length_bonus
+        elif term in plain_text:
+            relevance += 4.0 + length_bonus
 
     return relevance
+
+
+def lexical_match_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    current: list[str] = []
+
+    for character in query:
+        if character.isalnum():
+            current.append(character)
+        else:
+            push_lexical_terms_from_token("".join(current), terms, seen)
+            current.clear()
+    push_lexical_terms_from_token("".join(current), terms, seen)
+    return terms
+
+
+def push_lexical_terms_from_token(token: str, terms: list[str], seen: set[str]) -> None:
+    compact = compact_match_text(token)
+    if not compact:
+        return
+
+    push_unique_lexical_term(compact, terms, seen)
+    if compact.isascii():
+        return
+
+    if len(compact) < 4:
+        return
+
+    for start in range(1, max(1, len(compact) - 3)):
+        push_unique_lexical_term(compact[start:], terms, seen)
+
+    for window_len in range(min(len(compact), 12), 3, -1):
+        for start in range(0, len(compact) - window_len + 1):
+            push_unique_lexical_term(compact[start:start + window_len], terms, seen)
+
+
+def push_unique_lexical_term(term: str, terms: list[str], seen: set[str]) -> None:
+    if len(term) < 2 or term in seen:
+        return
+    seen.add(term)
+    terms.append(term)
 
 
 def rerank_hits(
