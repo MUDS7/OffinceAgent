@@ -47,6 +47,7 @@ fn main() {
             storage::search_uploaded_document_chunks,
             // DeepSeek 聊天、文本编辑和意图识别能力。
             deepseek::chat_with_deepseek,
+            deepseek::cancel_deepseek_chat,
             deepseek::classify_text_selection_intent,
             // 文件读写和目录扫描能力。
             file_system::save_file_to_disk,

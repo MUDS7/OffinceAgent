@@ -581,6 +581,14 @@
   background: #4b89dc;
 }
 
+.send-button.stop-button {
+  background: #d14b4b;
+}
+
+.send-button.stop-button:hover {
+  background: #bb3f3f;
+}
+
 .spin {
   animation: spin 0.9s linear infinite;
 }

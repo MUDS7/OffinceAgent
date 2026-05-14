@@ -1,7 +1,10 @@
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 
-use super::types::{DeepSeekStreamChunk, DeepSeekStreamEvent};
+use super::{
+    types::{DeepSeekStreamChunk, DeepSeekStreamEvent},
+    wait_for_stream_cancel, DEEPSEEK_CANCELLED_MESSAGE,
+};
 
 /// 前端监听 DeepSeek SSE 转发结果时使用的 Tauri 事件名。
 const DEEPSEEK_CHAT_STREAM_EVENT: &str = "deepseek-chat-stream";
@@ -16,7 +19,16 @@ pub(super) async fn stream_deepseek_response(
     let mut pending = String::new();
     let mut chunks = response.bytes_stream();
 
-    while let Some(chunk) = chunks.next().await {
+    loop {
+        let chunk = tokio::select! {
+            chunk = chunks.next() => chunk,
+            _ = wait_for_stream_cancel(stream_id) => {
+                return Err(DEEPSEEK_CANCELLED_MESSAGE.to_string());
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         let chunk = chunk.map_err(|error| format!("Failed to read DeepSeek stream: {error}"))?;
         pending.push_str(&String::from_utf8_lossy(&chunk));
 

@@ -119,6 +119,11 @@ function App() {
   const [unsavedContents, setUnsavedContents] = useState<Record<string, string>>({});
   const [dirtyFileIds, setDirtyFileIds] = useState<string[]>([]);
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => getInitialLayoutWidths());
+  const activeChatRequestRef = useRef<{
+    streamId: string;
+    assistantMessageId: string;
+    cancelled: boolean;
+  } | null>(null);
 
   const selectedWorkspaceFile = useMemo(
     () => workspaceFiles.find((item) => item.id === selectedFileId) ?? null,
@@ -156,6 +161,43 @@ function App() {
     "--codex-width": `${layoutWidths.codex}px`,
   } as CSSProperties;
   const activeFilename = selectedWorkspaceFile?.file.name ?? "未选择文件";
+
+  function isChatRequestCancelled(streamId: string) {
+    const activeRequest = activeChatRequestRef.current;
+    return !activeRequest || activeRequest.streamId !== streamId || activeRequest.cancelled;
+  }
+
+  function throwIfChatRequestCancelled(streamId: string) {
+    if (isChatRequestCancelled(streamId)) {
+      throw new Error("DeepSeek request cancelled");
+    }
+  }
+
+  function finishChatRequest(streamId: string) {
+    if (activeChatRequestRef.current?.streamId !== streamId) return;
+
+    activeChatRequestRef.current = null;
+    setIsSendingMessage(false);
+  }
+
+  function stopMessage() {
+    const activeRequest = activeChatRequestRef.current;
+    if (!activeRequest || activeRequest.cancelled) return;
+
+    activeRequest.cancelled = true;
+    setIsSendingMessage(false);
+    setErrorMessage("");
+    void invoke("cancel_deepseek_chat", { streamId: activeRequest.streamId }).catch((error) => {
+      console.warn("Failed to cancel DeepSeek request.", error);
+    });
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === activeRequest.assistantMessageId && !message.text.trim()
+          ? { ...message, text: "已停止生成。" }
+          : message,
+      ),
+    );
+  }
 
   async function refreshStatus() {
     setIsChecking(true);
@@ -812,6 +854,7 @@ function App() {
 
     try {
       commandSpecs = await fetchExcelCommandSpecs();
+      throwIfChatRequestCancelled(streamId);
       const messages = buildExcelAgentMessages({
         commandSpecs,
         filename: targetFile.file.name,
@@ -825,6 +868,7 @@ function App() {
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
+        if (isChatRequestCancelled(streamId)) return;
 
         if (payload.kind === "reasoning" && payload.content) {
           setChatMessages((current) =>
@@ -845,6 +889,7 @@ function App() {
           streamError = payload.error;
         }
       });
+      throwIfChatRequestCancelled(streamId);
 
       await invoke("chat_with_deepseek", {
         model,
@@ -852,6 +897,7 @@ function App() {
         messages,
         textEditRequest: null,
       });
+      throwIfChatRequestCancelled(streamId);
 
       if (streamError) {
         throw new Error(streamError);
@@ -861,6 +907,7 @@ function App() {
     }
 
     const plan = parseExcelAgentPlan(assistantText);
+    throwIfChatRequestCancelled(streamId);
     if (!plan.sheet && selectionSheetName) {
       plan.sheet = selectionSheetName;
     }
@@ -896,7 +943,9 @@ function App() {
       filePath: targetFile.diskPath,
       plan,
     });
+    throwIfChatRequestCancelled(streamId);
     await refreshExcelWorkspaceFile(targetFile, executionResult);
+    throwIfChatRequestCancelled(streamId);
 
     updateAssistantMessage(
       assistantMessageId,
@@ -924,6 +973,7 @@ function App() {
 
     try {
       commandSpecs = await fetchDocxCommandSpecs();
+      throwIfChatRequestCancelled(streamId);
       const messages = buildDocxAgentMessages({
         commandSpecs,
         filename: targetFile.file.name,
@@ -937,6 +987,7 @@ function App() {
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
+        if (isChatRequestCancelled(streamId)) return;
 
         if (payload.kind === "reasoning" && payload.content) {
           setChatMessages((current) =>
@@ -958,12 +1009,15 @@ function App() {
         }
       });
 
+      throwIfChatRequestCancelled(streamId);
+
       await invoke("chat_with_deepseek", {
         model,
         streamId,
         messages,
         textEditRequest: null,
       });
+      throwIfChatRequestCancelled(streamId);
 
       if (streamError) {
         throw new Error(streamError);
@@ -973,6 +1027,7 @@ function App() {
     }
 
     const plan = parseDocxAgentPlan(assistantText);
+    throwIfChatRequestCancelled(streamId);
     if (plan.action === "answer_only" || plan.action === "ask_confirm") {
       updateAssistantMessage(assistantMessageId, plan.message || stripMarkdownFence(assistantText.trim()) || "需要你再补充一下要修改的位置或内容。");
       return;
@@ -994,7 +1049,9 @@ function App() {
       file: targetFile.file,
       plan,
     });
+    throwIfChatRequestCancelled(streamId);
     refreshDocxWorkspaceFile(targetFile, executionResult);
+    throwIfChatRequestCancelled(streamId);
 
     updateAssistantMessage(
       assistantMessageId,
@@ -1224,6 +1281,7 @@ function App() {
     const assistantMessage: ChatMessage = { id: assistantMessageId, role: "assistant", text: "" };
     const nextMessages = [...chatMessages, userMessage];
 
+    activeChatRequestRef.current = { streamId, assistantMessageId, cancelled: false };
     setChatMessages([...nextMessages, assistantMessage]);
     setDraftMessage("");
     setIsSendingMessage(true);
@@ -1294,6 +1352,7 @@ function App() {
           console.warn("Failed to build compressed file context.", error);
         }
       }
+      throwIfChatRequestCancelled(streamId);
 
       if (shouldReferenceUploadedDocuments(text)) {
         try {
@@ -1307,6 +1366,7 @@ function App() {
             "Uploaded document reference search failed; no uploaded-document chunks are available for this request.";
         }
       }
+      throwIfChatRequestCancelled(streamId);
 
       if (shouldUseSpreadsheetAgent(selectedWorkspaceFile)) {
         await handleSpreadsheetAgentCommand(
@@ -1337,8 +1397,10 @@ function App() {
       const textSelection = documentSelection ?? buildTextFileCursorSelection(selectedWorkspaceFile);
       let fullDocumentText: string | undefined;
       let intent = await classifyTextSelectionIntent(model, text, textSelection, fileContext);
+      throwIfChatRequestCancelled(streamId);
       if (shouldUseJsonFullDocumentEdit(selectedWorkspaceFile, textSelection, text, intent)) {
         fullDocumentText = await readWorkspaceText(selectedWorkspaceFile);
+        throwIfChatRequestCancelled(streamId);
         intent = "replace_selection";
       }
 
@@ -1391,6 +1453,7 @@ function App() {
       unlisten = await listen<DeepSeekStreamEvent>("deepseek-chat-stream", (event) => {
         const payload = event.payload;
         if (payload.stream_id !== streamId) return;
+        if (isChatRequestCancelled(streamId)) return;
 
         if (payload.kind === "reasoning" && payload.content) {
           setChatMessages((current) =>
@@ -1431,6 +1494,7 @@ function App() {
           );
         }
       });
+      throwIfChatRequestCancelled(streamId);
 
       await invoke("chat_with_deepseek", {
         model,
@@ -1438,9 +1502,12 @@ function App() {
         messages: apiMessages,
         textEditRequest,
       });
+      throwIfChatRequestCancelled(streamId);
 
       applyAgentTextResult();
     } catch (error) {
+      if (isChatRequestCancelled(streamId)) return;
+
       const message = error instanceof Error ? error.message : String(error);
       setErrorMessage(message);
       setChatMessages((current) =>
@@ -1452,7 +1519,7 @@ function App() {
       );
     } finally {
       unlisten?.();
-      setIsSendingMessage(false);
+      finishChatRequest(streamId);
     }
   }
 
@@ -1744,6 +1811,7 @@ function App() {
           onOpenFilePicker={openFilePicker}
           onUndoFileChanges={undoAgentFileChanges}
           onSendMessage={sendMessage}
+          onStopMessage={stopMessage}
         />
       </section>
     </main>

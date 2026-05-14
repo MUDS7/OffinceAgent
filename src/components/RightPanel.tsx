@@ -9,6 +9,7 @@ import {
   Maximize2,
   Paperclip,
   Sparkles,
+  Square,
   Table2,
   Undo2,
   X,
@@ -29,6 +30,7 @@ type RightPanelProps = {
   onOpenFilePicker: () => void;
   onUndoFileChanges: (messageId: string) => void;
   onSendMessage: (model: string, referenceUploadedDocuments: boolean) => void;
+  onStopMessage: () => void;
 };
 
 const modelOptions = [
@@ -49,6 +51,7 @@ export function RightPanel({
   onOpenFilePicker,
   onUndoFileChanges,
   onSendMessage,
+  onStopMessage,
 }: RightPanelProps) {
   const [selectedModel, setSelectedModel] = useState("deepseek-reasoner");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
@@ -232,13 +235,21 @@ export function RightPanel({
               ) : null}
             </div>
             <button
-              className="send-button"
+              className={isSendingMessage ? "send-button stop-button" : "send-button"}
               type="button"
-              onClick={() => onSendMessage(selectedModel, isReferenceDocsActive)}
-              disabled={!draftMessage.trim() || isSendingMessage}
-              title="Send"
+              onClick={() => {
+                if (isSendingMessage) {
+                  onStopMessage();
+                  return;
+                }
+
+                onSendMessage(selectedModel, isReferenceDocsActive);
+              }}
+              disabled={!isSendingMessage && !draftMessage.trim()}
+              title={isSendingMessage ? "停止生成" : "发送"}
+              aria-label={isSendingMessage ? "停止生成" : "发送"}
             >
-              <ArrowUp size={22} />
+              {isSendingMessage ? <Square size={16} fill="currentColor" /> : <ArrowUp size={22} />}
             </button>
           </div>
         </div>

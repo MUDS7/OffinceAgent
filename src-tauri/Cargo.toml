@@ -20,6 +20,7 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
+tokio = { version = "1", features = ["macros", "time"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
