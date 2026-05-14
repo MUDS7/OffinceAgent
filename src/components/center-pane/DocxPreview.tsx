@@ -48,7 +48,28 @@ type PendingDocxCaret = {
   target: SelectedDocxTextTarget;
 };
 
+type PersistedDocxTextSelectionSegment = PendingDocxCaret & {
+  text: string;
+};
+
 type PersistedDocxTextSelection = PendingDocxCaret & {
+  documentEnd?: number;
+  documentStart?: number;
+  segments: PersistedDocxTextSelectionSegment[];
+  text: string;
+};
+
+type DocxTextRangePosition = {
+  documentOffset: number;
+  element: HTMLElement;
+  localOffset: number;
+  target: SelectedDocxTextTarget;
+};
+
+type DocxTextTargetEntry = {
+  documentEnd: number;
+  documentStart: number;
+  target: SelectedDocxTextTarget;
   text: string;
 };
 
@@ -73,6 +94,10 @@ export function DocxPreview({
   const latestBlocksRef = useRef<DocxBlock[]>([]);
   const latestBlocksSignatureRef = useRef("");
   const pendingCaretRef = useRef<PendingDocxCaret | null>(null);
+  const pointerSelectionRef = useRef<{
+    anchor: DocxTextRangePosition;
+    focus: DocxTextRangePosition;
+  } | null>(null);
   const docxPreviewRef = useRef<HTMLDivElement | null>(null);
   const isPointerSelectingRef = useRef(false);
   const textElementRefs = useRef(new Map<string, HTMLElement>());
@@ -254,16 +279,48 @@ export function DocxPreview({
       window.requestAnimationFrame(publishCurrentDocxTextSelection);
     }
 
-    function handlePointerUp() {
+    function handlePointerMove(event: PointerEvent) {
+      if (!isPointerSelectingRef.current || !pointerSelectionRef.current) return;
+
+      const focus = getTextRangePositionFromPoint(event.clientX, event.clientY);
+      if (focus) {
+        event.preventDefault();
+        pointerSelectionRef.current = {
+          ...pointerSelectionRef.current,
+          focus,
+        };
+        publishDocxTextSelectionFromPositions(pointerSelectionRef.current.anchor, focus);
+      }
+    }
+
+    function handlePointerUp(event: PointerEvent) {
       if (!isPointerSelectingRef.current) return;
       isPointerSelectingRef.current = false;
-      window.requestAnimationFrame(publishCurrentDocxTextSelection);
+      const pointerSelection = pointerSelectionRef.current;
+      const focus = getTextRangePositionFromPoint(event.clientX, event.clientY);
+      if (pointerSelection && focus) {
+        pointerSelection.focus = focus;
+      }
+      pointerSelectionRef.current = null;
+
+      window.requestAnimationFrame(() => {
+        if (pointerSelection && !isSameTextTarget(pointerSelection.anchor.target, pointerSelection.focus.target)) {
+          publishDocxTextSelectionFromPositions(pointerSelection.anchor, pointerSelection.focus);
+          return;
+        }
+
+        if (!publishCurrentDocxTextSelection() && pointerSelection) {
+          publishDocxTextSelectionFromPositions(pointerSelection.anchor, pointerSelection.focus);
+        }
+      });
     }
 
     document.addEventListener("selectionchange", handleSelectionChange);
+    document.addEventListener("pointermove", handlePointerMove);
     document.addEventListener("pointerup", handlePointerUp);
     return () => {
       document.removeEventListener("selectionchange", handleSelectionChange);
+      document.removeEventListener("pointermove", handlePointerMove);
       document.removeEventListener("pointerup", handlePointerUp);
     };
   }, [state.blocks, activeFile.id]);
@@ -274,6 +331,20 @@ export function DocxPreview({
         event.preventDefault();
         onSaveFile(activeFile.id);
         return;
+      }
+
+      if (event.key === "Backspace" || event.key === "Delete") {
+        if (
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey &&
+          persistedTextSelection?.text.trim() &&
+          isDocxPreviewKeyboardTarget(event.target, docxPreviewRef.current)
+        ) {
+          event.preventDefault();
+          deletePersistedTextSelection(persistedTextSelection);
+          return;
+        }
       }
 
       if (!selectedTarget || selectedTarget.kind !== "image") return;
@@ -289,7 +360,7 @@ export function DocxPreview({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeFile.id, onSaveFile, selectedTarget]);
+  }, [activeFile.id, onSaveFile, persistedTextSelection, selectedTarget]);
 
   if (state.isLoading) {
     return (
@@ -583,6 +654,60 @@ export function DocxPreview({
     onSelectionContextChange(null);
   }
 
+  function deletePersistedTextSelection(selection: PersistedDocxTextSelection) {
+    if (!selection.segments.length) return;
+
+    const firstSegment = selection.segments[0];
+    pendingCaretRef.current = {
+      target: firstSegment.target,
+      start: firstSegment.start,
+      end: firstSegment.start,
+    };
+    textElementRefs.current.get(getTextTargetKey(firstSegment.target))?.focus();
+
+    updateDocxBlocks((blocks) =>
+      blocks.map((block) => {
+        if (block.type === "paragraph") {
+          const segment = selection.segments.find(
+            (item) => item.target.kind === "paragraph" && item.target.blockId === block.id,
+          );
+          if (!segment) return block;
+
+          return {
+            ...block,
+            text: deleteTextSegment(block.text, segment.start, segment.end),
+          };
+        }
+
+        if (block.type !== "table") return block;
+
+        return {
+          ...block,
+          rows: block.rows.map((row) =>
+            row.map((cell) => {
+              const segment = selection.segments.find(
+                (item) =>
+                  item.target.kind === "cell" &&
+                  item.target.blockId === block.id &&
+                  item.target.cellId === cell.id,
+              );
+              if (!segment) return cell;
+
+              return {
+                ...cell,
+                text: deleteTextSegment(cell.text, segment.start, segment.end),
+              };
+            }),
+          ),
+        };
+      }),
+    );
+
+    window.getSelection()?.removeAllRanges();
+    setPersistedTextSelection(null);
+    onSelectionContextChange(null);
+  }
+
   function updateDocxBlocks(update: (blocks: DocxBlock[]) => DocxBlock[]) {
     setState((current) => {
       const nextBlocks = update(current.blocks);
@@ -671,6 +796,7 @@ export function DocxPreview({
     }
 
     event.preventDefault();
+    event.stopPropagation();
     const nextText = `${currentText.slice(0, start)}${currentText.slice(end)}`;
     const caretPosition = start;
 
@@ -699,6 +825,7 @@ export function DocxPreview({
   function restorePersistedTextSelection() {
     const selection = persistedTextSelection;
     if (!selection?.text.trim()) return;
+    if (selection.segments.length !== 1) return;
 
     const element = textElementRefs.current.get(getTextTargetKey(selection.target));
     if (!element || document.activeElement !== element) return;
@@ -724,6 +851,15 @@ export function DocxPreview({
     }
 
     const range = selection.getRangeAt(0);
+    if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) {
+      setSelectedTarget(target);
+      setPersistedTextSelection(null);
+      onSelectionContextChange(null);
+      return;
+    }
+
+    if (publishDocxRangeSelection(range)) return;
+
     if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
       setSelectedTarget(target);
       setPersistedTextSelection(null);
@@ -744,7 +880,13 @@ export function DocxPreview({
     const start = Math.min(selectionStart, selectionEnd);
     const end = Math.max(selectionStart, selectionEnd);
     setSelectedTarget(target);
-    updatePersistedTextSelection({ target, start, end, text: selectedText });
+    updatePersistedTextSelection({
+      target,
+      start,
+      end,
+      segments: [{ target, start, end, text: selectedText }],
+      text: selectedText,
+    });
     publishSelectionContext(
       selectedText,
       getTextTargetOffset(target, start),
@@ -754,6 +896,7 @@ export function DocxPreview({
 
   function clearDocxSelectionContext() {
     isPointerSelectingRef.current = false;
+    pointerSelectionRef.current = null;
     setSelectedTarget(null);
     setPersistedTextSelection(null);
     onSelectionContextChange(null);
@@ -761,8 +904,17 @@ export function DocxPreview({
 
   function handleDocxPreviewPointerDown(event: ReactPointerEvent<HTMLElement>) {
     const target = event.target;
-    isPointerSelectingRef.current =
+    const isTextSelectionStart =
       target instanceof Element && Boolean(target.closest(".docx-paragraph-text, .docx-cell-text"));
+    isPointerSelectingRef.current = isTextSelectionStart;
+    pointerSelectionRef.current = null;
+
+    if (!isTextSelectionStart) return;
+
+    const anchor = getTextRangePositionFromPoint(event.clientX, event.clientY);
+    if (anchor) {
+      pointerSelectionRef.current = { anchor, focus: anchor };
+    }
   }
 
   function updatePersistedTextSelection(nextSelection: PersistedDocxTextSelection) {
@@ -773,27 +925,88 @@ export function DocxPreview({
 
   function publishCurrentDocxTextSelection() {
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
 
     const range = selection.getRangeAt(0);
-    if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) return;
+    if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) return false;
 
-    const match = getTextSelectionTarget(range);
-    if (!match) return;
-
-    publishElementTextSelection(match.element, match.target);
+    return publishDocxRangeSelection(range);
   }
 
-  function getTextSelectionTarget(range: Range) {
+  function publishDocxRangeSelection(range: Range) {
+    const start = getTextRangePosition(range.startContainer, range.startOffset);
+    const end = getTextRangePosition(range.endContainer, range.endOffset);
+    if (!start || !end) return false;
+
+    return publishDocxTextSelectionFromPositions(start, end);
+  }
+
+  function publishDocxTextSelectionFromPositions(anchor: DocxTextRangePosition, focus: DocxTextRangePosition) {
+    const [start, end] =
+      anchor.documentOffset <= focus.documentOffset ? [anchor, focus] : [focus, anchor];
+    if (start.documentOffset === end.documentOffset) return false;
+
+    const selectedText = documentText.slice(start.documentOffset, end.documentOffset);
+    if (!selectedText.trim()) {
+      onSelectionContextChange(null);
+      return false;
+    }
+
+    const segments = buildDocxTextSelectionSegments(start.documentOffset, end.documentOffset);
+    const firstSegment = segments[0];
+    if (!firstSegment) return false;
+
+    setSelectedTarget(firstSegment.target);
+    updatePersistedTextSelection({
+      ...firstSegment,
+      documentEnd: end.documentOffset,
+      documentStart: start.documentOffset,
+      segments,
+      text: selectedText,
+    });
+    publishSelectionContext(selectedText, start.documentOffset, end.documentOffset);
+    return true;
+  }
+
+  function getTextRangePosition(container: Node, offset: number): DocxTextRangePosition | null {
     for (const [key, element] of textElementRefs.current.entries()) {
-      if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) continue;
+      if (!element.contains(container)) continue;
 
       const target = getTextTargetFromKey(key);
       if (!target) return null;
-      return { element, target };
+      const localOffset = getTextOffsetWithinElement(element, container, offset);
+      const documentOffset = getTextTargetOffset(target, localOffset);
+      if (documentOffset === undefined) return null;
+      return { documentOffset, element, localOffset, target };
     }
 
     return null;
+  }
+
+  function getTextRangePositionFromPoint(clientX: number, clientY: number) {
+    const range = getCaretRangeFromPoint(clientX, clientY);
+    if (!range) return null;
+
+    return getTextRangePosition(range.startContainer, range.startOffset);
+  }
+
+  function buildDocxTextSelectionSegments(documentStart: number, documentEnd: number) {
+    return getDocxTextTargetEntries(state.blocks).flatMap((entry) => {
+      const start = Math.max(documentStart, entry.documentStart);
+      const end = Math.min(documentEnd, entry.documentEnd);
+      if (start >= end) return [];
+
+      const localStart = start - entry.documentStart;
+      const localEnd = end - entry.documentStart;
+      return [
+        {
+          target: entry.target,
+          start: localStart,
+          end: localEnd,
+          text: entry.text.slice(localStart, localEnd),
+        } satisfies PersistedDocxTextSelectionSegment,
+      ];
+    });
   }
 
   function getDocxSelectionSummary() {
@@ -807,18 +1020,19 @@ export function DocxPreview({
   function renderEditableText(text: string, target: SelectedDocxTextTarget) {
     const selection = persistedTextSelection;
     const plainTextLength = text.length;
+    const segment = selection?.segments.find((item) => isSameTextTarget(item.target, target));
 
     if (
       !selection?.text.trim() ||
-      !isSameTextTarget(selection.target, target) ||
-      selection.start === selection.end ||
-      selection.start > plainTextLength
+      !segment ||
+      segment.start === segment.end ||
+      segment.start > plainTextLength
     ) {
       return getEditableDisplayText(text);
     }
 
-    const start = clampTextOffset(selection.start, plainTextLength);
-    const end = clampTextOffset(Math.max(selection.end, start), plainTextLength);
+    const start = clampTextOffset(segment.start, plainTextLength);
+    const end = clampTextOffset(Math.max(segment.end, start), plainTextLength);
     const trailingMarker = text.endsWith("\n") ? TRAILING_LINE_BREAK_MARKER : "";
 
     return (
@@ -962,6 +1176,47 @@ function isDocxKeyboardDeleteTarget(target: EventTarget | null, previewElement: 
   return false;
 }
 
+function isDocxPreviewKeyboardTarget(target: EventTarget | null, previewElement: HTMLElement | null) {
+  if (!previewElement) return false;
+
+  if (target instanceof Element) {
+    if (target.closest("input, textarea, select, button")) return false;
+    if (previewElement.contains(target)) return true;
+  }
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof Element) {
+    if (activeElement.closest("input, textarea, select, button")) return false;
+    if (previewElement.contains(activeElement)) return true;
+  }
+
+  return false;
+}
+
+function deleteTextSegment(text: string, start: number, end: number) {
+  const safeStart = clampTextOffset(start, text.length);
+  const safeEnd = clampTextOffset(Math.max(end, safeStart), text.length);
+  return `${text.slice(0, safeStart)}${text.slice(safeEnd)}`;
+}
+
+function getCaretRangeFromPoint(clientX: number, clientY: number) {
+  const documentWithCaret = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offset: number; offsetNode: Node } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+
+  const rangeFromPoint = documentWithCaret.caretRangeFromPoint?.(clientX, clientY);
+  if (rangeFromPoint) return rangeFromPoint;
+
+  const caretPosition = documentWithCaret.caretPositionFromPoint?.(clientX, clientY);
+  if (!caretPosition) return null;
+
+  const range = document.createRange();
+  range.setStart(caretPosition.offsetNode, caretPosition.offset);
+  range.collapse(true);
+  return range;
+}
+
 function getTextOffsetWithinElement(element: HTMLElement, container: Node, offset: number) {
   const range = document.createRange();
   range.selectNodeContents(element);
@@ -1070,9 +1325,29 @@ function isSamePersistedTextSelection(
     !!left &&
     left.start === right.start &&
     left.end === right.end &&
+    left.documentStart === right.documentStart &&
+    left.documentEnd === right.documentEnd &&
     left.text === right.text &&
-    isSameTextTarget(left.target, right.target)
+    isSameTextTarget(left.target, right.target) &&
+    areSamePersistedTextSelectionSegments(left.segments, right.segments)
   );
+}
+
+function areSamePersistedTextSelectionSegments(
+  left: PersistedDocxTextSelectionSegment[],
+  right: PersistedDocxTextSelectionSegment[],
+) {
+  if (left.length !== right.length) return false;
+
+  return left.every((leftSegment, index) => {
+    const rightSegment = right[index];
+    return (
+      leftSegment.start === rightSegment.start &&
+      leftSegment.end === rightSegment.end &&
+      leftSegment.text === rightSegment.text &&
+      isSameTextTarget(leftSegment.target, rightSegment.target)
+    );
+  });
 }
 
 function getBlocksSignature(blocks: DocxBlock[]) {
@@ -1102,6 +1377,44 @@ function normalizeDocxWarnings(warnings: string[], originalBlocks: DocxBlock[], 
 
 function getDocumentText(blocks: DocxBlock[]) {
   return blocks.map((block) => getDocxBlockText(block)).join("\n");
+}
+
+function getDocxTextTargetEntries(blocks: DocxBlock[]) {
+  const entries: DocxTextTargetEntry[] = [];
+  let offset = 0;
+
+  for (const [blockIndex, block] of blocks.entries()) {
+    if (block.type === "paragraph") {
+      entries.push({
+        documentStart: offset,
+        documentEnd: offset + block.text.length,
+        target: { blockId: block.id, kind: "paragraph" },
+        text: block.text,
+      });
+      offset += block.text.length;
+    } else if (block.type === "image") {
+      offset += getDocxImageText(block).length;
+    } else {
+      for (const [rowIndex, row] of block.rows.entries()) {
+        for (const [cellIndex, cell] of row.entries()) {
+          entries.push({
+            documentStart: offset,
+            documentEnd: offset + cell.text.length,
+            target: { blockId: block.id, cellId: cell.id, kind: "cell" },
+            text: cell.text,
+          });
+          offset += cell.text.length;
+          if (cellIndex < row.length - 1) offset += 1;
+        }
+
+        if (rowIndex < block.rows.length - 1) offset += 1;
+      }
+    }
+
+    if (blockIndex < blocks.length - 1) offset += 1;
+  }
+
+  return entries;
 }
 
 function getDocxBlockText(block: DocxBlock) {

@@ -105,7 +105,7 @@ pub(crate) async fn chat_with_deepseek(
         }),
     };
 
-    let client = deepseek_client(Duration::from_secs(90))?;
+    let client = deepseek_client(None, Duration::from_secs(300))?;
     let response = tokio::select! {
         response = client
             .post(DEEPSEEK_CHAT_ENDPOINT)
@@ -179,7 +179,7 @@ pub(crate) async fn classify_text_selection_intent(
         thinking: None,
     };
 
-    let client = deepseek_client(Duration::from_secs(45))?;
+    let client = deepseek_client(Some(Duration::from_secs(45)), Duration::from_secs(45))?;
     let response = client
         .post(DEEPSEEK_CHAT_ENDPOINT)
         .header(AUTHORIZATION, format!("Bearer {api_key}"))
@@ -225,9 +225,19 @@ fn should_enable_deepseek_thinking(model: &str) -> bool {
 }
 
 /// 创建带超时的 HTTP 客户端，避免模型调用无限挂起。
-fn deepseek_client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
+fn deepseek_client(
+    total_timeout: Option<Duration>,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(read_timeout);
+    let builder = match total_timeout {
+        Some(timeout) => builder.timeout(timeout),
+        None => builder,
+    };
+
+    builder
         .build()
         .map_err(|error| format!("Failed to create DeepSeek HTTP client: {error}"))
 }
