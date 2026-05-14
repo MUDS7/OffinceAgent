@@ -3,6 +3,7 @@ import {
   ChevronDown,
   Check,
   ChevronRight,
+  Copy,
   FileText,
   Folder,
   Hand,
@@ -270,7 +271,7 @@ function ChatMessageContent({
   const hasText = Boolean(message.text.trim());
 
   if (!isAssistant) {
-    return <p>{message.text}</p>;
+    return <UserMessageContent message={message} />;
   }
 
   return (
@@ -284,6 +285,51 @@ function ChatMessageContent({
         />
       ) : null}
       {!hasReasoning && !hasText ? <p className="assistant-placeholder" /> : null}
+    </div>
+  );
+}
+
+function UserMessageContent({ message }: { message: ChatMessage }) {
+  const [isCopied, setIsCopied] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
+
+  function handleCopyMessage() {
+    if (isCopied) return;
+
+    void navigator.clipboard?.writeText(message.text);
+    setIsCopied(true);
+
+    if (copiedTimerRef.current !== null) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+
+    copiedTimerRef.current = window.setTimeout(() => {
+      setIsCopied(false);
+      copiedTimerRef.current = null;
+    }, 2000);
+  }
+
+  return (
+    <div className="user-message-content">
+      <p>{message.text}</p>
+      <button
+        className={isCopied ? "user-message-action copied" : "user-message-action"}
+        type="button"
+        title={isCopied ? "Copied" : "Copy"}
+        aria-label={isCopied ? "Copied" : "Copy user message"}
+        disabled={isCopied}
+        onClick={handleCopyMessage}
+      >
+        {isCopied ? <Check size={18} strokeWidth={2.4} /> : <Copy size={18} strokeWidth={2} />}
+      </button>
     </div>
   );
 }

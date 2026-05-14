@@ -172,6 +172,7 @@
 }
 
 .chat-message > p,
+.user-message-content,
 .assistant-message-content {
   max-width: min(100%, 38rem);
 }
@@ -186,6 +187,7 @@
 }
 
 .chat-message > p,
+.user-message-content p,
 .assistant-message-content p {
   margin: 0;
   font-size: 15px;
@@ -194,12 +196,69 @@
   overflow-wrap: anywhere;
 }
 
-.chat-message.user > p {
+.user-message-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.user-message-content p {
   padding: 12px 18px;
   border: 0;
   border-radius: 18px;
   color: #1f1f1f;
   background: #f2f2f2;
+}
+
+.user-message-action {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 13px;
+  padding: 0;
+  border-radius: 6px;
+  color: #777777;
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.user-message-action svg {
+  animation: user-message-action-pop 0.18s ease-out;
+}
+
+.user-message-action:hover:not(:disabled) {
+  color: #4f4f4f;
+  background: #ededed;
+}
+
+.user-message-action:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.user-message-action.copied,
+.user-message-action:disabled {
+  color: #777777;
+  cursor: default;
+}
+
+.user-message-action:focus-visible {
+  outline: 1px solid #777777;
+  outline-offset: 2px;
+}
+
+@keyframes user-message-action-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .assistant-message-content {
