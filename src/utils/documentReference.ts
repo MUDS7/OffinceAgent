@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { UploadedDocumentChunkHit } from "../types";
 
 export const UPLOADED_DOCUMENT_REFERENCE_TRIGGER = "参考上传文档";
-const MAX_REFERENCE_CHARS_PER_CHUNK = 2400;
+const MAX_REFERENCE_CHARS_PER_CHUNK = 12000;
 
 export function shouldReferenceUploadedDocuments(instruction: string): boolean {
   return instruction.includes(UPLOADED_DOCUMENT_REFERENCE_TRIGGER);
@@ -68,6 +68,7 @@ export function buildUploadedDocumentReferenceSystemMessage(
   return [
     "The user explicitly asked to reference uploaded documents.",
     "Use the following retrieved chunks as source material. If the user asks to supplement/add/fill content, prefer directly using the relevant retrieved content instead of merely summarizing that it exists.",
+    "When retrieved content includes child section headings, preserve those headings and their body text unless the user explicitly asks for a summary.",
     "If the chunks are not relevant enough, say that no matching uploaded-document content was found.",
     "Retrieved uploaded-document chunks:",
     "<<<",

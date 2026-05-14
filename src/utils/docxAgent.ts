@@ -83,6 +83,7 @@ export function buildDocxAgentMessages({
       content: [
         DOCX_AGENT_SYSTEM_PROMPT,
         `Only choose one of these currently available commands for action=docx_execute: ${commandNames}.`,
+        "For multi-paragraph additions, still choose one command: insert_paragraph or append_paragraph with args.paragraphs as an ordered string array.",
         "If the user asks for an unavailable DOCX operation, use action=ask_confirm and explain briefly in Chinese that this operation is not supported yet.",
         uploadedDocumentReferenceMessage,
       ].join("\n"),

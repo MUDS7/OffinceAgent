@@ -49,15 +49,18 @@ def get_docx_commands() -> DocxCommandsResponse:
             DocxCommandSpec(
                 command="insert_paragraph",
                 category="basic",
-                description="Insert a paragraph before or after a 1-based block_index or a paragraph matching target_text.",
-                required_args=["text"],
+                description=(
+                    "Insert one paragraph with text, or multiple paragraphs with paragraphs/texts, "
+                    "before or after a 1-based block_index or a paragraph matching target_text."
+                ),
+                required_args=["text for one paragraph, or paragraphs/texts for multiple paragraphs"],
                 optional_args=["block_index", "target_text", "position", "style", "alignment", "case_sensitive"],
             ),
             DocxCommandSpec(
                 command="append_paragraph",
                 category="basic",
-                description="Append a paragraph to the end of the Word document.",
-                required_args=["text"],
+                description="Append one paragraph with text, or multiple paragraphs with paragraphs/texts, to the end of the Word document.",
+                required_args=["text for one paragraph, or paragraphs/texts for multiple paragraphs"],
                 optional_args=["style", "alignment"],
             ),
         ],
@@ -102,14 +105,15 @@ def execute_docx_command(request: DocxExecuteRequest) -> DocxExecuteResponse:
         return docx_response(request, blocks, paragraphs_affected, 0, summary)
 
     if request.command == "insert_paragraph":
-        insert_docx_paragraph(blocks, request.args)
-        summary = "Inserted 1 paragraph."
-        return docx_response(request, blocks, 1, 0, summary)
+        paragraphs_affected = insert_docx_paragraph(blocks, request.args)
+        summary = f"Inserted {paragraphs_affected} paragraph(s)."
+        return docx_response(request, blocks, paragraphs_affected, 0, summary)
 
     if request.command == "append_paragraph":
-        blocks.append(make_docx_paragraph_block(blocks, request.args))
-        summary = "Appended 1 paragraph."
-        return docx_response(request, blocks, 1, 0, summary)
+        paragraphs = make_docx_paragraph_blocks(blocks, request.args)
+        blocks.extend(paragraphs)
+        summary = f"Appended {len(paragraphs)} paragraph(s)."
+        return docx_response(request, blocks, len(paragraphs), 0, summary)
 
     if request.command == "insert_table":
         insert_docx_table(blocks, request.args)
@@ -240,19 +244,22 @@ def apply_paragraph_replacement(block: DocxParagraphBlock, args: dict[str, Any])
         block.alignment = normalize_docx_alignment(args.get("alignment"))
 
 
-def insert_docx_paragraph(blocks: list[DocxBlock], args: dict[str, Any]) -> None:
-    block = make_docx_paragraph_block(blocks, args)
+def insert_docx_paragraph(blocks: list[DocxBlock], args: dict[str, Any]) -> int:
+    paragraphs = make_docx_paragraph_blocks(blocks, args)
     position = str(args.get("position") or "after").lower()
     if position in {"end", "append", "at_end"}:
-        blocks.append(block)
-        return
+        blocks.extend(paragraphs)
+        return len(paragraphs)
     if position in {"start", "prepend", "at_start"}:
-        blocks.insert(0, block)
-        return
+        for offset, paragraph in enumerate(paragraphs):
+            blocks.insert(offset, paragraph)
+        return len(paragraphs)
 
     target_index = resolve_docx_block_index(blocks, args, require_paragraph=False)
     insert_index = target_index if position == "before" else target_index + 1
-    blocks.insert(insert_index, block)
+    for offset, paragraph in enumerate(paragraphs):
+        blocks.insert(insert_index + offset, paragraph)
+    return len(paragraphs)
 
 
 def insert_docx_table(blocks: list[DocxBlock], args: dict[str, Any]) -> None:
@@ -284,13 +291,34 @@ def insert_docx_table(blocks: list[DocxBlock], args: dict[str, Any]) -> None:
     blocks.insert(insert_index, table)
 
 
-def make_docx_paragraph_block(blocks: list[DocxBlock], args: dict[str, Any]) -> DocxParagraphBlock:
-    return DocxParagraphBlock(
-        id=next_docx_block_id(blocks, "p"),
-        text=str(required_arg(args, "text")),
-        style=str(args["style"]) if args.get("style") else None,
-        alignment=normalize_docx_alignment(args.get("alignment")),
-    )
+def make_docx_paragraph_blocks(blocks: list[DocxBlock], args: dict[str, Any]) -> list[DocxParagraphBlock]:
+    existing_ids = {block.id for block in blocks}
+    paragraphs: list[DocxParagraphBlock] = []
+    for text in normalize_paragraph_texts(args):
+        paragraph_id = next_docx_block_id_from_ids(existing_ids, len(blocks) + len(paragraphs), "p")
+        existing_ids.add(paragraph_id)
+        paragraphs.append(
+            DocxParagraphBlock(
+                id=paragraph_id,
+                text=text,
+                style=str(args["style"]) if args.get("style") else None,
+                alignment=normalize_docx_alignment(args.get("alignment")),
+            )
+        )
+    return paragraphs
+
+
+def normalize_paragraph_texts(args: dict[str, Any]) -> list[str]:
+    paragraphs_arg = args.get("paragraphs", args.get("texts"))
+    if paragraphs_arg is not None:
+        if not isinstance(paragraphs_arg, list) or not paragraphs_arg:
+            raise HTTPException(status_code=400, detail="paragraphs/texts must be a non-empty array")
+        paragraphs = [str(text).strip() for text in paragraphs_arg]
+        if any(not text for text in paragraphs):
+            raise HTTPException(status_code=400, detail="paragraphs/texts cannot include empty text")
+        return paragraphs
+
+    return [str(required_arg(args, "text"))]
 
 
 def resolve_docx_block_index(
@@ -425,8 +453,11 @@ def text_contains(text: str, target_text: str, case_sensitive: bool) -> bool:
 
 
 def next_docx_block_id(blocks: list[DocxBlock], prefix: str) -> str:
-    existing_ids = {block.id for block in blocks}
-    index = len(blocks)
+    return next_docx_block_id_from_ids({block.id for block in blocks}, len(blocks), prefix)
+
+
+def next_docx_block_id_from_ids(existing_ids: set[str], start_index: int, prefix: str) -> str:
+    index = start_index
     while f"{prefix}-{index}" in existing_ids:
         index += 1
     return f"{prefix}-{index}"

@@ -897,6 +897,8 @@ pub(crate) fn search_uploaded_document_chunks(
         .map_err(|_| "SQLite store lock is poisoned".to_string())?;
     let mut hits = hydrate_uploaded_document_hits(&connection, candidates)?;
     rerank_uploaded_document_hits(query, &search_distance, &mut hits);
+    expand_docx_section_descendants(&connection, &mut hits)?;
+    collapse_descendant_hits(&mut hits);
     hits.truncate(result_limit.max(1));
     Ok(hits)
 }
@@ -1192,6 +1194,123 @@ fn hydrate_uploaded_document_hits(
         }
     }
     Ok(hits)
+}
+
+struct DocxSectionDescendant {
+    title_path: String,
+    content: String,
+    plain_text: String,
+}
+
+fn expand_docx_section_descendants(
+    connection: &Connection,
+    hits: &mut [UploadedDocumentChunkHit],
+) -> Result<(), String> {
+    for hit in hits {
+        if hit.chunk_type != "docx_section" || hit.title_path.trim().is_empty() {
+            continue;
+        }
+
+        let descendants =
+            load_docx_section_descendants(connection, &hit.document_id, &hit.title_path)?;
+        if descendants.is_empty() {
+            continue;
+        }
+
+        hit.content = combined_docx_section_content(hit, &descendants);
+        hit.plain_text = combined_docx_section_plain_text(hit, &descendants);
+    }
+
+    Ok(())
+}
+
+fn load_docx_section_descendants(
+    connection: &Connection,
+    document_id: &str,
+    title_path: &str,
+) -> Result<Vec<DocxSectionDescendant>, String> {
+    let descendant_prefix = format!("{} > %", escape_sql_like(title_path.trim()));
+    let mut statement = connection
+        .prepare(
+            "SELECT title_path, content, plain_text
+             FROM chunks
+             WHERE document_id = ?1
+               AND chunk_type = 'docx_section'
+               AND title_path LIKE ?2 ESCAPE '\\'
+             ORDER BY order_index",
+        )
+        .map_err(|error| format!("cannot prepare DOCX section descendant lookup: {error}"))?;
+    let rows = statement
+        .query_map(params![document_id, descendant_prefix], |row| {
+            Ok(DocxSectionDescendant {
+                title_path: row.get(0)?,
+                content: row.get(1)?,
+                plain_text: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("cannot scan DOCX section descendants: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot read DOCX section descendant: {error}"))
+}
+
+fn escape_sql_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn combined_docx_section_content(
+    hit: &UploadedDocumentChunkHit,
+    descendants: &[DocxSectionDescendant],
+) -> String {
+    let mut sections = Vec::new();
+    if !hit.content.trim().is_empty() {
+        sections.push(hit.content.trim().to_string());
+    }
+
+    for descendant in descendants {
+        let content = descendant.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        sections.push(format!("{}:\n{}", descendant.title_path.trim(), content));
+    }
+
+    sections.join("\n\n")
+}
+
+fn combined_docx_section_plain_text(
+    hit: &UploadedDocumentChunkHit,
+    descendants: &[DocxSectionDescendant],
+) -> String {
+    std::iter::once(hit.plain_text.trim())
+        .chain(
+            descendants
+                .iter()
+                .map(|descendant| descendant.plain_text.trim()),
+        )
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn collapse_descendant_hits(hits: &mut Vec<UploadedDocumentChunkHit>) {
+    let ancestor_paths = hits
+        .iter()
+        .filter(|hit| hit.chunk_type == "docx_section" && !hit.title_path.trim().is_empty())
+        .map(|hit| (hit.document_id.clone(), hit.title_path.trim().to_string()))
+        .collect::<Vec<_>>();
+
+    hits.retain(|hit| {
+        !ancestor_paths.iter().any(|(document_id, ancestor_path)| {
+            let descendant_prefix = format!("{ancestor_path} > ");
+            hit.document_id == *document_id
+                && hit.title_path != *ancestor_path
+                && hit.title_path.starts_with(&descendant_prefix)
+        })
+    });
 }
 
 pub(super) fn migrate_qdrant(connection: &Connection) -> Result<(), String> {
@@ -1701,6 +1820,75 @@ mod tests {
         assert!(lexical_match_terms("写一个整体服务方案")
             .iter()
             .any(|term| term == "整体服务方案"));
+    }
+
+    #[test]
+    fn expands_docx_parent_section_hits_with_descendants() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE chunks (
+                    document_id TEXT NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    title_path TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    plain_text TEXT NOT NULL,
+                    order_index INTEGER NOT NULL
+                );
+                ",
+            )
+            .expect("chunks table should be created");
+
+        for (title_path, content, order_index) in [
+            (
+                "7.5.1 System architecture overview",
+                "Parent overview paragraph.",
+                1,
+            ),
+            (
+                "7.5.1 System architecture overview > 7.5.1.1 Deployment view",
+                "Deployment view content.",
+                2,
+            ),
+            (
+                "7.5.1 System architecture overview > 7.5.1.2 Data flow",
+                "Data flow content.",
+                3,
+            ),
+            ("7.5.2 Operations overview", "Sibling content.", 4),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO chunks (
+                        document_id, chunk_type, title_path, content, plain_text, order_index
+                     ) VALUES ('doc_1', 'docx_section', ?1, ?2, ?2, ?3)",
+                    params![title_path, content, order_index],
+                )
+                .expect("chunk should insert");
+        }
+
+        let mut hits = vec![
+            test_uploaded_hit("parent", "7.5.1 System architecture overview", 0.9, 1),
+            test_uploaded_hit(
+                "child",
+                "7.5.1 System architecture overview > 7.5.1.1 Deployment view",
+                0.8,
+                2,
+            ),
+        ];
+        hits[0].content = "Parent overview paragraph.".to_string();
+
+        expand_docx_section_descendants(&connection, &mut hits).expect("descendants should expand");
+        collapse_descendant_hits(&mut hits);
+
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("Parent overview paragraph."));
+        assert!(hits[0].content.contains("7.5.1.1 Deployment view"));
+        assert!(hits[0].content.contains("Deployment view content."));
+        assert!(hits[0].content.contains("7.5.1.2 Data flow"));
+        assert!(hits[0].content.contains("Data flow content."));
+        assert!(!hits[0].content.contains("Sibling content."));
     }
 
     #[test]
