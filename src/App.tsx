@@ -7,6 +7,7 @@ import type {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CenterPane } from "./components/CenterPane";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LeftPanel } from "./components/LeftPanel";
 import { RightPanel } from "./components/RightPanel";
 import { TopBar } from "./components/TopBar";
@@ -1715,6 +1716,7 @@ function App() {
   }, []);
 
   return (
+    <ErrorBoundary>
     <main className="desktop-shell">
       <input
         ref={fileInputRef}
@@ -1815,6 +1817,7 @@ function App() {
         />
       </section>
     </main>
+    </ErrorBoundary>
   );
 }
 

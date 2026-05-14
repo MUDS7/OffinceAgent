@@ -195,3 +195,57 @@ body.is-resizing-spreadsheet.row-resize * {
     font-size: 13px;
   }
 }
+
+.error-boundary-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 16px;
+  padding: 40px;
+  text-align: center;
+  background: #f5f5f5;
+}
+
+.error-boundary-fallback h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: #d93025;
+}
+
+.error-boundary-fallback p {
+  margin: 0;
+  font-size: 14px;
+  color: #555;
+}
+
+.error-boundary-message {
+  max-width: 600px;
+  padding: 12px 16px;
+  margin: 0;
+  font-size: 13px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  color: #d93025;
+  background: #fce8e6;
+  border: 1px solid #f5c6cb;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.error-boundary-fallback button {
+  padding: 8px 24px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #fff;
+  background: #1a73e8;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.error-boundary-fallback button:hover {
+  background: #1557b0;
+}

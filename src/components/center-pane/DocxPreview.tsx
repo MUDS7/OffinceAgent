@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
 import {
+  type ClipboardEvent as ReactClipboardEvent,
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -364,6 +365,7 @@ export function DocxPreview({
           ref={(element) => setTextElementRef(getParagraphTextKey(block.id), element)}
           suppressContentEditableWarning
           onFocus={() => setSelectedTarget({ blockId: block.id, kind: "paragraph" })}
+          onPaste={(event) => handlePaste(event, { blockId: block.id, kind: "paragraph" })}
           onInput={(event) => handleParagraphInput(event, block.id)}
           onKeyDown={(event) => handleParagraphKeyDown(event, block.id)}
           onKeyUp={(event) => publishElementTextSelection(event.currentTarget, { blockId: block.id, kind: "paragraph" })}
@@ -418,6 +420,7 @@ export function DocxPreview({
                         suppressContentEditableWarning
                         aria-label={`DOCX table cell ${rowIndex + 1}, ${cellIndex + 1}`}
                         onFocus={() => setSelectedTarget({ blockId: block.id, cellId: cell.id, kind: "cell" })}
+                        onPaste={(event) => handlePaste(event, { blockId: block.id, cellId: cell.id, kind: "cell" })}
                         onInput={(event) => handleTableCellInput(event, block.id, cell.id)}
                         onKeyDown={(event) => handleTableCellKeyDown(event, block.id, cell.id)}
                         onKeyUp={(event) =>
@@ -471,12 +474,11 @@ export function DocxPreview({
   function handleParagraphKeyDown(event: ReactKeyboardEvent<HTMLElement>, blockId: string) {
     const target = { blockId, kind: "paragraph" } satisfies SelectedDocxTextTarget;
     if (insertLineBreak(event, target)) {
-      updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
       return;
     }
 
-    if (deleteLineBreakBeforeCaret(event, target)) {
-      updateParagraphText(blockId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+    if (handleBackspaceAndDelete(event, target)) {
+      return;
     }
   }
 
@@ -490,12 +492,40 @@ export function DocxPreview({
   function handleTableCellKeyDown(event: ReactKeyboardEvent<HTMLElement>, blockId: string, cellId: string) {
     const target = { blockId, cellId, kind: "cell" } satisfies SelectedDocxTextTarget;
     if (insertLineBreak(event, target)) {
-      updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
       return;
     }
 
-    if (deleteLineBreakBeforeCaret(event, target)) {
-      updateTableCellText(blockId, cellId, getEditablePlainText(event.currentTarget.textContent ?? ""));
+    if (handleBackspaceAndDelete(event, target)) {
+      return;
+    }
+  }
+
+  function handlePaste(event: ReactClipboardEvent<HTMLElement>, target: SelectedDocxTextTarget) {
+    event.preventDefault();
+
+    const pastedText = event.clipboardData.getData("text/plain");
+    if (!pastedText) return;
+
+    const element = event.currentTarget;
+    const currentText = getEditablePlainText(element.textContent ?? "");
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return;
+
+    const start = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
+    const end = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
+    const nextText = `${currentText.slice(0, start)}${pastedText}${currentText.slice(end)}`;
+    const caretPosition = start + pastedText.length;
+
+    pendingCaretRef.current = { target, start: caretPosition, end: caretPosition };
+    setPersistedTextSelection(null);
+
+    if (target.kind === "paragraph") {
+      updateParagraphText(target.blockId, nextText);
+    } else {
+      updateTableCellText(target.blockId, target.cellId, nextText);
     }
   }
 
@@ -568,37 +598,58 @@ export function DocxPreview({
     const end = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
     const text = getEditablePlainText(element.textContent ?? "");
     const nextText = `${text.slice(0, start)}\n${text.slice(end)}`;
-    element.textContent = getEditableDisplayText(nextText);
     pendingCaretRef.current = {
       target,
       start: start + 1,
       end: start + 1,
     };
+
+    if (target.kind === "paragraph") {
+      updateParagraphText(target.blockId, nextText);
+    } else {
+      updateTableCellText(target.blockId, target.cellId, nextText);
+    }
     return true;
   }
 
-  function deleteLineBreakBeforeCaret(event: ReactKeyboardEvent<HTMLElement>, target: SelectedDocxTextTarget) {
-    if (event.key !== "Backspace" || event.ctrlKey || event.metaKey || event.altKey) return false;
+  function handleBackspaceAndDelete(event: ReactKeyboardEvent<HTMLElement>, target: SelectedDocxTextTarget) {
+    const key = event.key;
+    if (key !== "Backspace" && key !== "Delete") return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
 
     const element = event.currentTarget;
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+    if (!selection || selection.rangeCount === 0) return false;
 
     const range = selection.getRangeAt(0);
-    if (!element.contains(range.startContainer)) return false;
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return false;
 
-    const caretOffset = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
-    const text = getEditablePlainText(element.textContent ?? "");
-    if (caretOffset <= 0 || text[caretOffset - 1] !== "\n") return false;
+    const currentText = getEditablePlainText(element.textContent ?? "");
+    let start = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
+    let end = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
+
+    if (start === end) {
+      if (key === "Backspace") {
+        if (start === 0) return false;
+        start -= 1;
+      } else {
+        if (end >= currentText.length) return false;
+        end += 1;
+      }
+    }
 
     event.preventDefault();
-    const nextText = `${text.slice(0, caretOffset - 1)}${text.slice(caretOffset)}`;
-    element.textContent = getEditableDisplayText(nextText);
-    pendingCaretRef.current = {
-      target,
-      start: caretOffset - 1,
-      end: caretOffset - 1,
-    };
+    const nextText = `${currentText.slice(0, start)}${currentText.slice(end)}`;
+    const caretPosition = start;
+
+    pendingCaretRef.current = { target, start: caretPosition, end: caretPosition };
+    setPersistedTextSelection(null);
+
+    if (target.kind === "paragraph") {
+      updateParagraphText(target.blockId, nextText);
+    } else {
+      updateTableCellText(target.blockId, target.cellId, nextText);
+    }
     return true;
   }
 
