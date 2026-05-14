@@ -54,7 +54,7 @@ class DocxRenderRequest(BaseModel):
 
 
 BasicDocxCommand = Literal["replace_text", "delete_text", "replace_paragraph", "insert_paragraph", "append_paragraph"]
-AdvancedDocxCommand = Literal["insert_table"]
+AdvancedDocxCommand = Literal["insert_table", "insert_blocks"]
 DocxCommandName = BasicDocxCommand | AdvancedDocxCommand
 DocxCommandCategory = Literal["basic", "advanced"]
 
@@ -87,5 +87,6 @@ class DocxExecuteResponse(BaseModel):
     blocks: list[DocxBlock]
     paragraphs_affected: int = 0
     tables_affected: int = 0
+    images_affected: int = 0
     summary: str
 

@@ -86,6 +86,7 @@ pub(crate) struct UploadedDocumentChunkHit {
     score: f64,
     content: String,
     plain_text: String,
+    images: Vec<Value>,
     order_index: i64,
 }
 
@@ -1167,6 +1168,7 @@ fn hydrate_uploaded_document_hits(
                         c.title_path,
                         c.content,
                         c.plain_text,
+                        c.images_json,
                         c.order_index
                  FROM chunks c
                  JOIN documents d ON d.id = c.document_id
@@ -1183,7 +1185,8 @@ fn hydrate_uploaded_document_hits(
                 score: candidate.score,
                 content: row.get(5)?,
                 plain_text: row.get(6)?,
-                order_index: row.get(7)?,
+                images: parse_chunk_images_json(&row.get::<_, String>(7)?),
+                order_index: row.get(8)?,
             })
         });
 
@@ -1196,10 +1199,15 @@ fn hydrate_uploaded_document_hits(
     Ok(hits)
 }
 
+fn parse_chunk_images_json(images_json: &str) -> Vec<Value> {
+    serde_json::from_str::<Vec<Value>>(images_json).unwrap_or_default()
+}
+
 struct DocxSectionDescendant {
     title_path: String,
     content: String,
     plain_text: String,
+    images: Vec<Value>,
 }
 
 fn expand_docx_section_descendants(
@@ -1219,6 +1227,11 @@ fn expand_docx_section_descendants(
 
         hit.content = combined_docx_section_content(hit, &descendants);
         hit.plain_text = combined_docx_section_plain_text(hit, &descendants);
+        hit.images.extend(
+            descendants
+                .iter()
+                .flat_map(|descendant| descendant.images.iter().cloned()),
+        );
     }
 
     Ok(())
@@ -1232,7 +1245,7 @@ fn load_docx_section_descendants(
     let descendant_prefix = format!("{} > %", escape_sql_like(title_path.trim()));
     let mut statement = connection
         .prepare(
-            "SELECT title_path, content, plain_text
+            "SELECT title_path, content, plain_text, images_json
              FROM chunks
              WHERE document_id = ?1
                AND chunk_type = 'docx_section'
@@ -1242,10 +1255,12 @@ fn load_docx_section_descendants(
         .map_err(|error| format!("cannot prepare DOCX section descendant lookup: {error}"))?;
     let rows = statement
         .query_map(params![document_id, descendant_prefix], |row| {
+            let images_json: String = row.get(3)?;
             Ok(DocxSectionDescendant {
                 title_path: row.get(0)?,
                 content: row.get(1)?,
                 plain_text: row.get(2)?,
+                images: parse_chunk_images_json(&images_json),
             })
         })
         .map_err(|error| format!("cannot scan DOCX section descendants: {error}"))?;
@@ -1834,6 +1849,7 @@ mod tests {
                     title_path TEXT NOT NULL,
                     content TEXT NOT NULL,
                     plain_text TEXT NOT NULL,
+                    images_json TEXT NOT NULL,
                     order_index INTEGER NOT NULL
                 );
                 ",
@@ -1861,8 +1877,8 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO chunks (
-                        document_id, chunk_type, title_path, content, plain_text, order_index
-                     ) VALUES ('doc_1', 'docx_section', ?1, ?2, ?2, ?3)",
+                        document_id, chunk_type, title_path, content, plain_text, images_json, order_index
+                     ) VALUES ('doc_1', 'docx_section', ?1, ?2, ?2, '[]', ?3)",
                     params![title_path, content, order_index],
                 )
                 .expect("chunk should insert");
@@ -2051,6 +2067,7 @@ mod tests {
             score,
             content: "content".to_string(),
             plain_text: format!("标题路径：{title_path}\n\n正文：content"),
+            images: Vec::new(),
             order_index,
         }
     }

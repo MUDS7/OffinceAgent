@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UploadedDocumentChunkHit } from "../types";
+import type { UploadedDocumentChunkHit, UploadedDocumentImage } from "../types";
 
 export const UPLOADED_DOCUMENT_REFERENCE_TRIGGER = "参考上传文档";
 const MAX_REFERENCE_CHARS_PER_CHUNK = 12000;
@@ -53,11 +53,24 @@ export function formatUploadedDocumentReferenceContext(
         `Score: ${hit.score.toFixed(4)}`,
         "Content:",
         content,
+        formatUploadedDocumentImages(hit, index),
       ]
         .filter(Boolean)
         .join("\n");
     })
     .join("\n\n---\n\n");
+}
+
+export function buildUploadedDocumentImageReferenceMap(
+  hits: UploadedDocumentChunkHit[],
+): Map<string, UploadedDocumentImage> {
+  const references = new Map<string, UploadedDocumentImage>();
+  hits.forEach((hit, hitIndex) => {
+    (hit.images ?? []).forEach((image, imageIndex) => {
+      references.set(uploadedDocumentImageReferenceId(hitIndex, imageIndex), image);
+    });
+  });
+  return references;
 }
 
 export function buildUploadedDocumentReferenceSystemMessage(
@@ -69,12 +82,38 @@ export function buildUploadedDocumentReferenceSystemMessage(
     "The user explicitly asked to reference uploaded documents.",
     "Use the following retrieved chunks as source material. If the user asks to supplement/add/fill content, prefer directly using the relevant retrieved content instead of merely summarizing that it exists.",
     "When retrieved content includes child section headings, preserve those headings and their body text unless the user explicitly asks for a summary.",
+    "When retrieved content lists Images with image_ref values, preserve the image by using the image_ref in the DOCX operation instead of writing only a placeholder.",
     "If the chunks are not relevant enough, say that no matching uploaded-document content was found.",
     "Retrieved uploaded-document chunks:",
     "<<<",
     context,
     ">>>",
   ].join("\n");
+}
+
+function formatUploadedDocumentImages(hit: UploadedDocumentChunkHit, hitIndex: number): string {
+  const images = hit.images ?? [];
+  if (!images.length) return "";
+
+  return [
+    "Images:",
+    ...images.map((image, imageIndex) => {
+      const fields = [
+        `image_ref=${uploadedDocumentImageReferenceId(hitIndex, imageIndex)}`,
+        `filename=${JSON.stringify(image.filename || "image")}`,
+        image.alt_text ? `alt_text=${JSON.stringify(image.alt_text)}` : "",
+        image.caption ? `caption=${JSON.stringify(image.caption)}` : "",
+        image.position ? `position=${JSON.stringify(image.position)}` : "",
+        image.title_path ? `heading=${JSON.stringify(image.title_path)}` : "",
+      ].filter(Boolean);
+
+      return `- ${fields.join("; ")}`;
+    }),
+  ].join("\n");
+}
+
+function uploadedDocumentImageReferenceId(hitIndex: number, imageIndex: number): string {
+  return `uploaded-image-${hitIndex + 1}-${imageIndex + 1}`;
 }
 
 function truncateReferenceContent(content: string): string {

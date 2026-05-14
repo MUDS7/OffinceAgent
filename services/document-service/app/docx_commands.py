@@ -15,6 +15,7 @@ from app.docx_models import (
     DocxCommandsResponse,
     DocxExecuteRequest,
     DocxExecuteResponse,
+    DocxImageBlock,
     DocxParagraphBlock,
     DocxTableBlock,
     DocxTableCell,
@@ -71,6 +72,16 @@ def get_docx_commands() -> DocxCommandsResponse:
                 description="Insert a table from a two-dimensional values array before, after, or at the end of the document.",
                 required_args=["rows"],
                 optional_args=["block_index", "target_text", "position", "case_sensitive"],
+            ),
+            DocxCommandSpec(
+                command="insert_blocks",
+                category="advanced",
+                description=(
+                    "Insert an ordered mix of paragraph and image blocks before, after, start, or end. "
+                    "Use this when copied reference content includes images."
+                ),
+                required_args=["items"],
+                optional_args=["block_index", "target_text", "position", "style", "alignment", "case_sensitive"],
             )
         ],
     )
@@ -119,6 +130,11 @@ def execute_docx_command(request: DocxExecuteRequest) -> DocxExecuteResponse:
         insert_docx_table(blocks, request.args)
         summary = "Inserted 1 table."
         return docx_response(request, blocks, 0, 1, summary)
+
+    if request.command == "insert_blocks":
+        paragraphs_affected, images_affected = insert_docx_blocks(blocks, request.args)
+        summary = f"Inserted {paragraphs_affected} paragraph(s) and {images_affected} image(s)."
+        return docx_response(request, blocks, paragraphs_affected, 0, summary, images_affected=images_affected)
 
     raise HTTPException(status_code=400, detail=f"Unsupported DOCX command: {request.command}")
 
@@ -291,6 +307,74 @@ def insert_docx_table(blocks: list[DocxBlock], args: dict[str, Any]) -> None:
     blocks.insert(insert_index, table)
 
 
+def insert_docx_blocks(blocks: list[DocxBlock], args: dict[str, Any]) -> tuple[int, int]:
+    items = normalize_insert_block_items(blocks, args)
+    position = str(args.get("position") or "after").lower()
+    if position in {"end", "append", "at_end"}:
+        blocks.extend(items)
+    elif position in {"start", "prepend", "at_start"}:
+        for offset, item in enumerate(items):
+            blocks.insert(offset, item)
+    else:
+        target_index = resolve_docx_block_index(blocks, args, require_paragraph=False)
+        insert_index = target_index if position == "before" else target_index + 1
+        for offset, item in enumerate(items):
+            blocks.insert(insert_index + offset, item)
+
+    paragraphs_affected = sum(isinstance(item, DocxParagraphBlock) for item in items)
+    images_affected = sum(isinstance(item, DocxImageBlock) for item in items)
+    return paragraphs_affected, images_affected
+
+
+def normalize_insert_block_items(blocks: list[DocxBlock], args: dict[str, Any]) -> list[DocxBlock]:
+    raw_items = required_arg(args, "items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise HTTPException(status_code=400, detail="items must be a non-empty array")
+
+    existing_ids = {block.id for block in blocks}
+    items: list[DocxBlock] = []
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            raise HTTPException(status_code=400, detail=f"items[{index}] must be an object")
+
+        item_type = str(raw_item.get("type") or "paragraph").lower()
+        if item_type == "paragraph":
+            text = str(required_arg(raw_item, "text"))
+            paragraph_id = next_docx_block_id_from_ids(existing_ids, len(blocks) + len(items), "p")
+            existing_ids.add(paragraph_id)
+            items.append(
+                DocxParagraphBlock(
+                    id=paragraph_id,
+                    text=text,
+                    style=str(raw_item.get("style") or args.get("style") or "") or None,
+                    alignment=normalize_docx_alignment(raw_item.get("alignment", args.get("alignment"))),
+                )
+            )
+            continue
+
+        if item_type == "image":
+            data_url = str(required_arg(raw_item, "data_url"))
+            image_id = next_docx_block_id_from_ids(existing_ids, len(blocks) + len(items), "img")
+            existing_ids.add(image_id)
+            items.append(
+                DocxImageBlock(
+                    id=image_id,
+                    filename=str(raw_item.get("filename") or "image"),
+                    content_type=str(raw_item.get("content_type") or "application/octet-stream"),
+                    data_url=data_url,
+                    alt_text=str(raw_item["alt_text"]) if raw_item.get("alt_text") else None,
+                    width_emu=parse_optional_int(raw_item.get("width_emu")),
+                    height_emu=parse_optional_int(raw_item.get("height_emu")),
+                    alignment=normalize_docx_alignment(raw_item.get("alignment", args.get("alignment"))),
+                )
+            )
+            continue
+
+        raise HTTPException(status_code=400, detail=f"Unsupported insert block type: {item_type}")
+
+    return items
+
+
 def make_docx_paragraph_blocks(blocks: list[DocxBlock], args: dict[str, Any]) -> list[DocxParagraphBlock]:
     existing_ids = {block.id for block in blocks}
     paragraphs: list[DocxParagraphBlock] = []
@@ -420,6 +504,15 @@ def parse_bool(value: Any, *, default: bool) -> bool:
     return bool(value)
 
 
+def parse_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="image width_emu/height_emu must be integers") from exc
+
+
 def normalize_table_rows(rows: Any) -> list[list[str]]:
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows must be a non-empty two-dimensional array")
@@ -476,6 +569,8 @@ def docx_response(
     paragraphs_affected: int,
     tables_affected: int,
     summary: str,
+    *,
+    images_affected: int = 0,
 ) -> DocxExecuteResponse:
     content = build_docx_bytes(blocks)
     return DocxExecuteResponse(
@@ -486,10 +581,11 @@ def docx_response(
         blocks=blocks,
         paragraphs_affected=paragraphs_affected,
         tables_affected=tables_affected,
+        images_affected=images_affected,
         summary=summary,
     )
 
 
 def docx_command_category(command: DocxCommandName) -> DocxCommandCategory:
-    return "advanced" if command == "insert_table" else "basic"
+    return "advanced" if command in {"insert_table", "insert_blocks"} else "basic"
 

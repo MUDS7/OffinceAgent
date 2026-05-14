@@ -31,6 +31,7 @@ import type {
   ServiceStatus,
   TextEditOperation,
   TextSelectionIntentAction,
+  UploadedDocumentImage,
   WorkspaceFile,
   WorkspaceDocumentsRemovalResult,
   WorkspaceFileMetadataRecord,
@@ -79,6 +80,7 @@ import type { SaveFileProvider } from "./components/center-pane/types";
 import { restoreTextEditPayload } from "./utils/textCompression";
 import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
+  buildUploadedDocumentImageReferenceMap,
   formatUploadedDocumentReferenceContext,
   buildUploadedDocumentReferenceInstruction,
   searchUploadedDocumentReference,
@@ -962,6 +964,7 @@ function App() {
     streamId: string,
     fileContext: CompressedFileContext | null,
     uploadedDocumentReferenceContext: string,
+    uploadedDocumentImageReferences: Map<string, UploadedDocumentImage>,
   ) {
     const targetFile = selectedWorkspaceFile;
     if (!targetFile) return;
@@ -1049,6 +1052,7 @@ function App() {
       command,
       file: targetFile.file,
       plan,
+      imageReferences: uploadedDocumentImageReferences,
     });
     throwIfChatRequestCancelled(streamId);
     refreshDocxWorkspaceFile(targetFile, executionResult);
@@ -1303,6 +1307,7 @@ function App() {
     } | null = null;
     let fileContext: CompressedFileContext | null = null;
     let uploadedDocumentReferenceContext = "";
+    let uploadedDocumentImageReferences = new Map<string, UploadedDocumentImage>();
 
     function applyAgentTextResult() {
       if (!textEditTarget || hasAppliedAgentText) return;
@@ -1358,6 +1363,7 @@ function App() {
       if (shouldReferenceUploadedDocuments(text)) {
         try {
           const hits = await searchUploadedDocumentReference(text);
+          uploadedDocumentImageReferences = buildUploadedDocumentImageReferenceMap(hits);
           uploadedDocumentReferenceContext = hits.length
             ? formatUploadedDocumentReferenceContext(hits)
             : "No matching uploaded-document chunks were found for this request.";
@@ -1391,6 +1397,7 @@ function App() {
           streamId,
           fileContext,
           uploadedDocumentReferenceContext,
+          uploadedDocumentImageReferences,
         );
         return;
       }

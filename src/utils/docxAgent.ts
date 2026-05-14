@@ -6,6 +6,7 @@ import type {
   DocxCommandsResponse,
   DocxExecuteResponse,
   DocxParseResponse,
+  UploadedDocumentImage,
   WorkspaceFile,
 } from "../types";
 import {
@@ -84,6 +85,7 @@ export function buildDocxAgentMessages({
         DOCX_AGENT_SYSTEM_PROMPT,
         `Only choose one of these currently available commands for action=docx_execute: ${commandNames}.`,
         "For multi-paragraph additions, still choose one command: insert_paragraph or append_paragraph with args.paragraphs as an ordered string array.",
+        "When uploaded reference content includes image_ref values, use insert_blocks with paragraph and image items so the image can be copied into the Word document.",
         "If the user asks for an unavailable DOCX operation, use action=ask_confirm and explain briefly in Chinese that this operation is not supported yet.",
         uploadedDocumentReferenceMessage,
       ].join("\n"),
@@ -124,39 +126,159 @@ export function buildDocxAgentMessages({
 
 export function parseDocxAgentPlan(content: string): DocxAgentPlan {
   const trimmedContent = stripMarkdownFence(content.trim());
-  const directParse = tryParseDocxAgentPlan(trimmedContent);
-  if (directParse) return directParse;
-
-  const startIndex = trimmedContent.indexOf("{");
-  const endIndex = trimmedContent.lastIndexOf("}");
-  if (startIndex >= 0 && endIndex > startIndex) {
-    const extracted = trimmedContent.slice(startIndex, endIndex + 1);
-    const extractedParse = tryParseDocxAgentPlan(extracted);
-    if (extractedParse) return extractedParse;
+  for (const candidate of buildDocxJsonCandidates(trimmedContent)) {
+    const parsed = tryParseDocxAgentPlan(candidate);
+    if (parsed) return parsed;
   }
 
   throw new Error("DOCX agent did not return valid JSON.");
 }
 
 function tryParseDocxAgentPlan(content: string): DocxAgentPlan | null {
-  try {
-    const value = JSON.parse(content) as Partial<DocxAgentPlan>;
-    if (
-      value.action === "docx_execute" ||
-      value.action === "answer_only" ||
-      value.action === "ask_confirm"
-    ) {
-      return {
-        action: value.action,
-        command: normalizeDocxCommandName(value.command),
-        args: isPlainObject(value.args) ? value.args : {},
-        message: typeof value.message === "string" ? value.message : "",
-      };
+  for (const candidate of [content, repairLooseJson(content)]) {
+    try {
+      const value = JSON.parse(candidate) as Partial<DocxAgentPlan> | Partial<DocxAgentPlan>[];
+      const plan = Array.isArray(value) ? value[0] : value;
+      if (!plan || typeof plan !== "object") continue;
+      if (
+        plan.action === "docx_execute" ||
+        plan.action === "answer_only" ||
+        plan.action === "ask_confirm"
+      ) {
+        return {
+          action: plan.action,
+          command: normalizeDocxCommandName(plan.command),
+          args: isPlainObject(plan.args) ? plan.args : {},
+          message: typeof plan.message === "string" ? plan.message : "",
+        };
+      }
+    } catch {
+      // Try the next recovery candidate.
     }
-  } catch {
-    return null;
   }
   return null;
+}
+
+function buildDocxJsonCandidates(content: string): string[] {
+  const candidates: string[] = [];
+  const addCandidate = (candidate: string) => {
+    const trimmed = stripMarkdownFence(candidate.trim());
+    if (trimmed && !candidates.includes(trimmed)) {
+      candidates.push(trimmed);
+    }
+  };
+
+  addCandidate(content);
+  for (const fenced of extractMarkdownFenceBodies(content)) {
+    addCandidate(fenced);
+  }
+  for (const object of extractBalancedJsonObjects(content)) {
+    addCandidate(object);
+  }
+
+  const startIndex = content.indexOf("{");
+  const endIndex = content.lastIndexOf("}");
+  if (startIndex >= 0 && endIndex > startIndex) {
+    addCandidate(content.slice(startIndex, endIndex + 1));
+  }
+
+  return candidates;
+}
+
+function extractMarkdownFenceBodies(content: string): string[] {
+  return [...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1]);
+}
+
+function extractBalancedJsonObjects(content: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (character === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(content.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
+function repairLooseJson(content: string): string {
+  return escapeRawLineBreaksInJsonStrings(content)
+    .replace(/^\uFEFF/, "")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
+function escapeRawLineBreaksInJsonStrings(content: string): string {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+
+  for (const character of content) {
+    if (inString) {
+      if (escaped) {
+        output += character;
+        escaped = false;
+        continue;
+      }
+      if (character === "\\") {
+        output += character;
+        escaped = true;
+        continue;
+      }
+      if (character === '"') {
+        output += character;
+        inString = false;
+        continue;
+      }
+      if (character === "\n") {
+        output += "\\n";
+        continue;
+      }
+      if (character === "\r") {
+        output += "\\r";
+        continue;
+      }
+      if (character === "\t") {
+        output += "\\t";
+        continue;
+      }
+    } else if (character === '"') {
+      inString = true;
+    }
+
+    output += character;
+  }
+
+  return output;
 }
 
 export function normalizeDocxCommandName(command: unknown): DocxCommandName | undefined {
@@ -169,20 +291,23 @@ export async function executeDocxPlan({
   command,
   file,
   plan,
+  imageReferences,
 }: {
   command: DocxCommandName;
   file: File;
   plan: DocxAgentPlan;
+  imageReferences?: Map<string, UploadedDocumentImage>;
 }): Promise<DocxExecuteResponse> {
   const blocks = await parseDocxBlocks(file);
+  const resolvedPlan = resolveDocxPlanImageReferences(command, plan, imageReferences ?? new Map());
   const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      command,
+      command: resolvedPlan.command,
       filename: file.name,
       blocks,
-      args: plan.args ?? {},
+      args: resolvedPlan.args,
     }),
   });
 
@@ -192,6 +317,92 @@ export async function executeDocxPlan({
   }
 
   return (await response.json()) as DocxExecuteResponse;
+}
+
+function resolveDocxPlanImageReferences(
+  command: DocxCommandName,
+  plan: DocxAgentPlan,
+  imageReferences: Map<string, UploadedDocumentImage>,
+): { command: DocxCommandName; args: Record<string, unknown> } {
+  const args = isPlainObject(plan.args) ? { ...plan.args } : {};
+  if (!imageReferences.size) {
+    return { command, args };
+  }
+
+  if (command === "insert_blocks") {
+    return { command, args: resolveInsertBlockItems(args, imageReferences) };
+  }
+
+  if ((command === "insert_paragraph" || command === "append_paragraph") && Array.isArray(args.paragraphs)) {
+    const items = paragraphItemsWithResolvedImagePlaceholders(args.paragraphs, imageReferences);
+    if (items.some((item) => isPlainObject(item) && item.type === "image")) {
+      return {
+        command: "insert_blocks",
+        args: {
+          ...args,
+          text: undefined,
+          paragraphs: undefined,
+          items,
+        },
+      };
+    }
+  }
+
+  return { command, args };
+}
+
+function resolveInsertBlockItems(
+  args: Record<string, unknown>,
+  imageReferences: Map<string, UploadedDocumentImage>,
+): Record<string, unknown> {
+  if (!Array.isArray(args.items)) return args;
+
+  return {
+    ...args,
+    items: args.items.map((item) =>
+      isPlainObject(item) && item.type === "image"
+        ? { ...item, ...resolveImageReference(item.image_ref, imageReferences) }
+        : item,
+    ),
+  };
+}
+
+function paragraphItemsWithResolvedImagePlaceholders(
+  paragraphs: unknown[],
+  imageReferences: Map<string, UploadedDocumentImage>,
+): Array<Record<string, unknown>> {
+  return paragraphs.flatMap((paragraph) => {
+    const text = String(paragraph);
+    const image = findReferencedImageInText(text, imageReferences);
+    if (!image) return [{ type: "paragraph", text }];
+
+    const withoutPlaceholder = text.replace(/\[IMAGE:[^\]]+\]/g, "").trim();
+    return [
+      ...(withoutPlaceholder ? [{ type: "paragraph", text: withoutPlaceholder }] : []),
+      { type: "image", ...image },
+    ];
+  });
+}
+
+function findReferencedImageInText(
+  text: string,
+  imageReferences: Map<string, UploadedDocumentImage>,
+): UploadedDocumentImage | null {
+  const match = text.match(/\[IMAGE:([^\]]+)\]/);
+  if (!match) return null;
+
+  const filename = match[1].trim();
+  return (
+    [...imageReferences.values()].find((image) => image.filename?.trim() === filename) ?? null
+  );
+}
+
+function resolveImageReference(
+  imageRef: unknown,
+  imageReferences: Map<string, UploadedDocumentImage>,
+): Partial<UploadedDocumentImage> {
+  if (typeof imageRef !== "string") return {};
+  return imageReferences.get(imageRef) ?? {};
 }
 
 export async function parseDocxBlocks(file: File): Promise<DocxBlock[]> {
@@ -220,7 +431,7 @@ export function buildDocxExecutionStatus(
     plan.message?.trim(),
     result.summary,
     "已更新预览，尚未保存；请按 Ctrl+S 或点击保存按钮写入磁盘。",
-    `影响段落：${result.paragraphs_affected}，影响表格：${result.tables_affected}`,
+    `影响段落：${result.paragraphs_affected}，影响表格：${result.tables_affected}，影响图片：${result.images_affected ?? 0}`,
   ]
     .filter(Boolean)
     .join("\n");

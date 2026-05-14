@@ -273,14 +273,23 @@ export function DocxPreview({
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         onSaveFile(activeFile.id);
+        return;
       }
+
+      if (!selectedTarget || selectedTarget.kind !== "image") return;
+      if (event.key !== "Backspace" && event.key !== "Delete") return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (!isDocxKeyboardDeleteTarget(event.target, docxPreviewRef.current)) return;
+
+      event.preventDefault();
+      deleteImageBlock(selectedTarget.blockId);
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeFile.id, onSaveFile]);
+  }, [activeFile.id, onSaveFile, selectedTarget]);
 
   if (state.isLoading) {
     return (
@@ -389,7 +398,16 @@ export function DocxPreview({
       .join(" ");
 
     return (
-      <figure className={className} key={block.id} onPointerDown={() => selectImage(block)}>
+      <figure
+        className={className}
+        key={block.id}
+        tabIndex={0}
+        onFocus={() => selectImage(block)}
+        onPointerDown={(event) => {
+          selectImage(block);
+          event.currentTarget.focus();
+        }}
+      >
         <img src={block.data_url} alt={block.alt_text || block.filename} style={getImageStyle(block)} />
       </figure>
     );
@@ -549,6 +567,20 @@ export function DocxPreview({
         };
       }),
     );
+  }
+
+  function deleteImageBlock(blockId: string) {
+    let didDelete = false;
+    updateDocxBlocks((blocks) => {
+      const nextBlocks = blocks.filter((block) => block.id !== blockId || block.type !== "image");
+      didDelete = nextBlocks.length !== blocks.length;
+      return normalizeParsedDocxBlocks(nextBlocks);
+    });
+
+    if (!didDelete) return;
+    setSelectedTarget(null);
+    setPersistedTextSelection(null);
+    onSelectionContextChange(null);
   }
 
   function updateDocxBlocks(update: (blocks: DocxBlock[]) => DocxBlock[]) {
@@ -911,6 +943,23 @@ export function DocxPreview({
 
 function getDocumentIndexId(activeFile: PreviewFile) {
   return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
+}
+
+function isDocxKeyboardDeleteTarget(target: EventTarget | null, previewElement: HTMLElement | null) {
+  if (!previewElement) return false;
+
+  if (target instanceof Element) {
+    if (target.closest("input, textarea, select, button, [contenteditable='true']")) return false;
+    if (previewElement.contains(target)) return true;
+  }
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof Element) {
+    if (activeElement.closest("input, textarea, select, button, [contenteditable='true']")) return false;
+    if (previewElement.contains(activeElement)) return true;
+  }
+
+  return false;
 }
 
 function getTextOffsetWithinElement(element: HTMLElement, container: Node, offset: number) {

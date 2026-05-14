@@ -272,7 +272,8 @@ export type DocxCommandName =
   | "replace_paragraph"
   | "insert_paragraph"
   | "append_paragraph"
-  | "insert_table";
+  | "insert_table"
+  | "insert_blocks";
 
 export type DocxCommandSpec = {
   command: DocxCommandName;
@@ -302,6 +303,7 @@ export type DocxExecuteResponse = {
   blocks: DocxBlock[];
   paragraphs_affected: number;
   tables_affected: number;
+  images_affected?: number;
   summary: string;
 };
 
@@ -339,7 +341,23 @@ export type UploadedDocumentChunkHit = {
   score: number;
   content: string;
   plain_text: string;
+  images?: UploadedDocumentImage[];
   order_index: number;
+};
+
+export type UploadedDocumentImage = {
+  image_id?: string;
+  block_id?: string;
+  filename?: string;
+  file_path?: string;
+  content_type?: string;
+  data_url?: string;
+  alt_text?: string | null;
+  caption?: string | null;
+  position?: string;
+  width_emu?: number | null;
+  height_emu?: number | null;
+  title_path?: string;
 };
 
 export type TextSelectionIntentAction =
