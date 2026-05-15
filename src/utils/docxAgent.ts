@@ -300,14 +300,16 @@ export async function executeDocxPlan({
   plan,
   selectionContext,
   imageReferences,
+  sourceBlocks,
 }: {
   command: DocxCommandName;
   file: File;
   plan: DocxAgentPlan;
   selectionContext?: DocumentSelectionContext | null;
   imageReferences?: Map<string, UploadedDocumentImage>;
+  sourceBlocks?: DocxBlock[];
 }): Promise<DocxExecuteResponse> {
-  const blocks = await parseDocxBlocks(file);
+  const blocks = sourceBlocks ?? (await parseDocxBlocks(file));
   const selectionResolvedPlan = resolveDocxPlanForSelection(command, plan, selectionContext);
   const resolvedPlan = resolveDocxPlanImageReferences(
     selectionResolvedPlan.command,

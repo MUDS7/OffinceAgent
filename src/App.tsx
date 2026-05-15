@@ -60,6 +60,7 @@ import {
   fetchDocxCommandSpecs,
   isDocxCommandAvailable,
   normalizeDocxCommandName,
+  parseDocxBlocks,
   parseDocxAgentPlan,
   shouldUseDocxAgent,
 } from "./utils/docxAgent";
@@ -1051,12 +1052,14 @@ function App() {
     }
 
     const beforeBytes = await fileToByteArray(targetFile.file);
+    const beforeBlocks = await parseDocxBlocks(targetFile.file);
     const executionResult = await executeDocxPlan({
       command,
       file: targetFile.file,
       plan,
       selectionContext: docxSelectionContext,
       imageReferences: uploadedDocumentImageReferences,
+      sourceBlocks: beforeBlocks,
     });
     throwIfChatRequestCancelled(streamId);
     const afterBytes = Array.from(decodeBase64Bytes(executionResult.document_base64));
@@ -1074,16 +1077,11 @@ function App() {
       filePath: targetFile.diskPath,
       filename: resultFilename(targetFile, executionResult),
       contentKind: "binary",
-      beforeText: buildBinaryChangeSnapshotText(targetFile.file.name, beforeBytes.length),
-      afterText: buildBinaryChangeSnapshotText(resultFilename(targetFile, executionResult), afterBytes.length),
+      beforeText: getDocxBlocksText(beforeBlocks),
+      afterText: getDocxBlocksText(executionResult.blocks),
       beforeBytes,
       afterBytes,
       wasDirtyBefore: dirtyFileIds.includes(targetFile.id),
-      additions: Math.max(
-        1,
-        executionResult.paragraphs_affected + executionResult.tables_affected + (executionResult.images_affected ?? 0),
-      ),
-      deletions: 0,
     });
   }
 
@@ -1108,7 +1106,7 @@ function App() {
     additions?: number;
     deletions?: number;
   }) {
-    const stats = calculateLineChangeStats(change.beforeText, change.afterText);
+    const stats = calculateCharacterChangeStats(change.beforeText, change.afterText);
     const fileChange: AgentFileChange = {
       id: change.editId,
       fileId: change.fileId,
@@ -1992,51 +1990,54 @@ function resultFilename(targetFile: WorkspaceFile, result: DocxExecuteResponse) 
   return result.filename || targetFile.file.name;
 }
 
-function buildBinaryChangeSnapshotText(filename: string, byteLength: number) {
-  return [`Binary file snapshot: ${filename}`, `Size: ${byteLength} bytes`].join("\n");
-}
-
 function isBinaryFileChange(change: AgentFileChange): change is AgentFileChange & { beforeBytes: number[] } {
   return change.contentKind === "binary" && Array.isArray(change.beforeBytes);
 }
 
-function calculateLineChangeStats(beforeText: string, afterText: string) {
-  const beforeLines = splitComparableLines(beforeText);
-  const afterLines = splitComparableLines(afterText);
+function getDocxBlocksText(blocks: DocxBlock[]) {
+  return blocks.map(getDocxBlockText).join("\n");
+}
+
+function getDocxBlockText(block: DocxBlock) {
+  if (block.type === "paragraph") return block.text;
+  if (block.type === "image") return block.alt_text?.trim() ?? "";
+
+  return block.rows.map((row) => row.map((cell) => cell.text).join("\t")).join("\n");
+}
+
+function calculateCharacterChangeStats(beforeText: string, afterText: string) {
+  const beforeCharacters = splitComparableCharacters(beforeText);
+  const afterCharacters = splitComparableCharacters(afterText);
   let prefixLength = 0;
 
   while (
-    prefixLength < beforeLines.length &&
-    prefixLength < afterLines.length &&
-    beforeLines[prefixLength] === afterLines[prefixLength]
+    prefixLength < beforeCharacters.length &&
+    prefixLength < afterCharacters.length &&
+    beforeCharacters[prefixLength] === afterCharacters[prefixLength]
   ) {
     prefixLength += 1;
   }
 
   let suffixLength = 0;
   while (
-    suffixLength < beforeLines.length - prefixLength &&
-    suffixLength < afterLines.length - prefixLength &&
-    beforeLines[beforeLines.length - 1 - suffixLength] === afterLines[afterLines.length - 1 - suffixLength]
+    suffixLength < beforeCharacters.length - prefixLength &&
+    suffixLength < afterCharacters.length - prefixLength &&
+    beforeCharacters[beforeCharacters.length - 1 - suffixLength] ===
+      afterCharacters[afterCharacters.length - 1 - suffixLength]
   ) {
     suffixLength += 1;
   }
 
   return {
-    additions: Math.max(0, afterLines.length - prefixLength - suffixLength),
-    deletions: Math.max(0, beforeLines.length - prefixLength - suffixLength),
+    additions: Math.max(0, afterCharacters.length - prefixLength - suffixLength),
+    deletions: Math.max(0, beforeCharacters.length - prefixLength - suffixLength),
   };
 }
 
-function splitComparableLines(text: string) {
+function splitComparableCharacters(text: string) {
   if (!text.length) return [];
 
-  const normalizedText = text.replace(/\r\n?/g, "\n");
-  const withoutFinalEmptyLine = normalizedText.endsWith("\n")
-    ? normalizedText.slice(0, -1)
-    : normalizedText;
-
-  return withoutFinalEmptyLine.length ? withoutFinalEmptyLine.split("\n") : [];
+  return Array.from(text.replace(/\r\n?/g, "\n")).filter((character) => character !== "\n");
 }
 
 function getErrorMessage(error: unknown) {
