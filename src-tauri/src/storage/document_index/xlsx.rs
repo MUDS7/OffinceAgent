@@ -13,6 +13,7 @@ pub(super) fn build_excel_sheet_index(
     order_index: usize,
     index: &mut BuiltDocumentIndex,
 ) {
+    // 结构节点按 sheet -> row/range 建树，方便 UI 或检索结果回到表格位置。
     let raw_id = raw_block_id(block, order_index);
     let sheet_node_id = scoped_stable_id("node", document_id, &raw_id);
     let sheet_name = block
@@ -42,6 +43,7 @@ pub(super) fn build_excel_sheet_index(
         metadata_json: block.to_string(),
     });
 
+    // 每个非空行生成一个 excel_cell_range node；chunk 由后面的行组逻辑单独负责。
     let rows = block
         .get("rows")
         .and_then(Value::as_array)
@@ -69,6 +71,7 @@ pub(super) fn build_excel_sheet_index(
     }
 }
 
+// 解析后的工作表范围和内容。列索引用 0-based，行号保持 Excel 的 1-based。
 #[derive(Clone)]
 struct ExcelSheetData {
     name: String,
@@ -81,12 +84,14 @@ struct ExcelSheetData {
     merges: Vec<ExcelMergedRange>,
 }
 
+// 单行的稀疏单元格数据，只保存解析器明确给出的非空/有值单元格。
 #[derive(Clone)]
 struct ExcelRowData {
     row_index: usize,
     cells: BTreeMap<usize, String>,
 }
 
+// 合并单元格单独保存，读取空白格时可以继承合并区域左上角的值。
 #[derive(Clone)]
 struct ExcelMergedRange {
     range_label: String,
@@ -97,6 +102,7 @@ struct ExcelMergedRange {
     value: String,
 }
 
+// 写入 chunk 的规整行数据，cells 顺序与 headers 一一对应。
 #[derive(Clone)]
 struct ExcelChunkRow {
     row_index: usize,
@@ -109,6 +115,7 @@ pub(super) fn build_xlsx_row_group_chunks(
     blocks: &[Value],
     order_start: usize,
 ) -> Vec<IndexedChunk> {
+    // XLSX chunk 以“表头 + 若干数据行”为单位，避免整张大表检索粒度过粗。
     let mut chunks = Vec::new();
 
     for (sheet_index, block) in blocks.iter().enumerate() {
@@ -122,6 +129,7 @@ pub(super) fn build_xlsx_row_group_chunks(
         let Some(header_row_index) = first_non_empty_excel_row(&sheet) else {
             continue;
         };
+        // 默认第一行非空数据作为表头，后续非空行按固定行数分组。
         let columns = (sheet.col_start..=sheet.col_end).collect::<Vec<_>>();
         let headers = build_excel_headers(&sheet, header_row_index, &columns);
         let data_rows = sheet
@@ -139,6 +147,7 @@ pub(super) fn build_xlsx_row_group_chunks(
             .collect::<Vec<_>>();
 
         for (group_index, row_group) in data_rows.chunks(XLSX_CHUNK_DATA_ROW_COUNT).enumerate() {
+            // 空分组理论上不会出现，保留防御性判断使逻辑更稳。
             let Some(first_row) = row_group.first() else {
                 continue;
             };
@@ -163,6 +172,7 @@ pub(super) fn build_xlsx_row_group_chunks(
                     sheet.name
                 ),
             );
+            // metadata 保存结构化行数据，plain_text/content 则面向 embedding 和文本预览。
             let row_jsons = build_xlsx_chunk_rows_json(&headers, row_group);
             let merge_jsons = sheet
                 .merges
@@ -219,6 +229,7 @@ pub(super) fn build_xlsx_row_group_chunks(
 }
 
 fn parse_excel_sheet_data(block: &Value) -> Option<ExcelSheetData> {
+    // 优先使用上游提供的 range；没有 range 时从实际行列推导工作表边界。
     let name = block
         .get("name")
         .and_then(Value::as_str)
@@ -247,12 +258,14 @@ fn parse_excel_sheet_data(block: &Value) -> Option<ExcelSheetData> {
         merges: Vec::new(),
     };
     sheet.merges = parse_excel_merged_ranges(block, &sheet);
+    // 补齐范围内缺失的空行，后续按行号访问时就不用再处理断档。
     ensure_excel_rows_cover_range(&mut sheet);
 
     Some(sheet)
 }
 
 fn parse_excel_rows(block: &Value, fallback_row_start: Option<usize>) -> Vec<ExcelRowData> {
+    // 行号来源依次为 row_index、range、首个单元格地址、工作表起始行 + offset。
     let Some(rows) = block.get("rows").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -295,6 +308,7 @@ fn parse_excel_rows(block: &Value, fallback_row_start: Option<usize>) -> Vec<Exc
 }
 
 fn parse_excel_merged_ranges(block: &Value, sheet: &ExcelSheetData) -> Vec<ExcelMergedRange> {
+    // merge.value 缺失时，尝试用合并区域左上角单元格的实际文本补上。
     block
         .get("merges")
         .and_then(Value::as_array)
@@ -331,6 +345,7 @@ fn parse_excel_merged_ranges(block: &Value, sheet: &ExcelSheetData) -> Vec<Excel
 }
 
 fn ensure_excel_rows_cover_range(sheet: &mut ExcelSheetData) {
+    // 让 sheet.rows 覆盖 row_start..=row_end，便于合并单元格和空行判断统一处理。
     if sheet.rows.is_empty() {
         sheet.rows.push(ExcelRowData {
             row_index: sheet.row_start,
@@ -358,6 +373,7 @@ fn ensure_excel_rows_cover_range(sheet: &mut ExcelSheetData) {
 }
 
 fn derive_excel_range_from_rows(rows: &[ExcelRowData]) -> Option<(usize, usize, usize, usize)> {
+    // 从实际单元格坐标推导最小包围范围，作为缺失/无效 sheet range 的兜底。
     let row_start = rows.iter().map(|row| row.row_index).min()?;
     let row_end = rows.iter().map(|row| row.row_index).max()?;
     let col_start = rows
@@ -375,6 +391,7 @@ fn derive_excel_range_from_rows(rows: &[ExcelRowData]) -> Option<(usize, usize, 
 }
 
 fn first_non_empty_excel_row(sheet: &ExcelSheetData) -> Option<usize> {
+    // 当前策略把第一条含数据的行视为表头。
     let columns = (sheet.col_start..=sheet.col_end).collect::<Vec<_>>();
     sheet
         .rows
@@ -388,6 +405,7 @@ fn build_excel_headers(
     header_row_index: usize,
     columns: &[usize],
 ) -> Vec<String> {
+    // 空表头用列名兜底，重复表头追加 _2/_3，保证 JSON key 可区分。
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     columns
@@ -411,12 +429,14 @@ fn build_excel_headers(
 }
 
 fn excel_row_has_data(sheet: &ExcelSheetData, row_index: usize, columns: &[usize]) -> bool {
+    // 判断数据行时也读取合并单元格值，避免合并区域内的行被误认为空行。
     columns
         .iter()
         .any(|col| !excel_cell_text(sheet, row_index, *col).trim().is_empty())
 }
 
 fn excel_cell_text(sheet: &ExcelSheetData, row_index: usize, col_index: usize) -> String {
+    // 单元格自身为空时，尝试从所在合并区域继承显示值。
     let own_value = excel_cell_text_without_merges(sheet, row_index, col_index);
     if !own_value.trim().is_empty() {
         return own_value;
@@ -457,6 +477,7 @@ fn build_xlsx_chunk_text(
     headers: &[String],
     rows: &[ExcelChunkRow],
 ) -> String {
+    // 生成适合 embedding 的可读文本：文件、sheet、行范围、表头和逐行键值。
     let mut lines = vec![
         format!("文档：{filename}"),
         format!("Sheet：{sheet_name}"),
@@ -483,6 +504,7 @@ fn build_xlsx_chunk_text(
 }
 
 fn build_xlsx_chunk_rows_json(headers: &[String], rows: &[ExcelChunkRow]) -> Vec<Value> {
+    // 把每行转成 {header: value}，供 metadata_json 保留结构化表格语义。
     rows.iter()
         .map(|row| {
             let mut cells = Map::new();
@@ -498,6 +520,7 @@ fn build_xlsx_chunk_rows_json(headers: &[String], rows: &[ExcelChunkRow]) -> Vec
 }
 
 fn excel_cell_value(cell: &Value) -> String {
+    // 兼容 text/value 两种上游字段，最终统一裁掉首尾空白。
     cell.get("text")
         .and_then(Value::as_str)
         .or_else(|| cell.get("value").and_then(Value::as_str))
@@ -507,6 +530,7 @@ fn excel_cell_value(cell: &Value) -> String {
 }
 
 fn first_cell_address_in_row(row: &Value) -> Option<(usize, usize)> {
+    // 如果行级信息缺失，可用第一个单元格地址反推出行号。
     row.get("cells")
         .and_then(Value::as_array)
         .and_then(|cells| cells.first())
@@ -516,6 +540,7 @@ fn first_cell_address_in_row(row: &Value) -> Option<(usize, usize)> {
 }
 
 fn parse_excel_range(range: &str) -> Option<(usize, usize, usize, usize)> {
+    // 支持 A1 或 A1:C10 两种写法，并自动规整起止顺序。
     let (start, end) = range.split_once(':').unwrap_or((range, range));
     let (start_row, start_col) = parse_excel_cell_address(start)?;
     let (end_row, end_col) = parse_excel_cell_address(end)?;
@@ -528,6 +553,7 @@ fn parse_excel_range(range: &str) -> Option<(usize, usize, usize, usize)> {
 }
 
 fn parse_excel_cell_address(address: &str) -> Option<(usize, usize)> {
+    // 解析 Excel 地址为 (1-based row, 0-based column)，同时支持 $A$1 绝对引用。
     let trimmed = address.trim();
     if trimmed.is_empty() {
         return None;
@@ -563,6 +589,7 @@ fn parse_excel_cell_address(address: &str) -> Option<(usize, usize)> {
 }
 
 fn excel_column_label(mut col_index: usize) -> String {
+    // 0-based 列序号转 Excel 列名：0 -> A, 25 -> Z, 26 -> AA。
     let mut label = String::new();
     loop {
         let remainder = col_index % 26;
@@ -576,6 +603,7 @@ fn excel_column_label(mut col_index: usize) -> String {
 }
 
 pub(super) fn extract_excel_row_text(row: &Value) -> String {
+    // 结构节点展示用文本保留单元格地址，方便从搜索命中定位到具体格子。
     row.get("cells")
         .and_then(Value::as_array)
         .map(|cells| {

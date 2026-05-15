@@ -4,15 +4,19 @@ mod xlsx;
 
 use serde_json::Value;
 
+// 单个 chunk 进入向量库前的内容上限，过长文本会在各格式索引器中继续拆分。
 const MAX_CHUNK_CONTENT_CHARS: usize = 6_000;
+// XLSX 按数据行分组生成 chunk，避免整张表一次性塞进单条向量记录。
 const XLSX_CHUNK_DATA_ROW_COUNT: usize = 10;
 
+// 文档索引的构建结果：nodes 保存结构树，chunks 保存面向检索/向量化的文本片段。
 #[derive(Default)]
 pub(super) struct BuiltDocumentIndex {
     pub(super) nodes: Vec<IndexedNode>,
     pub(super) chunks: Vec<IndexedChunk>,
 }
 
+// 原始文档块映射出的结构节点，用于还原标题、段落、表格、图片、页面等层级关系。
 pub(super) struct IndexedNode {
     pub(super) id: String,
     pub(super) parent_id: Option<String>,
@@ -24,6 +28,7 @@ pub(super) struct IndexedNode {
     pub(super) metadata_json: String,
 }
 
+// 可检索片段。相比 node，它会补齐标题路径、纯文本、图片/表格上下文等向量检索需要的信息。
 pub(super) struct IndexedChunk {
     pub(super) id: String,
     pub(super) chunk_type: String,
@@ -53,10 +58,12 @@ pub(super) fn build_document_index(
 
     let mut index = BuiltDocumentIndex::default();
 
+    // PDF 的块结构和 DOCX/XLSX 差异较大，先整体交给 PDF 索引器处理。
     if pdf::is_pdf_document(filename, blocks) {
         return pdf::build_pdf_index(document_id, filename, blocks);
     }
 
+    // DOCX 与 XLSX 可以混在同一个 blocks 数组里：节点逐块生成，chunk 再按格式汇总。
     let mut docx_indexer = docx::DocxBlockIndexer::default();
 
     for (order_index, block) in blocks.iter().enumerate() {
@@ -70,6 +77,7 @@ pub(super) fn build_document_index(
         }
     }
 
+    // 先生成 DOCX 标题段落块，再追加 XLSX 行组块，保持 chunk.order_index 连续。
     index.chunks = docx::build_docx_section_chunks(document_id, filename, blocks);
     let xlsx_chunks =
         xlsx::build_xlsx_row_group_chunks(document_id, filename, blocks, index.chunks.len());
@@ -79,6 +87,7 @@ pub(super) fn build_document_index(
 }
 
 fn raw_block_id(block: &Value, index: usize) -> String {
+    // 上游块可能没有 id；用序号兜底，保证每个块都能参与稳定 ID 计算。
     block
         .get("id")
         .and_then(Value::as_str)
@@ -87,6 +96,7 @@ fn raw_block_id(block: &Value, index: usize) -> String {
 }
 
 fn scoped_stable_id(prefix: &str, document_id: &str, raw_id: &str) -> String {
+    // 将 document_id 纳入哈希，避免不同文档里相同 raw_id 生成重复节点或 chunk id。
     format!(
         "{prefix}_{:016x}",
         stable_point_id(&format!("{document_id}:{raw_id}"))
@@ -94,6 +104,7 @@ fn scoped_stable_id(prefix: &str, document_id: &str, raw_id: &str) -> String {
 }
 
 fn stable_point_id(value: &str) -> u64 {
+    // FNV-1a：轻量、可复现，适合把外部块 id 压成数据库/向量库友好的短 id。
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
     value.bytes().fold(FNV_OFFSET, |hash, byte| {

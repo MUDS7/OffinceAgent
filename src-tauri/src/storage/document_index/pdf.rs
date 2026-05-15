@@ -5,6 +5,7 @@ use super::{
     MAX_CHUNK_CONTENT_CHARS,
 };
 
+// PDF 索引先归一化为“页面 + 页面内段落”，后续 node 和 chunk 都基于这个结构生成。
 #[derive(Clone)]
 struct PdfPageData {
     page_number: usize,
@@ -15,6 +16,7 @@ struct PdfPageData {
 }
 
 pub(super) fn is_pdf_document(filename: &str, blocks: &[Value]) -> bool {
+    // 文件扩展名和 block 类型任一命中即可走 PDF 专用路径，兼容不同解析器输出。
     filename
         .rsplit_once('.')
         .map(|(_, extension)| extension.eq_ignore_ascii_case("pdf"))
@@ -32,6 +34,7 @@ pub(super) fn build_pdf_index(
     filename: &str,
     blocks: &[Value],
 ) -> BuiltDocumentIndex {
+    // PDF 的层级比较固定：page node 下面挂 paragraph node，paragraph 同时生成检索 chunk。
     let pages = extract_pdf_pages(blocks);
     let mut index = BuiltDocumentIndex::default();
     let mut global_paragraph_index = 0usize;
@@ -52,6 +55,7 @@ pub(super) fn build_pdf_index(
         });
 
         for (page_paragraph_index, paragraph) in page.paragraphs.iter().enumerate() {
+            // 段落全局序号用于跨页定位，页内序号用于回到具体页面位置。
             let trimmed = paragraph.trim();
             if trimmed.is_empty() {
                 continue;
@@ -100,6 +104,7 @@ pub(super) fn build_pdf_index(
 }
 
 fn extract_pdf_pages(blocks: &[Value]) -> Vec<PdfPageData> {
+    // 优先使用显式 pdf_page/page；如果只有散段落，则按 page_number 重新组装页面。
     let mut pages = Vec::new();
     let mut loose_paragraphs = Vec::new();
 
@@ -109,6 +114,7 @@ fn extract_pdf_pages(blocks: &[Value]) -> Vec<PdfPageData> {
                 let raw_id = raw_block_id(block, block_index);
                 let page_number = extract_page_number(block).unwrap_or(pages.len() + 1);
                 let text = extract_pdf_text(block);
+                // 解析器若没有给 paragraphs，就从整页文本的空行中推断段落。
                 let paragraphs = extract_pdf_paragraphs(block)
                     .or_else(|| Some(split_pdf_text_into_paragraphs(&text)))
                     .unwrap_or_default();
@@ -168,6 +174,7 @@ fn extract_pdf_pages(blocks: &[Value]) -> Vec<PdfPageData> {
 }
 
 fn extract_page_number(block: &Value) -> Option<usize> {
+    // 只接受正数页码，缺失时由调用方按顺序兜底。
     block
         .get("page_number")
         .or_else(|| block.get("page"))
@@ -177,6 +184,7 @@ fn extract_page_number(block: &Value) -> Option<usize> {
 }
 
 fn extract_pdf_text(block: &Value) -> String {
+    // 支持多种解析器字段名；items[].str 对应 pdf.js 一类的文本项输出。
     for key in ["text", "page_text", "content"] {
         if let Some(text) = block.get(key).and_then(Value::as_str) {
             return normalize_pdf_whitespace(text);
@@ -198,6 +206,7 @@ fn extract_pdf_text(block: &Value) -> String {
 }
 
 fn extract_pdf_paragraphs(block: &Value) -> Option<Vec<String>> {
+    // paragraphs 可以是字符串数组，也可以是带 text 字段的对象数组。
     let paragraphs = block.get("paragraphs")?.as_array()?;
     let values = paragraphs
         .iter()
@@ -214,6 +223,7 @@ fn extract_pdf_paragraphs(block: &Value) -> Option<Vec<String>> {
 }
 
 fn split_pdf_text_into_paragraphs(text: &str) -> Vec<String> {
+    // 空行作为段落边界；没有空行时至少返回一段压缩后的整页文本。
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut paragraphs = Vec::new();
     let mut current = Vec::new();
@@ -245,6 +255,7 @@ fn split_pdf_text_into_paragraphs(text: &str) -> Vec<String> {
 }
 
 fn normalize_pdf_whitespace(text: &str) -> String {
+    // PDF 提取文本常带有异常换行/多空格，这里统一压成单空格。
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -257,6 +268,7 @@ fn emit_pdf_paragraph_chunks(
     paragraph: &str,
     chunks: &mut Vec<IndexedChunk>,
 ) {
+    // 单个 PDF 段落也可能很长，先按上限拆成多个 piece，再逐个写入 chunk。
     let pieces = split_long_text(paragraph, MAX_CHUNK_CONTENT_CHARS);
     let piece_count = pieces.len();
 
@@ -271,6 +283,7 @@ fn emit_pdf_paragraph_chunks(
                 piece_index + 1
             ),
         );
+        // plain_text 是送入 embedding 的文本，metadata_json 则保留页码和段落定位信息。
         let plain_text = build_pdf_embedding_text(
             filename,
             page_number,
@@ -318,6 +331,7 @@ fn build_pdf_embedding_text(
     global_paragraph_index: usize,
     content: &str,
 ) -> String {
+    // 将页码、全局段落序号和页内段落序号放进文本，提升检索结果可解释性。
     [
         format!("Document: {filename}"),
         format!("Page: {page_number}"),
@@ -330,6 +344,7 @@ fn build_pdf_embedding_text(
 }
 
 fn split_long_text(text: &str, max_chars: usize) -> Vec<String> {
+    // 优先按词边界拆分；遇到超长连续字符串时再按字符强制切开。
     if text.chars().count() <= max_chars {
         return vec![text.to_string()];
     }
@@ -369,6 +384,7 @@ fn split_long_text(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn split_word_by_chars(word: &str, max_chars: usize) -> Vec<String> {
+    // Rust 字符迭代按 Unicode scalar value 走，避免直接按字节切坏 UTF-8。
     let mut pieces = Vec::new();
     let mut current = String::new();
 

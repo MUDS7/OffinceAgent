@@ -5,12 +5,14 @@ use super::{
     MAX_CHUNK_CONTENT_CHARS,
 };
 
+// 标题栈里只需要保存可作为父节点的标题 id 和层级。
 #[derive(Clone)]
 struct HeadingContext {
     node_id: String,
     level: i32,
 }
 
+// DOCX 块索引器会跨 block 维护标题上下文，保证后续段落/图片/表格挂到正确父标题下。
 #[derive(Default)]
 pub(super) struct DocxBlockIndexer {
     heading_stack: Vec<HeadingContext>,
@@ -41,6 +43,7 @@ fn build_docx_like_block_index(
     heading_stack: &mut Vec<HeadingContext>,
     index: &mut BuiltDocumentIndex,
 ) {
+    // node 索引尽量贴近原始块：每个 block 对应一个结构节点，标题块会更新父子层级。
     let raw_id = raw_block_id(block, order_index);
     let node_id = scoped_stable_id("node", document_id, &raw_id);
     let block_type = block
@@ -51,6 +54,7 @@ fn build_docx_like_block_index(
 
     if block_type == "paragraph" {
         if let Some(level) = heading_level(block) {
+            // 同级或更深层标题结束后，新标题应该挂到最近的上级标题下面。
             while heading_stack
                 .last()
                 .map(|heading| heading.level >= level)
@@ -79,6 +83,7 @@ fn build_docx_like_block_index(
     }
 
     let parent_id = heading_stack.last().map(|heading| heading.node_id.clone());
+    // 非标题块保留原有类型语义，只对常见类型做规范化，便于下游查询。
     let node_type = match block_type {
         "table" => "table",
         "image" => "image",
@@ -109,6 +114,7 @@ fn build_docx_like_block_index(
     });
 }
 
+// 兼容上游可能给出的 level、style_id、style 三种标题标记。
 fn heading_level(block: &Value) -> Option<i32> {
     if let Some(level) = block.get("level").and_then(Value::as_i64) {
         if (1..=9).contains(&level) {
@@ -149,6 +155,7 @@ fn heading_level(block: &Value) -> Option<i32> {
     None
 }
 
+// chunk 的一个组成部分，可以是正文段落，也可以是图片/表格占位和结构化元数据。
 #[derive(Clone)]
 struct ChunkPart {
     content: String,
@@ -157,6 +164,7 @@ struct ChunkPart {
     table: Option<Value>,
 }
 
+// 按标题章节累积正文、图片和表格；遇到新标题或长度上限时刷新成 IndexedChunk。
 #[derive(Clone)]
 struct ChunkAccumulator {
     title_levels: Vec<Option<String>>,
@@ -196,6 +204,7 @@ impl ChunkAccumulator {
     }
 
     fn add_paragraph(&mut self, text: String, paragraph_index: usize) {
+        // 段落序号按正文段落计数，用于把检索结果定位回原文范围。
         if text.trim().is_empty() {
             return;
         }
@@ -212,6 +221,7 @@ impl ChunkAccumulator {
     }
 
     fn add_image(&mut self, block: &Value, caption: Option<String>) {
+        // chunk 正文里保留轻量占位符，完整图片信息放到 images_json/metadata_json。
         let filename = block
             .get("filename")
             .and_then(Value::as_str)
@@ -254,6 +264,7 @@ impl ChunkAccumulator {
     }
 
     fn add_table(&mut self, block: &Value, caption: Option<String>) {
+        // 表格同时写入 markdown 文本和结构化 metadata，兼顾向量检索与结果展示。
         let table_id = block
             .get("id")
             .and_then(Value::as_str)
@@ -297,6 +308,7 @@ pub(super) fn build_docx_section_chunks(
     filename: &str,
     blocks: &[Value],
 ) -> Vec<IndexedChunk> {
+    // chunk 以标题章节为自然边界，Excel sheet 由 xlsx.rs 独立生成行组 chunk。
     let mut chunks = Vec::new();
     let mut accumulator = ChunkAccumulator::new();
     let mut paragraph_index = 0usize;
@@ -309,6 +321,7 @@ pub(super) fn build_docx_section_chunks(
         if block.get("type").and_then(Value::as_str) == Some("paragraph") {
             paragraph_index += 1;
             if let Some(level) = heading_level(block) {
+                // 新标题开始前先提交上一节，避免不同章节的正文混到同一个 chunk。
                 flush_docx_chunk(document_id, filename, &mut accumulator, &mut chunks);
                 apply_heading_to_accumulator(&mut accumulator, level, extract_block_text(block));
                 continue;
@@ -336,6 +349,7 @@ pub(super) fn build_docx_section_chunks(
 }
 
 fn apply_heading_to_accumulator(accumulator: &mut ChunkAccumulator, level: i32, title: String) {
+    // 更新当前标题路径，并清空更深层标题，保证 title_path 反映当前位置。
     let index = (level - 1).max(0) as usize;
     if accumulator.title_levels.len() <= index {
         accumulator.title_levels.resize(index + 1, None);
@@ -363,6 +377,7 @@ fn flush_docx_chunk(
     let mut current_parts: Vec<ChunkPart> = Vec::new();
     let mut current_len = 0usize;
 
+    // 同一章节内容可能过长，这里按组成部分切分，避免拆开单个表格/图片元数据。
     for part in accumulator.parts.clone() {
         let next_len = if current_len == 0 {
             part.content.len()
@@ -415,6 +430,7 @@ fn emit_docx_chunk(
     parts: Vec<ChunkPart>,
     chunks: &mut Vec<IndexedChunk>,
 ) {
+    // title_path 是检索展示和 embedding 文本的重要上下文，最多单独映射前三层标题字段。
     let title_path = title_levels
         .iter()
         .filter_map(|item| item.as_deref())
@@ -455,6 +471,7 @@ fn emit_docx_chunk(
         })
         .collect::<Vec<_>>();
     let plain_text = build_embedding_text(filename, &title_path, &content, &images, &tables);
+    // chunk id 使用标题路径和段落起点参与计算，同一文档重复导入时保持稳定。
     let chunk_id = scoped_stable_id(
         "chunk",
         document_id,
@@ -502,6 +519,7 @@ fn build_embedding_text(
     images: &[Value],
     tables: &[Value],
 ) -> String {
+    // embedding 文本把文件名、标题路径、正文和多模态线索拼在一起，提高召回时的上下文完整度。
     let image_text = images
         .iter()
         .map(|image| {
@@ -563,6 +581,7 @@ enum CaptionKind {
 }
 
 fn nearby_caption(blocks: &[Value], block_index: usize, kind: CaptionKind) -> Option<String> {
+    // 常见 caption 会紧贴图片/表格上下方，因此只看相邻 block，避免误抓远处段落。
     [block_index.checked_add(1), block_index.checked_sub(1)]
         .into_iter()
         .flatten()
@@ -574,6 +593,7 @@ fn nearby_caption(blocks: &[Value], block_index: usize, kind: CaptionKind) -> Op
 }
 
 fn is_caption_text(text: &str, kind: &CaptionKind) -> bool {
+    // 过滤过长段落，减少把正文误判为图题/表题的概率。
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.len() > 160 {
         return false;
@@ -593,6 +613,7 @@ fn is_caption_text(text: &str, kind: &CaptionKind) -> bool {
 }
 
 fn table_to_markdown(block: &Value) -> String {
+    // 把 DOCX 表格转成 Markdown，便于直接进入纯文本检索和调试查看。
     let rows = block
         .get("rows")
         .and_then(Value::as_array)
@@ -644,6 +665,7 @@ fn table_to_markdown(block: &Value) -> String {
 }
 
 fn markdown_cell_text(text: &str) -> String {
+    // Markdown 表格里需要转义竖线，换行则压成单元格内的 <br>。
     text.replace('|', "\\|")
         .replace('\n', "<br>")
         .trim()
@@ -660,6 +682,7 @@ fn image_id_from_filename(filename: &str) -> Option<String> {
 }
 
 pub(super) fn extract_block_text(block: &Value) -> String {
+    // 结构节点和 chunk 构建都复用这套文本抽取逻辑，保证同一 block 的文本口径一致。
     match block.get("type").and_then(Value::as_str) {
         Some("paragraph") => block
             .get("text")
