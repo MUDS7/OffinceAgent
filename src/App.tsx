@@ -1050,6 +1050,7 @@ function App() {
       return;
     }
 
+    const beforeBytes = await fileToByteArray(targetFile.file);
     const executionResult = await executeDocxPlan({
       command,
       file: targetFile.file,
@@ -1058,13 +1059,32 @@ function App() {
       imageReferences: uploadedDocumentImageReferences,
     });
     throwIfChatRequestCancelled(streamId);
-    refreshDocxWorkspaceFile(targetFile, executionResult);
+    const afterBytes = Array.from(decodeBase64Bytes(executionResult.document_base64));
+    refreshDocxWorkspaceFile(targetFile, executionResult, new Uint8Array(afterBytes));
     throwIfChatRequestCancelled(streamId);
 
     updateAssistantMessage(
       assistantMessageId,
       buildDocxExecutionStatus(plan, executionResult),
     );
+    attachAgentFileChange({
+      assistantMessageId,
+      editId: `agent-docx-edit-${Date.now()}`,
+      fileId: targetFile.id,
+      filePath: targetFile.diskPath,
+      filename: resultFilename(targetFile, executionResult),
+      contentKind: "binary",
+      beforeText: buildBinaryChangeSnapshotText(targetFile.file.name, beforeBytes.length),
+      afterText: buildBinaryChangeSnapshotText(resultFilename(targetFile, executionResult), afterBytes.length),
+      beforeBytes,
+      afterBytes,
+      wasDirtyBefore: dirtyFileIds.includes(targetFile.id),
+      additions: Math.max(
+        1,
+        executionResult.paragraphs_affected + executionResult.tables_affected + (executionResult.images_affected ?? 0),
+      ),
+      deletions: 0,
+    });
   }
 
   function updateAssistantMessage(assistantMessageId: string, text: string) {
@@ -1079,9 +1099,14 @@ function App() {
     fileId: string;
     filePath?: string;
     filename: string;
+    contentKind?: "text" | "binary";
     beforeText: string;
     afterText: string;
+    beforeBytes?: number[];
+    afterBytes?: number[];
     wasDirtyBefore: boolean;
+    additions?: number;
+    deletions?: number;
   }) {
     const stats = calculateLineChangeStats(change.beforeText, change.afterText);
     const fileChange: AgentFileChange = {
@@ -1089,11 +1114,14 @@ function App() {
       fileId: change.fileId,
       filePath: change.filePath,
       filename: change.filename,
+      contentKind: change.contentKind ?? "text",
       beforeText: change.beforeText,
       afterText: change.afterText,
+      beforeBytes: change.beforeBytes,
+      afterBytes: change.afterBytes,
       wasDirtyBefore: change.wasDirtyBefore,
-      additions: stats.additions,
-      deletions: stats.deletions,
+      additions: change.additions ?? stats.additions,
+      deletions: change.deletions ?? stats.deletions,
     };
     const fileChangeSet: AgentFileChangeSet = {
       id: `change-set-${change.editId}`,
@@ -1123,7 +1151,11 @@ function App() {
     try {
       for (const change of changeSet.changes) {
         if (change.filePath && !change.wasDirtyBefore && canUseTauriEvents()) {
-          await invoke("save_file_to_disk", { path: change.filePath, content: change.beforeText });
+          if (isBinaryFileChange(change)) {
+            await invoke("save_file_bytes", { path: change.filePath, content: change.beforeBytes });
+          } else {
+            await invoke("save_file_to_disk", { path: change.filePath, content: change.beforeText });
+          }
         }
       }
     } catch (error) {
@@ -1135,7 +1167,18 @@ function App() {
     setWorkspaceFiles((current) =>
       current.map((item) => {
         const change = changeSet.changes.find((candidate) => candidate.fileId === item.id);
-        if (!change || change.wasDirtyBefore) return item;
+        if (!change) return item;
+
+        if (isBinaryFileChange(change)) {
+          const file = new File([new Uint8Array(change.beforeBytes)], item.file.name, {
+            type: item.file.type || getFileMimeType(item.file.name),
+            lastModified: Date.now(),
+          });
+
+          return { ...item, file, analysis: null };
+        }
+
+        if (change.wasDirtyBefore) return item;
 
         const file = new File([change.beforeText], item.file.name, {
           type: item.file.type || getFileMimeType(item.file.name),
@@ -1150,6 +1193,8 @@ function App() {
       const next = { ...current };
 
       for (const change of changeSet.changes) {
+        if (isBinaryFileChange(change)) continue;
+
         if (change.wasDirtyBefore) {
           next[change.fileId] = change.beforeText;
         } else {
@@ -1174,7 +1219,9 @@ function App() {
       return [...next];
     });
 
-    const visibleChange = changeSet.changes.find((change) => change.fileId === selectedFileId);
+    const visibleChange = changeSet.changes.find(
+      (change) => change.fileId === selectedFileId && !isBinaryFileChange(change),
+    );
     if (visibleChange) {
       setPendingTextRestore({
         id: `text-restore-${Date.now()}`,
@@ -1249,8 +1296,11 @@ function App() {
     }
   }
 
-  function refreshDocxWorkspaceFile(targetFile: WorkspaceFile, result: DocxExecuteResponse) {
-    const content = decodeBase64Bytes(result.document_base64);
+  function refreshDocxWorkspaceFile(
+    targetFile: WorkspaceFile,
+    result: DocxExecuteResponse,
+    content = decodeBase64Bytes(result.document_base64),
+  ) {
     const refreshedFile = new File([content], result.filename || targetFile.file.name, {
       type: getFileMimeType(result.filename || targetFile.file.name),
       lastModified: Date.now(),
@@ -1932,6 +1982,22 @@ function getWorkspaceFileKey(fileItem: WorkspaceFile) {
   if (fileItem.diskPath) return `disk:${normalizeFilePath(fileItem.diskPath).toLowerCase()}`;
   if (fileItem.relativePath) return `relative:${normalizeFilePath(fileItem.relativePath).toLowerCase()}`;
   return `file:${fileItem.file.name.toLowerCase()}:${fileItem.file.size}:${fileItem.file.lastModified}`;
+}
+
+async function fileToByteArray(file: File) {
+  return Array.from(new Uint8Array(await file.arrayBuffer()));
+}
+
+function resultFilename(targetFile: WorkspaceFile, result: DocxExecuteResponse) {
+  return result.filename || targetFile.file.name;
+}
+
+function buildBinaryChangeSnapshotText(filename: string, byteLength: number) {
+  return [`Binary file snapshot: ${filename}`, `Size: ${byteLength} bytes`].join("\n");
+}
+
+function isBinaryFileChange(change: AgentFileChange): change is AgentFileChange & { beforeBytes: number[] } {
+  return change.contentKind === "binary" && Array.isArray(change.beforeBytes);
 }
 
 function calculateLineChangeStats(beforeText: string, afterText: string) {

@@ -109,10 +109,13 @@ export type AgentFileChange = {
   fileId: string;
   filePath?: string;
   filename: string;
+  contentKind?: "text" | "binary";
   additions: number;
   deletions: number;
   beforeText: string;
   afterText: string;
+  beforeBytes?: number[];
+  afterBytes?: number[];
   wasDirtyBefore: boolean;
 };
 
