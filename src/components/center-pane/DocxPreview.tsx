@@ -385,7 +385,12 @@ export function DocxPreview({
     : state.warnings;
 
   return (
-    <div className="editor-content docx-preview" ref={docxPreviewRef} onPointerDown={handleDocxPreviewPointerDown}>
+    <div
+      className="editor-content docx-preview"
+      ref={docxPreviewRef}
+      onCopy={handleCopy}
+      onPointerDown={handleDocxPreviewPointerDown}
+    >
       <div className="docx-toolbar">
         <div className="docx-summary">
           <FileText size={16} />
@@ -597,14 +602,9 @@ export function DocxPreview({
 
     const element = event.currentTarget;
     const currentText = getEditablePlainText(element.textContent ?? "");
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return;
-
-    const range = selection.getRangeAt(0);
-    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return;
-
-    const start = getTextOffsetWithinElement(element, range.startContainer, range.startOffset);
-    const end = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
+    const pasteRange = getPasteRangeWithinElement(element, target, currentText.length);
+    const start = Math.min(pasteRange.start, pasteRange.end);
+    const end = Math.max(pasteRange.start, pasteRange.end);
     const nextText = `${currentText.slice(0, start)}${pastedText}${currentText.slice(end)}`;
     const caretPosition = start + pastedText.length;
 
@@ -616,6 +616,63 @@ export function DocxPreview({
     } else {
       updateTableCellText(target.blockId, target.cellId, nextText);
     }
+  }
+
+  function handleCopy(event: ReactClipboardEvent<HTMLElement>) {
+    if (!isDocxPreviewKeyboardTarget(event.target, docxPreviewRef.current)) return;
+
+    const selectedText = getCurrentDocxSelectedText();
+    const textToCopy = selectedText.trim() ? selectedText : persistedTextSelection?.text ?? "";
+    if (!textToCopy.trim()) return;
+
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", textToCopy);
+  }
+
+  function getPasteRangeWithinElement(
+    element: HTMLElement,
+    target: SelectedDocxTextTarget,
+    textLength: number,
+  ) {
+    const selection = window.getSelection();
+    if (selection?.rangeCount) {
+      const range = selection.getRangeAt(0);
+      if (element.contains(range.startContainer) && element.contains(range.endContainer)) {
+        return {
+          start: getTextOffsetWithinElement(element, range.startContainer, range.startOffset),
+          end: getTextOffsetWithinElement(element, range.endContainer, range.endOffset),
+        };
+      }
+    }
+
+    const segment = persistedTextSelection?.segments.find((item) => isSameTextTarget(item.target, target));
+    if (segment) {
+      return {
+        start: clampTextOffset(segment.start, textLength),
+        end: clampTextOffset(segment.end, textLength),
+      };
+    }
+
+    const pendingCaret = pendingCaretRef.current;
+    if (pendingCaret && isSameTextTarget(pendingCaret.target, target)) {
+      return {
+        start: clampTextOffset(pendingCaret.start, textLength),
+        end: clampTextOffset(pendingCaret.end, textLength),
+      };
+    }
+
+    return { start: textLength, end: textLength };
+  }
+
+  function getCurrentDocxSelectedText() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
+
+    const range = selection.getRangeAt(0);
+    if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) return "";
+
+    const selectedText = getEditablePlainText(selection.toString());
+    return selectedText.trim() ? selectedText : "";
   }
 
   function updateTableCellText(blockId: string, cellId: string, text: string) {
@@ -844,6 +901,7 @@ export function DocxPreview({
   function publishElementTextSelection(element: HTMLElement, target: SelectedDocxTextTarget) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      captureCaret(element, target);
       setSelectedTarget(target);
       setPersistedTextSelection(null);
       onSelectionContextChange(null);
@@ -852,6 +910,7 @@ export function DocxPreview({
 
     const range = selection.getRangeAt(0);
     if (!docxPreviewRef.current?.contains(range.commonAncestorContainer)) {
+      captureCaret(element, target);
       setSelectedTarget(target);
       setPersistedTextSelection(null);
       onSelectionContextChange(null);
@@ -861,6 +920,7 @@ export function DocxPreview({
     if (publishDocxRangeSelection(range)) return;
 
     if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+      captureCaret(element, target);
       setSelectedTarget(target);
       setPersistedTextSelection(null);
       onSelectionContextChange(null);
@@ -869,6 +929,7 @@ export function DocxPreview({
 
     const selectedText = getEditablePlainText(selection.toString());
     if (!selectedText.trim()) {
+      captureCaret(element, target);
       setSelectedTarget(target);
       setPersistedTextSelection(null);
       onSelectionContextChange(null);
@@ -913,6 +974,11 @@ export function DocxPreview({
 
     const anchor = getTextRangePositionFromPoint(event.clientX, event.clientY);
     if (anchor) {
+      pendingCaretRef.current = {
+        target: anchor.target,
+        start: anchor.localOffset,
+        end: anchor.localOffset,
+      };
       pointerSelectionRef.current = { anchor, focus: anchor };
     }
   }
