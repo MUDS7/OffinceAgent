@@ -77,6 +77,7 @@ type DocxTextTargetEntry = {
 const RENDER_DEBOUNCE_MS = 450;
 const INDEX_DEBOUNCE_MS = 800;
 const EMU_PER_PIXEL = 9525;
+const NATIVE_SELECTION_PUBLISH_LOCK_MS = 160;
 const TRAILING_LINE_BREAK_MARKER = "\u200b";
 
 export function DocxPreview({
@@ -101,6 +102,7 @@ export function DocxPreview({
   } | null>(null);
   const docxPreviewRef = useRef<HTMLDivElement | null>(null);
   const isPointerSelectingRef = useRef(false);
+  const nativeSelectionPublishLockUntilRef = useRef(0);
   const textElementRefs = useRef(new Map<string, HTMLElement>());
   const [state, setState] = useState<{
     blocks: DocxBlock[];
@@ -276,7 +278,7 @@ export function DocxPreview({
 
   useEffect(() => {
     function handleSelectionChange() {
-      if (isPointerSelectingRef.current) return;
+      if (isPointerSelectingRef.current || isNativeSelectionPublishLocked()) return;
       window.requestAnimationFrame(publishCurrentDocxTextSelection);
     }
 
@@ -303,6 +305,12 @@ export function DocxPreview({
         pointerSelection.focus = focus;
       }
       pointerSelectionRef.current = null;
+
+      if (pointerSelection && publishDocxTextSelectionFromPositions(pointerSelection.anchor, pointerSelection.focus)) {
+        lockNativeSelectionPublish();
+        window.getSelection()?.removeAllRanges();
+        return;
+      }
 
       window.requestAnimationFrame(() => {
         if (pointerSelection && !isSameTextTarget(pointerSelection.anchor.target, pointerSelection.focus.target)) {
@@ -900,6 +908,8 @@ export function DocxPreview({
   }
 
   function publishElementTextSelection(element: HTMLElement, target: SelectedDocxTextTarget) {
+    if (isNativeSelectionPublishLocked()) return;
+
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
       captureCaret(element, target);
@@ -984,6 +994,14 @@ export function DocxPreview({
       };
       pointerSelectionRef.current = { anchor, focus: anchor };
     }
+  }
+
+  function lockNativeSelectionPublish() {
+    nativeSelectionPublishLockUntilRef.current = window.performance.now() + NATIVE_SELECTION_PUBLISH_LOCK_MS;
+  }
+
+  function isNativeSelectionPublishLocked() {
+    return window.performance.now() < nativeSelectionPublishLockUntilRef.current;
   }
 
   function updatePersistedTextSelection(nextSelection: PersistedDocxTextSelection) {
