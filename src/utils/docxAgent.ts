@@ -6,6 +6,8 @@ import type {
   DocxCommandsResponse,
   DocxExecuteResponse,
   DocxParseResponse,
+  DocumentSelectionContext,
+  DocxTextSelectionSegment,
   UploadedDocumentImage,
   WorkspaceFile,
 } from "../types";
@@ -50,6 +52,7 @@ export function buildDocxAgentMessages({
   filename,
   instruction,
   selectionText,
+  selectionContext,
   fileContext,
   uploadedDocumentReferenceContext,
   chatMessages,
@@ -58,6 +61,7 @@ export function buildDocxAgentMessages({
   filename: string;
   instruction: string;
   selectionText: string;
+  selectionContext?: DocumentSelectionContext | null;
   fileContext?: CompressedFileContext | null;
   uploadedDocumentReferenceContext?: string;
   chatMessages: ChatMessage[];
@@ -101,6 +105,9 @@ export function buildDocxAgentMessages({
         selectionText.trim()
           ? `Current DOCX selection:\n<<<\n${truncateSelectionContext(selectionText)}\n>>>`
           : "Current DOCX selection: none",
+        selectionContext?.docxSelection?.segments.length
+          ? `Current DOCX selection coordinates:\n${formatDocxSelectionCoordinates(selectionContext)}`
+          : "",
         "",
         fileContext?.content.trim()
           ? [
@@ -291,15 +298,22 @@ export async function executeDocxPlan({
   command,
   file,
   plan,
+  selectionContext,
   imageReferences,
 }: {
   command: DocxCommandName;
   file: File;
   plan: DocxAgentPlan;
+  selectionContext?: DocumentSelectionContext | null;
   imageReferences?: Map<string, UploadedDocumentImage>;
 }): Promise<DocxExecuteResponse> {
   const blocks = await parseDocxBlocks(file);
-  const resolvedPlan = resolveDocxPlanImageReferences(command, plan, imageReferences ?? new Map());
+  const selectionResolvedPlan = resolveDocxPlanForSelection(command, plan, selectionContext);
+  const resolvedPlan = resolveDocxPlanImageReferences(
+    selectionResolvedPlan.command,
+    { ...plan, args: selectionResolvedPlan.args },
+    imageReferences ?? new Map(),
+  );
   const response = await fetchDocumentService(`${DOCUMENT_SERVICE_URL}/docx/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -317,6 +331,102 @@ export async function executeDocxPlan({
   }
 
   return (await response.json()) as DocxExecuteResponse;
+}
+
+function formatDocxSelectionCoordinates(selectionContext: DocumentSelectionContext): string {
+  const docxSelection = selectionContext.docxSelection;
+  if (!docxSelection?.segments.length) return "none";
+
+  const documentRange =
+    docxSelection.documentStart !== undefined && docxSelection.documentEnd !== undefined
+      ? `Document offsets: ${docxSelection.documentStart}-${docxSelection.documentEnd}.`
+      : "";
+  const segmentLines = docxSelection.segments.map((segment, index) => {
+    const target =
+      segment.kind === "cell"
+        ? `table block ${segment.blockId}, cell ${segment.cellId ?? ""}`
+        : `paragraph block ${segment.blockId}`;
+    return `S${index + 1}: ${target}, local offsets ${segment.start}-${segment.end}, exact text <<<${segment.text}>>>`;
+  });
+
+  return [
+    documentRange,
+    "If the user asks to rewrite, polish, translate, delete, or replace the current selection, operate on these exact coordinates only. Do not use replace_paragraph unless the whole paragraph is selected.",
+    ...segmentLines,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function resolveDocxPlanForSelection(
+  command: DocxCommandName,
+  plan: DocxAgentPlan,
+  selectionContext?: DocumentSelectionContext | null,
+): { command: DocxCommandName; args: Record<string, unknown> } {
+  const args = isPlainObject(plan.args) ? { ...plan.args } : {};
+  const segments = getDocxSelectionSegments(selectionContext);
+  if (!segments.length) {
+    return { command, args };
+  }
+
+  if (command === "replace_paragraph" && typeof args.text === "string") {
+    return {
+      command: "replace_text",
+      args: withDocxSelectionArgs(
+        {
+          ...args,
+          target_text: selectionContext?.text ?? args.target_text,
+          replacement: args.text,
+          text: undefined,
+          block_index: undefined,
+        },
+        selectionContext,
+        segments,
+      ),
+    };
+  }
+
+  if (command === "replace_text" || command === "delete_text") {
+    return {
+      command,
+      args: withDocxSelectionArgs(
+        {
+          ...args,
+          target_text: selectionContext?.text ?? args.target_text,
+        },
+        selectionContext,
+        segments,
+      ),
+    };
+  }
+
+  return { command, args };
+}
+
+function withDocxSelectionArgs(
+  args: Record<string, unknown>,
+  selectionContext: DocumentSelectionContext | null | undefined,
+  segments: DocxTextSelectionSegment[],
+): Record<string, unknown> {
+  return {
+    ...args,
+    selection_text: selectionContext?.text ?? "",
+    selection_segments: segments,
+  };
+}
+
+function getDocxSelectionSegments(
+  selectionContext?: DocumentSelectionContext | null,
+): DocxTextSelectionSegment[] {
+  if (selectionContext?.sourceType !== "docx") return [];
+
+  return (selectionContext.docxSelection?.segments ?? []).filter((segment) => {
+    if (!segment.text.trim()) return false;
+    if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end)) return false;
+    if (segment.end <= segment.start) return false;
+    if (segment.kind === "cell") return Boolean(segment.blockId && segment.cellId);
+    return segment.kind === "paragraph" && Boolean(segment.blockId);
+  });
 }
 
 function resolveDocxPlanImageReferences(

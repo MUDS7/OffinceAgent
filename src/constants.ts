@@ -84,6 +84,7 @@ export const DOCX_AGENT_SYSTEM_PROMPT = [
   "Block numbers are 1-based and refer to the B1, B2, ... labels shown in the compressed document context.",
   "The compressed context can include image blocks as B# image entries. Use those image positions, metadata, and nearby paragraphs when the user refers to pictures or image captions.",
   "For replace_text use args.target_text and args.replacement. Prefer exact selected text as target_text when the user refers to the current selection.",
+  "When only part of a paragraph is selected, use replace_text or delete_text for that selected text. Do not use replace_paragraph unless the user selected or requested the whole paragraph.",
   "For delete_text use args.target_text.",
   "For replace_paragraph replacing one paragraph, use args.text plus either args.block_index or args.target_text.",
   'For replace_paragraph replacing multiple non-contiguous paragraphs, use args.replacements as an array like [{"block_index": 2, "text": "..."}, {"block_index": 7, "text": "..."}]. Each item can use block_index or target_text.',

@@ -972,7 +972,8 @@ function App() {
     let unlisten: (() => void) | null = null;
     let assistantText = "";
     let streamError = "";
-    const selectionText = documentSelection?.sourceType === "docx" ? documentSelection.text : "";
+    const docxSelectionContext = documentSelection?.sourceType === "docx" ? documentSelection : null;
+    const selectionText = docxSelectionContext?.text ?? "";
     let commandSpecs: DocxCommandsResponse | null = null;
 
     try {
@@ -983,6 +984,7 @@ function App() {
         filename: targetFile.file.name,
         instruction,
         selectionText,
+        selectionContext: docxSelectionContext,
         fileContext,
         uploadedDocumentReferenceContext,
         chatMessages: nextMessages,
@@ -1052,6 +1054,7 @@ function App() {
       command,
       file: targetFile.file,
       plan,
+      selectionContext: docxSelectionContext,
       imageReferences: uploadedDocumentImageReferences,
     });
     throwIfChatRequestCancelled(streamId);

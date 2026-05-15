@@ -28,14 +28,14 @@ def get_docx_commands() -> DocxCommandsResponse:
                 category="basic",
                 description="Replace matching text in paragraphs and table cells.",
                 required_args=["target_text", "replacement"],
-                optional_args=["occurrence", "case_sensitive"],
+                optional_args=["occurrence", "case_sensitive", "selection_segments", "selection_text"],
             ),
             DocxCommandSpec(
                 command="delete_text",
                 category="basic",
                 description="Delete matching text in paragraphs and table cells.",
                 required_args=["target_text"],
-                optional_args=["occurrence", "case_sensitive"],
+                optional_args=["occurrence", "case_sensitive", "selection_segments", "selection_text"],
             ),
             DocxCommandSpec(
                 command="replace_paragraph",
@@ -149,6 +149,10 @@ def replace_docx_text(
     replacement: str,
     args: dict[str, Any],
 ) -> tuple[int, int]:
+    selection_segments = normalize_docx_selection_segments(args.get("selection_segments"))
+    if selection_segments:
+        return replace_docx_selection(blocks, selection_segments, replacement)
+
     target_text = target_text.strip()
     if not target_text:
         raise HTTPException(status_code=400, detail="target_text is required")
@@ -195,6 +199,156 @@ def replace_docx_text(
         raise HTTPException(status_code=400, detail=f"Text not found: {target_text}")
 
     return paragraphs_affected, tables_affected
+
+
+def replace_docx_selection(
+    blocks: list[DocxBlock],
+    segments: list[dict[str, Any]],
+    replacement: str,
+) -> tuple[int, int]:
+    operations: list[tuple[int, int, int | None, dict[str, Any]]] = []
+
+    for operation_index, segment in enumerate(segments):
+        block_index, cell_index = resolve_docx_selection_segment(blocks, segment)
+        operations.append((operation_index, block_index, cell_index, segment))
+
+    paragraphs_affected = 0
+    tables_affected = 0
+    paragraph_targets: set[int] = set()
+    table_targets: set[tuple[int, int]] = set()
+
+    for operation_index, block_index, cell_index, segment in sorted(
+        operations,
+        key=lambda operation: (operation[1], -1 if operation[2] is None else operation[2], int(operation[3]["start"])),
+        reverse=True,
+    ):
+        segment_replacement = replacement if operation_index == 0 else ""
+        block = blocks[block_index]
+
+        if cell_index is None:
+            if not isinstance(block, DocxParagraphBlock):
+                raise HTTPException(status_code=400, detail="Selection target is not a paragraph")
+            block.text = replace_text_slice(block.text, segment, segment_replacement)
+            paragraph_targets.add(block_index)
+            continue
+
+        if not isinstance(block, DocxTableBlock):
+            raise HTTPException(status_code=400, detail="Selection target is not a table")
+        cell = find_table_cell_by_flat_index(block, cell_index)
+        cell.text = replace_text_slice(cell.text, segment, segment_replacement)
+        table_targets.add((block_index, cell_index))
+
+    paragraphs_affected = len(paragraph_targets)
+    tables_affected = len(table_targets)
+    if paragraphs_affected == 0 and tables_affected == 0:
+        raise HTTPException(status_code=400, detail="DOCX selection did not match any text target")
+
+    return paragraphs_affected, tables_affected
+
+
+def normalize_docx_selection_segments(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="selection_segments must be an array")
+
+    normalized: list[dict[str, Any]] = []
+    for index, raw_segment in enumerate(value, start=1):
+        if not isinstance(raw_segment, dict):
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] must be an object")
+
+        kind = str(raw_segment.get("kind") or "").strip().lower()
+        block_id = str(raw_segment.get("blockId") or raw_segment.get("block_id") or "").strip()
+        cell_id = str(raw_segment.get("cellId") or raw_segment.get("cell_id") or "").strip()
+        try:
+            start = int(raw_segment.get("start"))
+            end = int(raw_segment.get("end"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"selection_segments[{index}] start/end must be integers",
+            ) from exc
+
+        text = str(raw_segment.get("text") or "")
+        if kind not in {"paragraph", "cell"}:
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] has invalid kind")
+        if not block_id:
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] requires blockId")
+        if kind == "cell" and not cell_id:
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] requires cellId")
+        if start < 0 or end <= start:
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] has invalid range")
+        if not text.strip():
+            raise HTTPException(status_code=400, detail=f"selection_segments[{index}] requires text")
+
+        normalized.append(
+            {
+                "kind": kind,
+                "block_id": block_id,
+                "cell_id": cell_id,
+                "start": start,
+                "end": end,
+                "text": text,
+            }
+        )
+
+    return normalized
+
+
+def resolve_docx_selection_segment(
+    blocks: list[DocxBlock],
+    segment: dict[str, Any],
+) -> tuple[int, int | None]:
+    block_id = str(segment["block_id"])
+    kind = str(segment["kind"])
+
+    for block_index, block in enumerate(blocks):
+        if block.id != block_id:
+            continue
+
+        if kind == "paragraph":
+            if not isinstance(block, DocxParagraphBlock):
+                raise HTTPException(status_code=400, detail=f"Selection block is not a paragraph: {block_id}")
+            validate_text_slice(block.text, segment)
+            return block_index, None
+
+        if not isinstance(block, DocxTableBlock):
+            raise HTTPException(status_code=400, detail=f"Selection block is not a table: {block_id}")
+        for cell_index, cell in enumerate(flatten_table_cells(block)):
+            if cell.id == segment["cell_id"]:
+                validate_text_slice(cell.text, segment)
+                return block_index, cell_index
+        raise HTTPException(status_code=400, detail=f"Selection cell not found: {segment['cell_id']}")
+
+    raise HTTPException(status_code=400, detail=f"Selection block not found: {block_id}")
+
+
+def validate_text_slice(text: str, segment: dict[str, Any]) -> None:
+    start = int(segment["start"])
+    end = int(segment["end"])
+    expected = str(segment["text"])
+    if start > len(text) or end > len(text):
+        raise HTTPException(status_code=400, detail="Selection range is outside the current DOCX text")
+    if text[start:end] != expected:
+        raise HTTPException(status_code=400, detail="Selection text no longer matches the current DOCX text")
+
+
+def replace_text_slice(text: str, segment: dict[str, Any], replacement: str) -> str:
+    validate_text_slice(text, segment)
+    start = int(segment["start"])
+    end = int(segment["end"])
+    return f"{text[:start]}{replacement}{text[end:]}"
+
+
+def flatten_table_cells(block: DocxTableBlock) -> list[DocxTableCell]:
+    return [cell for row in block.rows for cell in row]
+
+
+def find_table_cell_by_flat_index(block: DocxTableBlock, cell_index: int) -> DocxTableCell:
+    cells = flatten_table_cells(block)
+    if cell_index < 0 or cell_index >= len(cells):
+        raise HTTPException(status_code=400, detail="Selection cell index is out of range")
+    return cells[cell_index]
 
 
 def replace_docx_paragraph(blocks: list[DocxBlock], args: dict[str, Any]) -> int:

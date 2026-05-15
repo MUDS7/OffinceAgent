@@ -21,6 +21,7 @@ import type {
   DocxParagraphBlock,
   DocxParseResponse,
   DocxTableBlock,
+  DocxTextSelectionSegment,
   DocumentIndexRequest,
   DocumentIndexResult,
   DocumentSelectionContext,
@@ -940,18 +941,20 @@ export function DocxPreview({
     const selectionEnd = getTextOffsetWithinElement(element, range.endContainer, range.endOffset);
     const start = Math.min(selectionStart, selectionEnd);
     const end = Math.max(selectionStart, selectionEnd);
+    const segment = { target, start, end, text: selectedText };
     setSelectedTarget(target);
     updatePersistedTextSelection({
       target,
       start,
       end,
-      segments: [{ target, start, end, text: selectedText }],
+      segments: [segment],
       text: selectedText,
     });
     publishSelectionContext(
       selectedText,
       getTextTargetOffset(target, start),
       getTextTargetOffset(target, end),
+      [segment],
     );
   }
 
@@ -1030,7 +1033,7 @@ export function DocxPreview({
       segments,
       text: selectedText,
     });
-    publishSelectionContext(selectedText, start.documentOffset, end.documentOffset);
+    publishSelectionContext(selectedText, start.documentOffset, end.documentOffset, segments);
     return true;
   }
 
@@ -1111,17 +1114,31 @@ export function DocxPreview({
     );
   }
 
-  function publishSelectionContext(text: string, start?: number, end?: number) {
+  function publishSelectionContext(
+    text: string,
+    start?: number,
+    end?: number,
+    segments?: PersistedDocxTextSelectionSegment[],
+  ) {
     const fallbackStart = start === undefined ? documentText.indexOf(text) : -1;
     const resolvedStart = start ?? (fallbackStart >= 0 ? fallbackStart : undefined);
+    const resolvedEnd = end ?? (resolvedStart === undefined ? undefined : resolvedStart + text.length);
     onSelectionContextChange({
       fileId: activeFile.id,
       filePath: activeFile.diskPath ?? activeFile.filename,
       filename: activeFile.filename,
       sourceType: "docx",
       start: resolvedStart,
-      end: end ?? (resolvedStart === undefined ? undefined : resolvedStart + text.length),
+      end: resolvedEnd,
       text,
+      docxSelection: segments?.length
+        ? {
+            documentStart: resolvedStart,
+            documentEnd: resolvedEnd,
+            segments: segments.map(toDocxSelectionSegment),
+            text,
+          }
+        : undefined,
     });
   }
 
@@ -1375,6 +1392,27 @@ function getTextTargetFromKey(key: string): SelectedDocxTextTarget | null {
   const [blockId, cellId] = key.slice("cell:".length).split(":");
   if (!blockId || !cellId) return null;
   return { blockId, cellId, kind: "cell" };
+}
+
+function toDocxSelectionSegment(segment: PersistedDocxTextSelectionSegment): DocxTextSelectionSegment {
+  if (segment.target.kind === "paragraph") {
+    return {
+      kind: "paragraph",
+      blockId: segment.target.blockId,
+      start: segment.start,
+      end: segment.end,
+      text: segment.text,
+    };
+  }
+
+  return {
+    kind: "cell",
+    blockId: segment.target.blockId,
+    cellId: segment.target.cellId,
+    start: segment.start,
+    end: segment.end,
+    text: segment.text,
+  };
 }
 
 function isSameTextTarget(left: SelectedDocxTextTarget, right: SelectedDocxTextTarget) {

@@ -20,6 +20,23 @@ export type DocumentSelectionContext = {
   start?: number;
   end?: number;
   text: string;
+  docxSelection?: DocxTextSelectionContext;
+};
+
+export type DocxTextSelectionSegment = {
+  kind: "paragraph" | "cell";
+  blockId: string;
+  cellId?: string;
+  start: number;
+  end: number;
+  text: string;
+};
+
+export type DocxTextSelectionContext = {
+  documentStart?: number;
+  documentEnd?: number;
+  segments: DocxTextSelectionSegment[];
+  text: string;
 };
 
 export type AgentTextEditResult = {
