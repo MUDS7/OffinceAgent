@@ -16,7 +16,6 @@ import {
   FolderPlus,
   GitBranch,
   MoreHorizontal,
-  Play,
   RefreshCw,
   Search,
   Settings,
@@ -532,15 +531,6 @@ export function LeftPanel({
             onClick={() => setActivePanel("search")}
           >
             <Search size={26} />
-          </button>
-          <button className="activity-button" type="button" title="源代码管理">
-            <GitBranch size={25} />
-          </button>
-          <button className="activity-button" type="button" title="运行和调试">
-            <Play size={25} />
-          </button>
-          <button className="activity-button" type="button" title="扩展">
-            <Braces size={25} />
           </button>
         </div>
         <div className="activity-bottom">
