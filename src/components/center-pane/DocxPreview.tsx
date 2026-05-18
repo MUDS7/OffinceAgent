@@ -1551,32 +1551,65 @@ function getDocumentText(blocks: DocxBlock[]) {
 function findDocxSearchTarget(blocks: DocxBlock[], target: SearchNavigationTarget) {
   const query = target.query.trim().toLowerCase();
   const fallback = target.text.trim().toLowerCase();
+  const candidateBlocks = getDocxSearchCandidateBlocks(blocks, target);
+
+  for (const block of candidateBlocks) {
+    const match = findDocxSearchTargetInBlock(block, query, fallback);
+    if (match) return match;
+  }
 
   for (const block of blocks) {
-    if (block.type === "paragraph") {
-      const match = findTextMatch(block.text, query, fallback);
+    const match = findDocxSearchTargetInBlock(block, query, fallback);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function getDocxSearchCandidateBlocks(blocks: DocxBlock[], target: SearchNavigationTarget) {
+  const candidates: DocxBlock[] = [];
+  const metadata = parseSearchMetadata(target.metadataJson);
+  const metadataBlockId = getStringField(metadata, "id");
+
+  const addCandidate = (block: DocxBlock | undefined) => {
+    if (!block || candidates.some((candidate) => candidate.id === block.id)) return;
+    candidates.push(block);
+  };
+
+  if (metadataBlockId) {
+    addCandidate(blocks.find((block) => block.id === metadataBlockId));
+  }
+
+  if (Number.isInteger(target.orderIndex) && target.orderIndex !== undefined) {
+    addCandidate(blocks[target.orderIndex]);
+  }
+
+  return candidates;
+}
+
+function findDocxSearchTargetInBlock(block: DocxBlock, query: string, fallback: string) {
+  if (block.type === "paragraph") {
+    const match = findTextMatch(block.text, query, fallback);
+    if (!match) return null;
+
+    return {
+      target: { blockId: block.id, kind: "paragraph" } satisfies SelectedDocxTextTarget,
+      ...match,
+      text: block.text.slice(match.start, match.end),
+    };
+  }
+
+  if (block.type !== "table") return null;
+
+  for (const row of block.rows) {
+    for (const cell of row) {
+      const match = findTextMatch(cell.text, query, fallback);
       if (match) {
         return {
-          target: { blockId: block.id, kind: "paragraph" } satisfies SelectedDocxTextTarget,
+          target: { blockId: block.id, cellId: cell.id, kind: "cell" } satisfies SelectedDocxTextTarget,
           ...match,
-          text: block.text.slice(match.start, match.end),
+          text: cell.text.slice(match.start, match.end),
         };
-      }
-      continue;
-    }
-
-    if (block.type === "table") {
-      for (const row of block.rows) {
-        for (const cell of row) {
-          const match = findTextMatch(cell.text, query, fallback);
-          if (match) {
-            return {
-              target: { blockId: block.id, cellId: cell.id, kind: "cell" } satisfies SelectedDocxTextTarget,
-              ...match,
-              text: cell.text.slice(match.start, match.end),
-            };
-          }
-        }
       }
     }
   }
@@ -1603,6 +1636,21 @@ function findTextMatch(text: string, query: string, fallback: string) {
   if (lineIndex === -1) return null;
 
   return { start: lineIndex, end: lineIndex + line.length };
+}
+
+function parseSearchMetadata(metadataJson: string | undefined) {
+  if (!metadataJson) return null;
+
+  try {
+    return JSON.parse(metadataJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getStringField(value: Record<string, unknown> | null, key: string) {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() ? field : null;
 }
 
 function getDocxTextTargetEntries(blocks: DocxBlock[]) {
