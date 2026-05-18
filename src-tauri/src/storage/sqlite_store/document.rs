@@ -215,27 +215,44 @@ pub(crate) fn search_document_full_text(
             "SELECT d.id,
                     COALESCE(d.name, d.filename, ''),
                     COALESCE(d.stored_path, d.path),
-                    n.text
+                    n.id,
+                    n.node_type,
+                    n.title,
+                    n.text,
+                    n.order_index,
+                    n.metadata_json
              FROM doc_nodes n
              JOIN documents d ON d.id = n.document_id
-             WHERE n.text LIKE ?1
-             ORDER BY n.order_index
+             WHERE n.text LIKE ?1 ESCAPE '\\'
+             ORDER BY d.name, n.order_index
              LIMIT ?2",
         )
         .map_err(|error| format!("cannot prepare SQLite full-text search: {error}"))?;
 
-    let like_query = format!("%{}%", trimmed.replace('%', "\\%").replace('_', "\\_"));
+    let like_query = format!("%{}%", escape_sql_like(trimmed));
     let rows = statement
         .query_map(params![like_query, limit.unwrap_or(20).min(100)], |row| {
             Ok(FullTextSearchHit {
                 document_id: row.get(0)?,
                 filename: row.get(1)?,
                 path: row.get(2)?,
-                text: row.get(3)?,
+                node_id: row.get(3)?,
+                node_type: row.get(4)?,
+                title: row.get(5)?,
+                text: row.get(6)?,
+                order_index: row.get(7)?,
+                metadata_json: row.get(8)?,
             })
         })
         .map_err(|error| format!("cannot run SQLite full-text search: {error}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("cannot read SQLite full-text results: {error}"))
+}
+
+fn escape_sql_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }

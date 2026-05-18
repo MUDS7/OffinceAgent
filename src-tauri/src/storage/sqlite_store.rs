@@ -65,7 +65,12 @@ pub(crate) struct FullTextSearchHit {
     document_id: String,
     filename: String,
     path: Option<String>,
+    node_id: String,
+    node_type: String,
+    title: Option<String>,
     text: String,
+    order_index: i64,
+    metadata_json: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -26,10 +26,11 @@ import type {
   DocumentIndexResult,
   DocumentSelectionContext,
 } from "../../types";
-import type { PreviewFile, SaveFileProvider } from "./types";
+import type { PreviewFile, SaveFileProvider, SearchNavigationTarget } from "./types";
 
 type DocxPreviewProps = {
   activeFile: PreviewFile;
+  searchNavigationTarget: SearchNavigationTarget | null;
   onSaveFile: (fileId: string) => void;
   onRegisterSaveFileProvider: (fileId: string, provider: SaveFileProvider) => () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
@@ -82,6 +83,7 @@ const TRAILING_LINE_BREAK_MARKER = "\u200b";
 
 export function DocxPreview({
   activeFile,
+  searchNavigationTarget,
   onSaveFile,
   onRegisterSaveFileProvider,
   onSelectionContextChange,
@@ -218,6 +220,51 @@ export function DocxPreview({
       window.clearTimeout(timeoutId);
     };
   }, [state.blocks, state.error, state.isLoading]);
+
+  useEffect(() => {
+    if (!searchNavigationTarget || state.isLoading || state.error) return;
+
+    const match = findDocxSearchTarget(state.blocks, searchNavigationTarget);
+    if (!match) return;
+
+    const element = textElementRefs.current.get(getTextTargetKey(match.target));
+    if (!element) return;
+
+    const documentStart = getTextTargetOffset(match.target, match.start);
+    const documentEnd = getTextTargetOffset(match.target, match.end);
+    setSelectedTarget(match.target);
+    updatePersistedTextSelection({
+      target: match.target,
+      start: match.start,
+      end: match.end,
+      text: match.text,
+      documentStart,
+      documentEnd,
+      segments: [
+        {
+          target: match.target,
+          start: match.start,
+          end: match.end,
+          text: match.text,
+        },
+      ],
+    });
+    publishSelectionContext(match.text, documentStart, documentEnd, [
+      {
+        target: match.target,
+        start: match.start,
+        end: match.end,
+        text: match.text,
+      },
+    ]);
+
+    window.requestAnimationFrame(() => {
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
+      restoreTextSelection(element, match.start, match.end);
+      element.classList.add("search-jump-highlight");
+      window.setTimeout(() => element.classList.remove("search-jump-highlight"), 1600);
+    });
+  }, [searchNavigationTarget?.id, state.isLoading, state.error, state.blocks]);
 
   useEffect(() => {
     if (state.isLoading || state.error) return;
@@ -1499,6 +1546,63 @@ function normalizeDocxWarnings(warnings: string[], originalBlocks: DocxBlock[], 
 
 function getDocumentText(blocks: DocxBlock[]) {
   return blocks.map((block) => getDocxBlockText(block)).join("\n");
+}
+
+function findDocxSearchTarget(blocks: DocxBlock[], target: SearchNavigationTarget) {
+  const query = target.query.trim().toLowerCase();
+  const fallback = target.text.trim().toLowerCase();
+
+  for (const block of blocks) {
+    if (block.type === "paragraph") {
+      const match = findTextMatch(block.text, query, fallback);
+      if (match) {
+        return {
+          target: { blockId: block.id, kind: "paragraph" } satisfies SelectedDocxTextTarget,
+          ...match,
+          text: block.text.slice(match.start, match.end),
+        };
+      }
+      continue;
+    }
+
+    if (block.type === "table") {
+      for (const row of block.rows) {
+        for (const cell of row) {
+          const match = findTextMatch(cell.text, query, fallback);
+          if (match) {
+            return {
+              target: { blockId: block.id, cellId: cell.id, kind: "cell" } satisfies SelectedDocxTextTarget,
+              ...match,
+              text: cell.text.slice(match.start, match.end),
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function findTextMatch(text: string, query: string, fallback: string) {
+  const haystack = text.toLowerCase();
+  if (query) {
+    const queryIndex = haystack.indexOf(query);
+    if (queryIndex !== -1) return { start: queryIndex, end: queryIndex + query.length };
+  }
+
+  if (!fallback) return null;
+
+  const line = fallback
+    .split(/\r?\n/)
+    .map((item) => item.trim().toLowerCase())
+    .find(Boolean);
+  if (!line) return null;
+
+  const lineIndex = haystack.indexOf(line);
+  if (lineIndex === -1) return null;
+
+  return { start: lineIndex, end: lineIndex + line.length };
 }
 
 function getDocxTextTargetEntries(blocks: DocxBlock[]) {

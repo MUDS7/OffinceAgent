@@ -89,6 +89,18 @@ export type WorkspaceStorageInfo = {
   created_data_dir: boolean;
 };
 
+export type FullTextSearchHit = {
+  document_id: string;
+  filename: string;
+  path?: string | null;
+  node_id: string;
+  node_type: string;
+  title?: string | null;
+  text: string;
+  order_index: number;
+  metadata_json: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "assistant" | "user";

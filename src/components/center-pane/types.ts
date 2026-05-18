@@ -68,6 +68,16 @@ export type PendingTextRestore = {
 
 export type SaveFileProvider = () => Promise<File | null> | File | null;
 
+export type SearchNavigationTarget = {
+  id: string;
+  query: string;
+  text: string;
+  nodeType?: string;
+  title?: string | null;
+  metadataJson?: string;
+  orderIndex?: number;
+};
+
 export type CenterPaneProps = {
   activeFilename: string;
   activeFile: PreviewFile | null;
@@ -76,6 +86,7 @@ export type CenterPaneProps = {
   pendingAgentTextEdit: AgentTextEditResult | null;
   pendingTextRestore: PendingTextRestore | null;
   previewTabs: PreviewTab[];
+  searchNavigationTarget: SearchNavigationTarget | null;
   unsavedText?: string;
   onAgentTextEditApplied: (change: AppliedAgentTextEditChange) => void;
   onClosePreviewTab: (fileId: string) => void;

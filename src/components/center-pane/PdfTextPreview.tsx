@@ -7,16 +7,17 @@ import type { PDFPageProxy, RenderTask } from "pdfjs-dist";
 import type { DocumentIndexRequest, DocumentIndexResult, PdfPageBlock } from "../../types";
 import { normalizeFilePath } from "../../utils/fileUtils";
 import { createPdfTextSelectionGuard, publishPdfSelection } from "./pdfSelection";
-import type { DocumentSelectionContext, PreviewFile } from "./types";
+import type { DocumentSelectionContext, PreviewFile, SearchNavigationTarget } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 type PdfTextPreviewProps = {
   activeFile: PreviewFile;
+  searchNavigationTarget: SearchNavigationTarget | null;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
 };
 
-export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfTextPreviewProps) {
+export function PdfTextPreview({ activeFile, searchNavigationTarget, onSelectionContextChange }: PdfTextPreviewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
   const selectionOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +73,7 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
 
           pageElement.className = "pdf-page";
           pageElement.setAttribute("aria-label", `Page ${pageNumber}`);
+          pageElement.dataset.pageNumber = String(pageNumber);
           pageElement.style.width = `${viewport.width}px`;
           pageElement.style.height = `${viewport.height}px`;
           pageElement.style.setProperty("--pdf-scale-factor", String(viewport.scale));
@@ -180,6 +182,26 @@ export function PdfTextPreview({ activeFile, onSelectionContextChange }: PdfText
       resizeObserver.disconnect();
     };
   }, [activeFile, file, filename, id, onSelectionContextChange]);
+
+  useEffect(() => {
+    if (!searchNavigationTarget || pdfState.isLoading || pdfState.error) return;
+
+    const metadata = parseSearchMetadata(searchNavigationTarget.metadataJson);
+    const pageNumber = getNumberField(metadata, "page_number") ?? parsePageNumber(searchNavigationTarget.title);
+    const pageElement = pageNumber
+      ? pagesRef.current?.querySelector<HTMLElement>(`.pdf-page[data-page-number="${pageNumber}"]`)
+      : pagesRef.current?.querySelector<HTMLElement>(".pdf-page");
+    if (!pageElement) return;
+
+    pageElement.scrollIntoView({ block: "start", behavior: "smooth" });
+    pageElement.classList.add("search-jump-highlight");
+    const timeoutId = window.setTimeout(() => pageElement.classList.remove("search-jump-highlight"), 1600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      pageElement.classList.remove("search-jump-highlight");
+    };
+  }, [searchNavigationTarget?.id, pdfState.isLoading, pdfState.error]);
 
   return (
     <div className="editor-content pdf-preview">
@@ -391,4 +413,27 @@ async function indexPdfStructure(
 
 function getDocumentIndexId(activeFile: PreviewFile) {
   return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
+}
+
+function parseSearchMetadata(metadataJson: string | undefined) {
+  if (!metadataJson) return null;
+
+  try {
+    return JSON.parse(metadataJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getNumberField(metadata: Record<string, unknown> | null, key: string) {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parsePageNumber(title: string | null | undefined) {
+  const match = title?.match(/page\s+(\d+)/i);
+  if (!match) return null;
+
+  const pageNumber = Number.parseInt(match[1], 10);
+  return Number.isFinite(pageNumber) ? pageNumber : null;
 }

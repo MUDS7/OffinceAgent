@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Braces,
   Check,
@@ -23,6 +24,7 @@ import {
   Table2,
   Trash2,
 } from "lucide-react";
+import type { FullTextSearchHit } from "../types";
 import "./LeftPanel.css";
 
 type WorkspaceFile = {
@@ -76,6 +78,7 @@ type LeftPanelProps = {
   selectedFileId: string;
   explorerWidth: number;
   onSelectFile: (fileId: string) => void;
+  onOpenSearchResult: (hit: FullTextSearchHit, query: string) => void;
   onCreateEmptyFile: (filename: string) => void;
   onOpenFilePicker: () => void;
   onOpenFolderPicker: () => void;
@@ -89,11 +92,13 @@ export function LeftPanel({
   selectedFileId,
   explorerWidth,
   onSelectFile,
+  onOpenSearchResult,
   onCreateEmptyFile,
   onOpenFilePicker,
   onOpenFolderPicker,
   onDeleteFiles,
 }: LeftPanelProps) {
+  const [activePanel, setActivePanel] = useState<"explorer" | "search">("explorer");
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([]);
   const [isCreatingFile, setIsCreatingFile] = useState(false);
   const [draftFilename, setDraftFilename] = useState("");
@@ -105,6 +110,10 @@ export function LeftPanel({
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
   const [isWorkspaceRootCollapsed, setIsWorkspaceRootCollapsed] = useState(false);
   const [nodeToDelete, setNodeToDelete] = useState<{ id: string; name: string; kind: "file" | "folder" | "virtual_folder", fileIds?: string[] } | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<FullTextSearchHit[]>([]);
+  const [searchError, setSearchError] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
   const newFileInputRef = useRef<HTMLInputElement | null>(null);
   const newFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceTree = useMemo(
@@ -121,6 +130,40 @@ export function LeftPanel({
     if (!isCreatingFolder) return;
     newFolderInputRef.current?.focus();
   }, [isCreatingFolder]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setSearchError("");
+      setIsSearching(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsSearching(true);
+    setSearchError("");
+    const timeoutId = window.setTimeout(() => {
+      invoke<FullTextSearchHit[]>("search_document_full_text", { query, limit: 100 })
+        .then((results) => {
+          if (isCancelled) return;
+          setSearchResults(results);
+        })
+        .catch((error) => {
+          if (isCancelled) return;
+          setSearchResults([]);
+          setSearchError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          if (!isCancelled) setIsSearching(false);
+        });
+    }, 180);
+
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [searchQuery]);
 
   function startCreatingFile() {
     setDraftFilename("");
@@ -404,14 +447,90 @@ export function LeftPanel({
     );
   }
 
+  function renderSearchPanel() {
+    const groupedResults = groupSearchResults(searchResults);
+    const resultCount = searchResults.length;
+    const fileCount = groupedResults.length;
+
+    return (
+      <>
+        <div className="panel-heading search-heading">
+          <span>搜索</span>
+          <RefreshCw className={isSearching ? "spin" : ""} size={17} />
+        </div>
+
+        <div className="global-search-panel">
+          <div className="search-input-row">
+            <input
+              aria-label="搜索"
+              autoFocus
+              placeholder="搜索"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+            />
+            <span className="search-option">Aa</span>
+            <span className="search-option">ab</span>
+          </div>
+          <input className="replace-input" aria-label="替换" placeholder="替换" readOnly />
+
+          {searchError ? <div className="search-message error">{searchError}</div> : null}
+          {!searchQuery.trim() ? <div className="search-message">输入内容后搜索所有已上传文档</div> : null}
+          {searchQuery.trim() && !isSearching && !searchError && !resultCount ? (
+            <div className="search-message">没有结果</div>
+          ) : null}
+          {resultCount ? (
+            <div className="search-summary">
+              {fileCount} 文件中有 {resultCount} 个结果
+            </div>
+          ) : null}
+
+          <div className="search-results">
+            {groupedResults.map((group) => (
+              <div className="search-result-group" key={group.documentId}>
+                <div className="search-result-file">
+                  <ChevronDown size={15} />
+                  <FileIcon filename={group.filename} />
+                  <span className="search-result-filename">{group.filename}</span>
+                  {group.path ? <span className="search-result-path">{formatSearchPath(group.path)}</span> : null}
+                  <span className="search-result-count">{group.results.length}</span>
+                </div>
+                {group.results.map((result) => (
+                  <button
+                    className="search-result-item"
+                    type="button"
+                    key={`${result.node_id}-${result.order_index}`}
+                    onClick={() => onOpenSearchResult(result, searchQuery.trim())}
+                  >
+                    <span className="search-result-line">{formatSearchResultTitle(result)}</span>
+                    <span className="search-result-snippet">{renderHighlightedSnippet(result.text, searchQuery)}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <aside className="activity-bar" aria-label="活动栏">
         <div className="activity-top">
-          <button className="activity-button active" type="button" title="资源管理器">
+          <button
+            className={activePanel === "explorer" ? "activity-button active" : "activity-button"}
+            type="button"
+            title="资源管理器"
+            onClick={() => setActivePanel("explorer")}
+          >
             <Files size={26} />
           </button>
-          <button className="activity-button" type="button" title="搜索">
+          <button
+            className={activePanel === "search" ? "activity-button active" : "activity-button"}
+            type="button"
+            title="搜索"
+            onClick={() => setActivePanel("search")}
+          >
             <Search size={26} />
           </button>
           <button className="activity-button" type="button" title="源代码管理">
@@ -439,6 +558,10 @@ export function LeftPanel({
         aria-label="文件目录"
         aria-hidden={explorerWidth === 0}
       >
+        {activePanel === "search" ? (
+          renderSearchPanel()
+        ) : (
+          <>
         <div className="panel-heading explorer-heading">
           <span>资源管理器</span>
           <MoreHorizontal size={17} />
@@ -507,6 +630,8 @@ export function LeftPanel({
         </button>
 
         <div className="explorer-spacer" onClick={clearTreeSelection} />
+          </>
+        )}
       </aside>
 
       {nodeToDelete && (
@@ -527,6 +652,77 @@ export function LeftPanel({
       )}
     </>
   );
+}
+
+function groupSearchResults(results: FullTextSearchHit[]) {
+  const groups: Array<{
+    documentId: string;
+    filename: string;
+    path?: string | null;
+    results: FullTextSearchHit[];
+  }> = [];
+  const groupByDocument = new Map<string, (typeof groups)[number]>();
+
+  for (const result of results) {
+    let group = groupByDocument.get(result.document_id);
+    if (!group) {
+      group = {
+        documentId: result.document_id,
+        filename: result.filename,
+        path: result.path,
+        results: [],
+      };
+      groupByDocument.set(result.document_id, group);
+      groups.push(group);
+    }
+    group.results.push(result);
+  }
+
+  return groups;
+}
+
+function formatSearchPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+}
+
+function formatSearchResultTitle(result: FullTextSearchHit) {
+  if (result.title?.trim()) return result.title;
+  if (result.node_type === "pdf_paragraph") return "PDF 段落";
+  if (result.node_type === "excel_cell_range") return "表格行";
+  if (result.node_type === "table") return "表格";
+  if (result.node_type === "image") return "图片";
+  return "文本";
+}
+
+function renderHighlightedSnippet(text: string, query: string) {
+  const snippet = buildSearchSnippet(text, query);
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return snippet;
+
+  const matchIndex = snippet.toLowerCase().indexOf(normalizedQuery);
+  if (matchIndex === -1) return snippet;
+
+  return (
+    <>
+      {snippet.slice(0, matchIndex)}
+      <mark>{snippet.slice(matchIndex, matchIndex + query.trim().length)}</mark>
+      {snippet.slice(matchIndex + query.trim().length)}
+    </>
+  );
+}
+
+function buildSearchSnippet(text: string, query: string) {
+  const compactText = text.replace(/\s+/g, " ").trim();
+  const normalizedQuery = query.trim().toLowerCase();
+  const matchIndex = normalizedQuery ? compactText.toLowerCase().indexOf(normalizedQuery) : -1;
+  const start = matchIndex === -1 ? 0 : Math.max(0, matchIndex - 28);
+  const end = Math.min(compactText.length, start + 118);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < compactText.length ? "..." : "";
+
+  return `${prefix}${compactText.slice(start, end)}${suffix}`;
 }
 
 function FileIcon({ filename }: { filename: string }) {

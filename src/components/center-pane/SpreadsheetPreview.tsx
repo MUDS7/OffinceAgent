@@ -6,10 +6,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
 import type { DocumentIndexRequest, DocumentIndexResult } from "../../types";
 import { normalizeFilePath } from "../../utils/fileUtils";
-import type { DocumentSelectionContext, PreviewFile } from "./types";
+import type { DocumentSelectionContext, PreviewFile, SearchNavigationTarget } from "./types";
 
 type SpreadsheetPreviewProps = {
   activeFile: PreviewFile;
+  searchNavigationTarget: SearchNavigationTarget | null;
   onSaveFile: (fileId: string) => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
@@ -77,6 +78,7 @@ const UI_SCALE_FALLBACK = 0.8;
 
 export function SpreadsheetPreview({
   activeFile,
+  searchNavigationTarget,
   onSaveFile,
   onSelectionContextChange,
   onUpdateSpreadsheetFile,
@@ -84,6 +86,7 @@ export function SpreadsheetPreview({
   const lastPublishedFileRef = useRef<File | null>(null);
   const loadedFileIdRef = useRef("");
   const lastIndexSignatureRef = useRef("");
+  const gridShellRef = useRef<HTMLDivElement | null>(null);
   const [previewState, setPreviewState] = useState<{
     error: string;
     isLoading: boolean;
@@ -266,6 +269,29 @@ export function SpreadsheetPreview({
   }, [activeFile.diskPath, activeFile.filename, activeFile.id, activeSheet, onSelectionContextChange, selectionRange]);
 
   useEffect(() => {
+    if (!searchNavigationTarget || previewState.isLoading || previewState.error) return;
+
+    const target = findSpreadsheetSearchTarget(previewState.sheets, searchNavigationTarget);
+    if (!target) return;
+
+    setActiveSheetIndex(target.sheetIndex);
+    setSelectionRange({
+      startRow: target.row,
+      startCol: target.col,
+      endRow: target.row,
+      endCol: target.col,
+    });
+    setEditingCell(null);
+
+    window.requestAnimationFrame(() => {
+      const cell = gridShellRef.current?.querySelector<HTMLElement>(`.spreadsheet-cell[data-address="${target.address}"]`);
+      cell?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      cell?.classList.add("search-jump-highlight");
+      window.setTimeout(() => cell?.classList.remove("search-jump-highlight"), 1600);
+    });
+  }, [searchNavigationTarget?.id, previewState.isLoading, previewState.error, previewState.sheets]);
+
+  useEffect(() => {
     function stopDrag() {
       setDragAnchor(null);
     }
@@ -350,6 +376,7 @@ export function SpreadsheetPreview({
       ) : null}
 
       <div
+        ref={gridShellRef}
         className="spreadsheet-grid-shell"
         onPointerDown={(event) => {
           if (
@@ -1255,4 +1282,57 @@ function encodeColumnLabel(col: number) {
   }
 
   return label;
+}
+
+function findSpreadsheetSearchTarget(sheets: SheetPreview[], target: SearchNavigationTarget) {
+  const metadata = parseSearchMetadata(target.metadataJson);
+  const query = target.query.trim().toLowerCase();
+  const addresses = getMetadataCellAddresses(metadata);
+
+  for (const address of addresses) {
+    const hit = findSpreadsheetAddress(sheets, address);
+    if (hit) return hit;
+  }
+
+  for (const [sheetIndex, sheet] of sheets.entries()) {
+    for (const row of sheet.rows) {
+      for (const cell of row) {
+        if (query && cell.value.toLowerCase().includes(query)) {
+          return { sheetIndex, row: cell.row, col: cell.col, address: cell.address };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function getMetadataCellAddresses(metadata: Record<string, unknown> | null) {
+  const cells = metadata?.cells;
+  if (!Array.isArray(cells)) return [];
+
+  return cells
+    .map((cell) => (cell && typeof cell === "object" ? (cell as Record<string, unknown>).address : null))
+    .filter((address): address is string => typeof address === "string" && address.trim().length > 0);
+}
+
+function findSpreadsheetAddress(sheets: SheetPreview[], address: string) {
+  for (const [sheetIndex, sheet] of sheets.entries()) {
+    for (const row of sheet.rows) {
+      const cell = row.find((item) => item.address === address);
+      if (cell) return { sheetIndex, row: cell.row, col: cell.col, address: cell.address };
+    }
+  }
+
+  return null;
+}
+
+function parseSearchMetadata(metadataJson: string | undefined) {
+  if (!metadataJson) return null;
+
+  try {
+    return JSON.parse(metadataJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }

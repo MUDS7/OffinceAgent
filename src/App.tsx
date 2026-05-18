@@ -26,6 +26,7 @@ import type {
   DocxExecuteResponse,
   ExcelCommandsResponse,
   ExcelExecuteResponse,
+  FullTextSearchHit,
   LayoutWidths,
   ResizeTarget,
   ServiceStatus,
@@ -77,7 +78,7 @@ import { decodeBase64Bytes, getFileMimeType, getFileRelativePath, normalizeFileP
 import { buildCompressedFileContext } from "./utils/fileContext";
 import { fetchDocumentService } from "./utils/documentService";
 import type { CompressedFileContext } from "./utils/fileContext";
-import type { SaveFileProvider } from "./components/center-pane/types";
+import type { SaveFileProvider, SearchNavigationTarget } from "./components/center-pane/types";
 import { restoreTextEditPayload } from "./utils/textCompression";
 import type { TextEditContentEncoding } from "./utils/textCompression";
 import {
@@ -111,6 +112,7 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [documentSelection, setDocumentSelection] = useState<DocumentSelectionContext | null>(null);
+  const [searchNavigationTarget, setSearchNavigationTarget] = useState<SearchNavigationTarget | null>(null);
   const [pendingAgentTextEdit, setPendingAgentTextEdit] = useState<AgentTextEditResult | null>(null);
   const [pendingTextRestore, setPendingTextRestore] = useState<{ id: string; fileId: string; text: string } | null>(
     null,
@@ -664,10 +666,31 @@ function App() {
   function openWorkspaceFile(fileId: string) {
     setSelectedFileId(fileId);
     setDocumentSelection(null);
+    setSearchNavigationTarget(null);
 
     if (!fileId) return;
 
     setOpenFileIds((current) => [fileId, ...current.filter((id) => id !== fileId)]);
+  }
+
+  function openSearchResult(hit: FullTextSearchHit, query: string) {
+    const targetFile = findWorkspaceFileForSearchHit(workspaceFiles, hit);
+    if (!targetFile) {
+      setErrorMessage(`未找到搜索结果对应的文件：${hit.filename}`);
+      return;
+    }
+
+    openWorkspaceFile(targetFile.id);
+    setSearchNavigationTarget({
+      id: `${hit.node_id}-${hit.order_index}-${Date.now()}`,
+      query,
+      text: hit.text,
+      nodeType: hit.node_type,
+      title: hit.title,
+      metadataJson: hit.metadata_json,
+      orderIndex: hit.order_index,
+    });
+    setErrorMessage("");
   }
 
   async function loadWorkspaceFileContent(fileId: string) {
@@ -1810,6 +1833,7 @@ function App() {
           selectedFileId={selectedFileId}
           explorerWidth={layoutWidths.explorer}
           onSelectFile={openWorkspaceFile}
+          onOpenSearchResult={openSearchResult}
           onCreateEmptyFile={createEmptyFile}
           onOpenFilePicker={openFilePicker}
           onOpenFolderPicker={openFolderPicker}
@@ -1836,6 +1860,7 @@ function App() {
           pendingAgentTextEdit={pendingAgentTextEdit}
           pendingTextRestore={pendingTextRestore}
           previewTabs={openPreviewTabs}
+          searchNavigationTarget={searchNavigationTarget}
           unsavedText={unsavedContents[selectedFileId]}
           onAgentTextEditApplied={attachAgentFileChange}
           onClosePreviewTab={closePreviewTab}
@@ -1980,6 +2005,19 @@ function getWorkspaceFileKey(fileItem: WorkspaceFile) {
   if (fileItem.diskPath) return `disk:${normalizeFilePath(fileItem.diskPath).toLowerCase()}`;
   if (fileItem.relativePath) return `relative:${normalizeFilePath(fileItem.relativePath).toLowerCase()}`;
   return `file:${fileItem.file.name.toLowerCase()}:${fileItem.file.size}:${fileItem.file.lastModified}`;
+}
+
+function findWorkspaceFileForSearchHit(workspaceFiles: WorkspaceFile[], hit: FullTextSearchHit) {
+  const normalizedHitPath = hit.path ? normalizeFilePath(hit.path).toLowerCase() : "";
+
+  return (
+    workspaceFiles.find((fileItem) => fileItem.id === hit.document_id) ??
+    workspaceFiles.find(
+      (fileItem) => normalizedHitPath && normalizeFilePath(fileItem.diskPath ?? "").toLowerCase() === normalizedHitPath,
+    ) ??
+    workspaceFiles.find((fileItem) => fileItem.file.name === hit.filename) ??
+    null
+  );
 }
 
 async function fileToByteArray(file: File) {

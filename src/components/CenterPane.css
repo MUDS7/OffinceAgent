@@ -216,6 +216,13 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
+.search-jump-highlight {
+  outline: 2px solid #d68b45 !important;
+  outline-offset: 2px;
+  background-color: rgba(240, 184, 148, 0.22) !important;
+  transition: background-color 160ms ease, outline-color 160ms ease;
+}
+
 .pdf-page canvas {
   display: block;
 }

@@ -17,6 +17,7 @@ export function CenterPane({
   pendingAgentTextEdit,
   pendingTextRestore,
   previewTabs,
+  searchNavigationTarget,
   unsavedText,
   onAgentTextEditApplied,
   onClosePreviewTab,
@@ -74,6 +75,7 @@ export function CenterPane({
           activeFile={activeFile}
           pendingAgentTextEdit={pendingAgentTextEdit}
           pendingTextRestore={pendingTextRestore}
+          searchNavigationTarget={searchNavigationTarget}
           unsavedText={unsavedText}
           onAgentTextEditApplied={onAgentTextEditApplied}
           onSelectionContextChange={onSelectionContextChange}
@@ -84,13 +86,20 @@ export function CenterPane({
     }
 
     if (isPdfPreview) {
-      return <PdfTextPreview activeFile={activeFile} onSelectionContextChange={onSelectionContextChange} />;
+      return (
+        <PdfTextPreview
+          activeFile={activeFile}
+          searchNavigationTarget={searchNavigationTarget}
+          onSelectionContextChange={onSelectionContextChange}
+        />
+      );
     }
 
     if (isSpreadsheetPreview) {
       return (
         <SpreadsheetPreview
           activeFile={activeFile}
+          searchNavigationTarget={searchNavigationTarget}
           onSaveFile={onSaveTextFile}
           onSelectionContextChange={onSelectionContextChange}
           onUpdateSpreadsheetFile={onUpdateSpreadsheetFile}
@@ -102,6 +111,7 @@ export function CenterPane({
       return (
         <DocxPreview
           activeFile={activeFile}
+          searchNavigationTarget={searchNavigationTarget}
           onSaveFile={onSaveTextFile}
           onRegisterSaveFileProvider={onRegisterSaveFileProvider}
           onSelectionContextChange={onSelectionContextChange}

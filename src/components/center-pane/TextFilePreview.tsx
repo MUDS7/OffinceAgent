@@ -7,12 +7,14 @@ import type {
   DocumentSelectionContext,
   PendingTextRestore,
   PreviewFile,
+  SearchNavigationTarget,
 } from "./types";
 
 type TextFilePreviewProps = {
   activeFile: PreviewFile;
   pendingAgentTextEdit: AgentTextEditResult | null;
   pendingTextRestore: PendingTextRestore | null;
+  searchNavigationTarget: SearchNavigationTarget | null;
   unsavedText?: string;
   onAgentTextEditApplied: (change: AppliedAgentTextEditChange) => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
@@ -57,6 +59,7 @@ export function TextFilePreview({
   activeFile,
   pendingAgentTextEdit,
   pendingTextRestore,
+  searchNavigationTarget,
   unsavedText,
   onAgentTextEditApplied,
   onSelectionContextChange,
@@ -290,6 +293,36 @@ export function TextFilePreview({
       editor.setSelectionRange(0, 0);
     });
   }, [pendingTextRestore?.id]);
+
+  useEffect(() => {
+    if (!searchNavigationTarget || textPreview.fileId !== activeFile.id) return;
+    if (textPreview.isLoading || textPreview.error) return;
+
+    const match = findSearchNavigationMatch(textPreview.text, searchNavigationTarget);
+    if (!match) return;
+
+    setCollapsedJsonFoldIds(new Set());
+    setTextSelectionHighlight({ start: match.start, end: match.end, text: textPreview.text.slice(match.start, match.end) });
+    onSelectionContextChange({
+      fileId: activeFile.id,
+      filePath: activeFile.diskPath ?? activeFile.filename,
+      filename: activeFile.filename,
+      sourceType: "text",
+      start: match.start,
+      end: match.end,
+      text: textPreview.text.slice(match.start, match.end),
+    });
+
+    window.requestAnimationFrame(() => {
+      const editor = textEditorRef.current;
+      if (!editor) return;
+
+      editor.focus();
+      editor.setSelectionRange(match.start, match.end);
+      const lineIndex = textPreview.text.slice(0, match.start).split("\n").length - 1;
+      editor.scrollTop = Math.max(0, lineIndex * getEditorLineHeight(editor) - editor.clientHeight * 0.32);
+    });
+  }, [searchNavigationTarget?.id, textPreview.fileId, textPreview.isLoading, textPreview.error]);
 
   if (textPreview.isLoading && textPreview.fileId === activeFile.id) {
     return (
@@ -918,4 +951,33 @@ function clampTextOffset(offset: number, textLength: number) {
 
 function normalizeEditorLineEndings(text: string) {
   return text.replace(/\r\n?/g, "\n");
+}
+
+function findSearchNavigationMatch(text: string, target: SearchNavigationTarget) {
+  const query = target.query.trim();
+  const haystack = text.toLowerCase();
+  const normalizedQuery = query.toLowerCase();
+  const queryIndex = normalizedQuery ? haystack.indexOf(normalizedQuery) : -1;
+  if (queryIndex !== -1) {
+    return { start: queryIndex, end: queryIndex + query.length };
+  }
+
+  const snippet = target.text.trim();
+  if (!snippet) return null;
+
+  const firstLine = snippet
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return null;
+
+  const snippetIndex = haystack.indexOf(firstLine.toLowerCase());
+  if (snippetIndex === -1) return null;
+
+  return { start: snippetIndex, end: snippetIndex + firstLine.length };
+}
+
+function getEditorLineHeight(editor: HTMLElement) {
+  const value = Number.parseFloat(window.getComputedStyle(editor).lineHeight);
+  return Number.isFinite(value) && value > 0 ? value : 24;
 }
