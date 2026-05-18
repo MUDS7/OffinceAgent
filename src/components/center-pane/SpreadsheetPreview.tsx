@@ -1,8 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, Check, RefreshCw, XCircle } from "lucide-react";
-import type { CSSProperties } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  BooleanNumber,
+  CellValueType,
+  LocaleType,
+  VerticalAlign,
+  createUniver,
+  defaultTheme,
+} from "@univerjs/presets";
+import type { ICellData, IRange, IWorkbookData, IWorksheetData } from "@univerjs/presets";
+import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
+import zhCN from "@univerjs/preset-sheets-core/locales/zh-CN";
+import sheetsWorkerUrl from "@univerjs/preset-sheets-core/lib/worker.js?url";
+import "@univerjs/preset-sheets-core/lib/index.css";
+import { RefreshCw, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
 import type { DocumentIndexRequest, DocumentIndexResult } from "../../types";
 import { normalizeFilePath } from "../../utils/fileUtils";
@@ -16,32 +27,18 @@ type SpreadsheetPreviewProps = {
   onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
 };
 
+type SheetPreview = {
+  cells: SpreadsheetCell[];
+  name: string;
+  rangeLabel: string;
+};
+
 type SpreadsheetCell = {
   address: string;
   col: number;
   row: number;
   value: string;
 };
-
-type SheetPreview = {
-  columnIndexes: number[];
-  columns: string[];
-  isColumnLimited: boolean;
-  isRowLimited: boolean;
-  name: string;
-  rangeLabel: string;
-  rows: SpreadsheetCell[][];
-  rowStart: number;
-};
-
-type SelectionRange = {
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
-};
-
-type SizeMapBySheet = Record<string, Record<number, number>>;
 
 type SpreadsheetIndexBlock = {
   id: string;
@@ -66,15 +63,42 @@ type SpreadsheetIndexBlock = {
   }[];
 };
 
-const MAX_VISIBLE_ROWS = 800;
-const MAX_VISIBLE_COLUMNS = 120;
+type UniverRuntime = ReturnType<typeof createUniver>;
+type UniverApi = UniverRuntime["univerAPI"];
+type UniverWorkbook = NonNullable<ReturnType<UniverApi["getActiveWorkbook"]>>;
+
 const DEFAULT_COLUMN_WIDTH = 132;
 const DEFAULT_ROW_HEIGHT = 28;
-const MIN_COLUMN_WIDTH = 48;
-const MAX_COLUMN_WIDTH = 520;
-const MIN_ROW_HEIGHT = 22;
-const MAX_ROW_HEIGHT = 180;
-const UI_SCALE_FALLBACK = 0.8;
+const DEFAULT_ROW_COUNT = 100;
+const DEFAULT_COLUMN_COUNT = 26;
+const MAX_SELECTION_CONTEXT_ROWS = 200;
+const MAX_SELECTION_CONTEXT_COLUMNS = 80;
+const SAVE_DEBOUNCE_MS = 600;
+const SPREADSHEET_MUTATION_COMMAND_MARKERS = [
+  "set",
+  "insert",
+  "delete",
+  "remove",
+  "clear",
+  "paste",
+  "cut",
+  "move",
+  "rename",
+  "sheet.command",
+  "sheet.mutation",
+];
+const UNIVER_POINTER_EVENT_NAMES = [
+  "click",
+  "contextmenu",
+  "dblclick",
+  "mousedown",
+  "mousemove",
+  "mouseup",
+  "pointercancel",
+  "pointerdown",
+  "pointermove",
+  "pointerup",
+] as const;
 
 export function SpreadsheetPreview({
   activeFile,
@@ -83,10 +107,14 @@ export function SpreadsheetPreview({
   onSelectionContextChange,
   onUpdateSpreadsheetFile,
 }: SpreadsheetPreviewProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const fWorkbookRef = useRef<UniverWorkbook | null>(null);
   const lastPublishedFileRef = useRef<File | null>(null);
   const loadedFileIdRef = useRef("");
   const lastIndexSignatureRef = useRef("");
-  const gridShellRef = useRef<HTMLDivElement | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const runtimeDisposersRef = useRef<{ dispose: () => void }[]>([]);
+  const univerRuntimeRef = useRef<UniverRuntime | null>(null);
   const [previewState, setPreviewState] = useState<{
     error: string;
     isLoading: boolean;
@@ -100,43 +128,23 @@ export function SpreadsheetPreview({
     workbook: null,
     xlsx: null,
   });
-  const [activeSheetIndex, setActiveSheetIndex] = useState(0);
-  const [columnWidthsBySheet, setColumnWidthsBySheet] = useState<SizeMapBySheet>({});
-  const [rowHeightsBySheet, setRowHeightsBySheet] = useState<SizeMapBySheet>({});
-  const [selectionRange, setSelectionRange] = useState<SelectionRange | null>(null);
-  const [dragAnchor, setDragAnchor] = useState<{ row: number; col: number } | null>(null);
-  const [editingCell, setEditingCell] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ type: "col" | "row"; x: number; y: number; index: number } | null>(null);
-  const [insertLeftAmount, setInsertLeftAmount] = useState(1);
-  const [insertRightAmount, setInsertRightAmount] = useState(1);
-  const [insertTopAmount, setInsertTopAmount] = useState(1);
-  const [insertBottomAmount, setInsertBottomAmount] = useState(1);
-  const activeSheet = previewState.sheets[activeSheetIndex] ?? null;
-  const activeSheetKey = activeSheet?.name ?? "";
-  const activeColumnWidths = activeSheet ? columnWidthsBySheet[activeSheetKey] ?? {} : {};
-  const activeRowHeights = activeSheet ? rowHeightsBySheet[activeSheetKey] ?? {} : {};
-  const spreadsheetGridStyle = activeSheet
-    ? ({
-        width: getTableWidth(activeSheet),
-      } satisfies CSSProperties)
-    : undefined;
 
   useEffect(() => {
     if (loadedFileIdRef.current === activeFile.id && lastPublishedFileRef.current === activeFile.file) {
       return;
     }
 
+    const container = containerRef.current;
+    if (!container) return;
+    const univerContainer: HTMLElement = container;
+
     let isCancelled = false;
     loadedFileIdRef.current = activeFile.id;
     lastIndexSignatureRef.current = "";
 
+    disposeUniverRuntime();
     setPreviewState({ error: "", isLoading: true, sheets: [], workbook: null, xlsx: null });
-    setActiveSheetIndex(0);
-    setColumnWidthsBySheet({});
-    setRowHeightsBySheet({});
-    setSelectionRange(null);
     onSelectionContextChange(null);
-    setEditingCell(null);
 
     async function loadWorkbook() {
       try {
@@ -149,34 +157,43 @@ export function SpreadsheetPreview({
           buildSheetPreview(sheetName, workbook.Sheets[sheetName], XLSX),
         );
 
-        if (isCancelled) return;
-
-        if (sheets.length) {
-          const blocks = buildSpreadsheetIndexBlocks(workbook, XLSX);
-          const signature = JSON.stringify(blocks);
-          if (signature) {
-            const request: DocumentIndexRequest = {
-              document_id: getDocumentIndexId(activeFile),
-              filename: activeFile.filename,
-              path: activeFile.diskPath,
-              original_path: activeFile.diskPath,
-              stored_path: activeFile.diskPath,
-              extension: activeFile.filename.split(".").pop()?.toLowerCase() ?? "xlsx",
-              file_type: "spreadsheet",
-              size_bytes: activeFile.file.size,
-              parse_status: "parsed",
-              index_status: "indexed",
-              blocks,
-            };
-
-            await invoke<DocumentIndexResult>("index_document_structure", { request });
-            if (isCancelled) return;
-            lastIndexSignatureRef.current = signature;
-          }
+        if (!sheets.length) {
+          throw new Error("Workbook does not contain visible sheets.");
         }
 
+        await indexSpreadsheetWorkbook(activeFile, workbook, XLSX);
+        if (isCancelled) return;
+
+        const snapshot = buildUniverWorkbookData(activeFile, workbook, XLSX);
+        const runtime = createUniver({
+          theme: defaultTheme,
+          locale: LocaleType.ZH_CN,
+          locales: {
+            [LocaleType.ZH_CN]: zhCN,
+          },
+          presets: [
+            UniverSheetsCorePreset({
+              container: univerContainer,
+              workerURL: sheetsWorkerUrl,
+              header: false,
+              toolbar: true,
+              formulaBar: true,
+              disableAutoFocus: true,
+              sheets: {
+                disableForceStringAlert: true,
+                disableForceStringMark: true,
+              },
+            }),
+          ],
+        });
+        const fWorkbook = runtime.univerAPI.createWorkbook(snapshot);
+
+        univerRuntimeRef.current = runtime;
+        fWorkbookRef.current = fWorkbook;
+        bindUniverEvents(runtime.univerAPI, fWorkbook, XLSX);
+
         setPreviewState({
-          error: sheets.length ? "" : "Workbook does not contain visible sheets.",
+          error: "",
           isLoading: false,
           sheets,
           workbook,
@@ -185,6 +202,7 @@ export function SpreadsheetPreview({
       } catch (error) {
         if (isCancelled) return;
 
+        disposeUniverRuntime();
         setPreviewState({
           error: error instanceof Error ? error.message : String(error),
           isLoading: false,
@@ -203,112 +221,28 @@ export function SpreadsheetPreview({
   }, [activeFile.id, activeFile.file, onSelectionContextChange]);
 
   useEffect(() => {
-    setSelectionRange(null);
-    onSelectionContextChange(null);
-    setEditingCell(null);
-  }, [activeSheetIndex, onSelectionContextChange]);
-
-  useEffect(() => {
-    if (
-      previewState.isLoading ||
-      previewState.error ||
-      !previewState.sheets.length ||
-      !previewState.workbook ||
-      !previewState.xlsx
-    ) {
-      return;
-    }
-
-    const blocks = buildSpreadsheetIndexBlocks(previewState.workbook, previewState.xlsx);
-    const signature = JSON.stringify(blocks);
-    if (!signature || signature === lastIndexSignatureRef.current) return;
-
-    const request: DocumentIndexRequest = {
-      document_id: getDocumentIndexId(activeFile),
-      filename: activeFile.filename,
-      path: activeFile.diskPath,
-      original_path: activeFile.diskPath,
-      stored_path: activeFile.diskPath,
-      extension: activeFile.filename.split(".").pop()?.toLowerCase() ?? "xlsx",
-      file_type: "spreadsheet",
-      size_bytes: activeFile.file.size,
-      parse_status: "parsed",
-      index_status: "indexed",
-      blocks,
-    };
-
-    void invoke<DocumentIndexResult>("index_document_structure", { request })
-      .then(() => {
-        lastIndexSignatureRef.current = signature;
-      })
-      .catch((error) => {
-        console.warn("Failed to index spreadsheet structure:", error);
-      });
-  }, [
-    activeFile.diskPath,
-    activeFile.file.size,
-    activeFile.filename,
-    activeFile.id,
-    previewState.error,
-    previewState.isLoading,
-    previewState.workbook,
-    previewState.sheets,
-    previewState.xlsx,
-  ]);
-
-  useEffect(() => {
-    if (!selectionRange || !activeSheet) return;
-
-    onSelectionContextChange({
-      fileId: activeFile.id,
-      filePath: activeFile.diskPath ?? activeFile.filename,
-      filename: activeFile.filename,
-      sourceType: "spreadsheet",
-      text: getSelectionContextText(activeSheet, selectionRange),
-    });
-  }, [activeFile.diskPath, activeFile.filename, activeFile.id, activeSheet, onSelectionContextChange, selectionRange]);
-
-  useEffect(() => {
     if (!searchNavigationTarget || previewState.isLoading || previewState.error) return;
 
     const target = findSpreadsheetSearchTarget(previewState.sheets, searchNavigationTarget);
     if (!target) return;
 
-    setActiveSheetIndex(target.sheetIndex);
-    setSelectionRange({
-      startRow: target.row,
-      startCol: target.col,
-      endRow: target.row,
-      endCol: target.col,
-    });
-    setEditingCell(null);
+    const fWorkbook = fWorkbookRef.current;
+    const fWorksheet = fWorkbook?.getSheetByName(target.sheetName);
+    if (!fWorkbook || !fWorksheet) return;
 
-    window.requestAnimationFrame(() => {
-      const cell = gridShellRef.current?.querySelector<HTMLElement>(`.spreadsheet-cell[data-address="${target.address}"]`);
-      cell?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
-      cell?.classList.add("search-jump-highlight");
-      window.setTimeout(() => cell?.classList.remove("search-jump-highlight"), 1600);
-    });
-  }, [searchNavigationTarget?.id, previewState.isLoading, previewState.error, previewState.sheets]);
-
-  useEffect(() => {
-    function stopDrag() {
-      setDragAnchor(null);
+    fWorkbook.setActiveSheet(fWorksheet);
+    const range = fWorksheet.getRange(target.row, target.col);
+    fWorksheet.setActiveSelection(range);
+    if ("scrollToCell" in fWorksheet && typeof fWorksheet.scrollToCell === "function") {
+      fWorksheet.scrollToCell(target.row, target.col);
     }
-
-    window.addEventListener("pointerup", stopDrag);
-    window.addEventListener("pointercancel", stopDrag);
-
-    return () => {
-      window.removeEventListener("pointerup", stopDrag);
-      window.removeEventListener("pointercancel", stopDrag);
-    };
-  }, []);
+  }, [searchNavigationTarget?.id, previewState.error, previewState.isLoading, previewState.sheets]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
+        publishCurrentUniverWorkbook();
         onSaveFile(activeFile.id);
       }
     }
@@ -319,568 +253,113 @@ export function SpreadsheetPreview({
     };
   }, [activeFile.id, onSaveFile]);
 
-  const normalizedSelection = useMemo(
-    () => (selectionRange ? normalizeSelectionRange(selectionRange) : null),
-    [selectionRange],
-  );
+  useEffect(() => {
+    return () => {
+      disposeUniverRuntime();
+    };
+  }, []);
 
-  if (previewState.isLoading) {
-    return (
-      <div className="editor-content preview-empty">
-        <RefreshCw className="spin" size={26} />
-        <span>Opening spreadsheet...</span>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const host = containerRef.current;
+    if (!host) return;
 
-  if (previewState.error) {
-    return (
-      <div className="editor-content preview-empty">
-        <XCircle size={28} />
-        <span>{previewState.error}</span>
-      </div>
-    );
-  }
+    for (const eventName of UNIVER_POINTER_EVENT_NAMES) {
+      host.addEventListener(eventName, patchUniverEventOffset, { capture: true });
+    }
+
+    return () => {
+      for (const eventName of UNIVER_POINTER_EVENT_NAMES) {
+        host.removeEventListener(eventName, patchUniverEventOffset, { capture: true });
+      }
+    };
+  }, []);
 
   return (
     <div className="editor-content spreadsheet-preview">
-      <div className="spreadsheet-toolbar" aria-label="Workbook sheets">
-        <div className="spreadsheet-sheet-tabs" role="tablist" aria-label="Sheets">
-          {previewState.sheets.map((sheet, index) => (
-            <button
-              className={index === activeSheetIndex ? "spreadsheet-sheet-tab active" : "spreadsheet-sheet-tab"}
-              type="button"
-              role="tab"
-              aria-selected={index === activeSheetIndex}
-              key={`${sheet.name}-${index}`}
-              onClick={() => setActiveSheetIndex(index)}
-            >
-              {sheet.name}
-            </button>
-          ))}
-        </div>
-        {activeSheet ? (
-          <div className="spreadsheet-range-summary">
-            {normalizedSelection ? getRangeLabel(activeSheet, normalizedSelection) : activeSheet.rangeLabel}
-          </div>
-        ) : null}
-      </div>
+      <div ref={containerRef} className="univer-spreadsheet-host" />
 
-      {activeSheet?.isRowLimited || activeSheet?.isColumnLimited ? (
-        <div className="spreadsheet-limit-note">
-          <AlertTriangle size={15} />
-          <span>
-            Preview limited to {MAX_VISIBLE_ROWS} rows and {MAX_VISIBLE_COLUMNS} columns.
-          </span>
+      {previewState.isLoading ? (
+        <div className="spreadsheet-preview-overlay preview-empty">
+          <RefreshCw className="spin" size={26} />
+          <span>Opening spreadsheet...</span>
         </div>
       ) : null}
 
-      <div
-        ref={gridShellRef}
-        className="spreadsheet-grid-shell"
-        onPointerDown={(event) => {
-          if (
-            event.target instanceof Element &&
-            event.target.closest(".spreadsheet-cell, .spreadsheet-column-header, .spreadsheet-row-header")
-          ) {
-            return;
-          }
-          setSelectionRange(null);
-          onSelectionContextChange(null);
-          setEditingCell(null);
-        }}
-      >
-        <table className="spreadsheet-grid" style={spreadsheetGridStyle}>
-          <colgroup>
-            <col className="spreadsheet-row-header-col" />
-            {activeSheet?.columnIndexes.map((col) => (
-              <col key={col} style={getColumnStyle(col)} />
-            ))}
-          </colgroup>
-          <thead>
-            <tr>
-              <th className="spreadsheet-corner" scope="col" />
-              {activeSheet?.columns.map((column, index) => (
-                <th
-                  className="spreadsheet-column-header"
-                  scope="col"
-                  key={column}
-                  style={getColumnStyle(activeSheet.columnIndexes[index])}
-                  onPointerDown={(event) => handleColumnHeaderPointerDown(index, event)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setContextMenu({
-                      type: "col",
-                      x: event.clientX / getUiScale(),
-                      y: event.clientY / getUiScale(),
-                      index: activeSheet.columnIndexes[index],
-                    });
-                  }}
-                >
-                  {column}
-                  <span
-                    className="spreadsheet-column-resizer"
-                    role="separator"
-                    aria-orientation="vertical"
-                    aria-label={`Resize column ${column}`}
-                    onPointerDown={(event) => startColumnResize(activeSheet.columnIndexes[index], event)}
-                  />
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {activeSheet?.rows.map((row, rowIndex) => (
-              <tr key={activeSheet.rowStart + rowIndex}>
-                <th
-                  className="spreadsheet-row-header"
-                  scope="row"
-                  style={{ height: getRowHeight(activeSheet.rowStart + rowIndex) }}
-                  onPointerDown={(event) => handleRowHeaderPointerDown(rowIndex, event)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setContextMenu({
-                      type: "row",
-                      x: event.clientX / getUiScale(),
-                      y: event.clientY / getUiScale(),
-                      index: activeSheet.rowStart + rowIndex,
-                    });
-                  }}
-                >
-                  {activeSheet.rowStart + rowIndex + 1}
-                  <span
-                    className="spreadsheet-row-resizer"
-                    role="separator"
-                    aria-orientation="horizontal"
-                    aria-label={`Resize row ${activeSheet.rowStart + rowIndex + 1}`}
-                    onPointerDown={(event) => startRowResize(activeSheet.rowStart + rowIndex, event)}
-                  />
-                </th>
-                {row.map((cell) => (
-                  <td
-                    className={
-                      normalizedSelection && isCellInSelection(cell, normalizedSelection)
-                        ? "spreadsheet-cell selected"
-                        : "spreadsheet-cell"
-                    }
-                    data-address={cell.address}
-                    key={cell.address}
-                    style={{
-                      height: getRowHeight(cell.row),
-                      ...getColumnStyle(cell.col),
-                    }}
-                    title={cell.value}
-                    onPointerDown={(event) => {
-                      if (event.target instanceof Element && event.target.closest(".spreadsheet-cell-input")) return;
-                      event.preventDefault();
-                      
-                      const isAlreadySelected =
-                        normalizedSelection &&
-                        normalizedSelection.startRow === cell.row &&
-                        normalizedSelection.startCol === cell.col &&
-                        normalizedSelection.endRow === cell.row &&
-                        normalizedSelection.endCol === cell.col;
-
-                      if (isAlreadySelected) {
-                        setEditingCell(cell.address);
-                      } else {
-                        setEditingCell(null);
-                        const nextRange = {
-                          startRow: cell.row,
-                          startCol: cell.col,
-                          endRow: cell.row,
-                          endCol: cell.col,
-                        };
-                        setDragAnchor({ row: cell.row, col: cell.col });
-                        setSelectionRange(nextRange);
-                      }
-                    }}
-                    onPointerEnter={() => {
-                      if (!dragAnchor) return;
-
-                      setEditingCell(null);
-                      setSelectionRange({
-                        startRow: dragAnchor.row,
-                        startCol: dragAnchor.col,
-                        endRow: cell.row,
-                        endCol: cell.col,
-                      });
-                    }}
-                  >
-                    <input
-                      className="spreadsheet-cell-input"
-                      aria-label={`${cell.address} cell value`}
-                      spellCheck={false}
-                      value={cell.value}
-                      readOnly={editingCell !== cell.address}
-                      tabIndex={-1}
-                      style={{ pointerEvents: editingCell === cell.address ? "auto" : "none" }}
-                      onChange={(event) => updateCellValue(cell, event.target.value)}
-                      onBlur={() => {
-                        if (editingCell === cell.address) {
-                          setEditingCell(null);
-                        }
-                      }}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      ref={(el) => {
-                        if (editingCell === cell.address && el && document.activeElement !== el) {
-                          el.focus();
-                        }
-                      }}
-                    />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {contextMenu && (
-        <>
-          <div
-            className="spreadsheet-context-menu-backdrop"
-            style={{ position: "fixed", inset: 0, zIndex: 999 }}
-            onPointerDown={() => setContextMenu(null)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu(null);
-            }}
-          />
-          <div
-            className="spreadsheet-context-menu"
-            style={{
-              position: "fixed",
-              left: contextMenu.x + 10,
-              top: contextMenu.y + 10,
-              zIndex: 1000,
-              backgroundColor: "var(--bg-surface, #ffffff)",
-              border: "1px solid var(--border-color, #e5e7eb)",
-              borderRadius: "8px",
-              padding: "6px",
-              boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "4px",
-              fontSize: "13px",
-              color: "var(--text-primary, #374151)",
-            }}
-          >
-            {contextMenu.type === "col" ? (
-              <>
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M14 4H18C18.5523 4 19 4.44772 19 5V19C19 19.5523 18.5523 20 18 20H14C13.4477 20 13 19.5523 13 19V5C13 4.44772 13.4477 4 14 4Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M16 4V20" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M6 4H10C10.5523 4 11 4.44772 11 5V9C11 9.5523 10.5523 10 10 10H6C5.4477 10 5 9.5523 5 9V5C5 4.44772 5.4477 4 6 4Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M8 12V20M8 20L5 17M8 20L11 17" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    <span style={{ userSelect: "none" }}>在左侧插入列(I)</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={insertLeftAmount}
-                      onChange={(e) => setInsertLeftAmount(Math.max(1, parseInt(e.target.value) || 1))}
-                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                    <button
-                      onClick={() => {
-                        handleInsertColumns(contextMenu.index, insertLeftAmount, "left");
-                        setContextMenu(null);
-                      }}
-                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
-                    >
-                      <Check size={18} strokeWidth={1.5} />
-                    </button>
-                  </div>
-                </div>
-                
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M6 4H10C10.5523 4 11 4.44772 11 5V19C11 19.5523 10.5523 20 10 20H6C5.4477 20 5 19.5523 5 19V5C5 4.44772 5.4477 4 6 4Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M8 4V20" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M14 4H18C18.5523 4 19 4.44772 19 5V9C19 9.5523 18.5523 10 18 10H14C13.4477 10 13 9.5523 13 9V5C13 4.44772 13.4477 4 14 4Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M16 12V20M16 20L13 17M16 20L19 17" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    <span style={{ userSelect: "none" }}>在右侧插入列(R)</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={insertRightAmount}
-                      onChange={(e) => setInsertRightAmount(Math.max(1, parseInt(e.target.value) || 1))}
-                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                    <button
-                      onClick={() => {
-                        handleInsertColumns(contextMenu.index, insertRightAmount, "right");
-                        setContextMenu(null);
-                      }}
-                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
-                    >
-                      <Check size={18} strokeWidth={1.5} />
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M4 14V18C4 18.5523 4.44772 19 5 19H19C19.5523 19 20 18.5523 20 18V14C20 13.4477 19.5523 13 19 13H5C4.44772 13 4 13.4477 4 14Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M4 16H20" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M4 6V10C4 10.5523 4.44772 11 5 11H9C9.5523 11 10 10.5523 10 10V6C10 5.4477 9.5523 5 9 5H5C4.44772 5 4 5.4477 4 6Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M12 8H20M20 8L17 5M20 8L17 11" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    <span style={{ userSelect: "none" }}>在上方插入行(A)</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={insertTopAmount}
-                      onChange={(e) => setInsertTopAmount(Math.max(1, parseInt(e.target.value) || 1))}
-                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                    <button
-                      onClick={() => {
-                        handleInsertRows(contextMenu.index, insertTopAmount, "above");
-                        setContextMenu(null);
-                      }}
-                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
-                    >
-                      <Check size={18} strokeWidth={1.5} />
-                    </button>
-                  </div>
-                </div>
-                
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "6px 8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "120px" }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M4 6V10C4 10.5523 4.44772 11 5 11H19C19.5523 11 20 10.5523 20 10V6C20 5.4477 19.5523 5 19 5H5C4.44772 5 4 5.4477 4 6Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M4 8H20" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M4 14V18C4 18.5523 4.44772 19 5 19H9C9.5523 19 10 18.5523 10 18V14C10 13.4477 9.5523 13 9 13H5C4.44772 13 4 13.4477 4 14Z" stroke="currentColor" strokeWidth="1.5"/>
-                      <path d="M12 16H20M20 16L17 13M20 16L17 19" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    <span style={{ userSelect: "none" }}>在下方插入行(B)</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={insertBottomAmount}
-                      onChange={(e) => setInsertBottomAmount(Math.max(1, parseInt(e.target.value) || 1))}
-                      style={{ width: "48px", height: "24px", borderRadius: "4px", border: "1px solid #d1d5db", textAlign: "center", outline: "none", color: "inherit", backgroundColor: "transparent" }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    />
-                    <button
-                      onClick={() => {
-                        handleInsertRows(contextMenu.index, insertBottomAmount, "below");
-                        setContextMenu(null);
-                      }}
-                      style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", color: "#6b7280", padding: 0 }}
-                    >
-                      <Check size={18} strokeWidth={1.5} />
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </>
-      )}
+      {previewState.error ? (
+        <div className="spreadsheet-preview-overlay preview-empty">
+          <XCircle size={28} />
+          <span>{previewState.error}</span>
+        </div>
+      ) : null}
     </div>
   );
 
-  function handleInsertColumns(targetColIndex: number, amount: number, direction: "left" | "right") {
-    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
-    const worksheet = previewState.workbook.Sheets[activeSheet.name];
-    if (!worksheet) return;
-
-    const insertAtCol = direction === "left" ? targetColIndex : targetColIndex + 1;
-    const newWorksheet: any = {};
-
-    for (const key in worksheet) {
-      if (key.startsWith("!")) {
-        newWorksheet[key] = worksheet[key];
-        continue;
-      }
-      const cellPos = previewState.xlsx.utils.decode_cell(key);
-      let newCol = cellPos.c;
-      if (cellPos.c >= insertAtCol) {
-        newCol += amount;
-      }
-      const newKey = previewState.xlsx.utils.encode_cell({ c: newCol, r: cellPos.r });
-      newWorksheet[newKey] = worksheet[key];
-    }
-
-    if (worksheet["!ref"]) {
-      const range = previewState.xlsx.utils.decode_range(worksheet["!ref"]);
-      const newRange = {
-        s: { c: range.s.c, r: range.s.r },
-        e: { c: range.e.c + amount, r: range.e.r },
-      };
-      newWorksheet["!ref"] = previewState.xlsx.utils.encode_range(newRange);
-    }
-
-    if (worksheet["!cols"]) {
-      const newCols = [];
-      for (let i = 0; i < worksheet["!cols"].length; i++) {
-        if (worksheet["!cols"][i]) {
-          if (i < insertAtCol) {
-            newCols[i] = worksheet["!cols"][i];
-          } else {
-            newCols[i + amount] = worksheet["!cols"][i];
-          }
+  function bindUniverEvents(
+    univerAPI: UniverApi,
+    fWorkbook: UniverWorkbook,
+    xlsx: typeof XLSXModule,
+  ) {
+    runtimeDisposersRef.current.push(
+      univerAPI.addEvent(univerAPI.Event.SelectionChanged, ({ worksheet, selections }) => {
+        const range = selections[0];
+        if (!range) {
+          onSelectionContextChange(null);
+          return;
         }
-      }
-      newWorksheet["!cols"] = newCols;
-    }
 
-    previewState.workbook.Sheets[activeSheet.name] = newWorksheet;
-    const nextSheet = buildSheetPreview(activeSheet.name, newWorksheet, previewState.xlsx);
+        onSelectionContextChange({
+          fileId: activeFile.id,
+          filePath: activeFile.diskPath ?? activeFile.filename,
+          filename: activeFile.filename,
+          sourceType: "spreadsheet",
+          text: getSelectionContextText(worksheet, range),
+        });
+      }),
+    );
 
-    setColumnWidthsBySheet((current) => {
-      const sheetWidths = current[activeSheet.name] || {};
-      const newSheetWidths: Record<number, number> = {};
-      for (const colStr in sheetWidths) {
-        const col = parseInt(colStr, 10);
-        if (col < insertAtCol) {
-          newSheetWidths[col] = sheetWidths[col];
-        } else {
-          newSheetWidths[col + amount] = sheetWidths[col];
-        }
-      }
-      return {
-        ...current,
-        [activeSheet.name]: newSheetWidths,
-      };
-    });
+    runtimeDisposersRef.current.push(
+      univerAPI.addEvent(univerAPI.Event.SheetEditEnded, ({ isConfirm }) => {
+        if (isConfirm) schedulePublishUniverWorkbook(fWorkbook, xlsx);
+      }),
+    );
 
-    setPreviewState((current) => ({
-      ...current,
-      sheets: current.sheets.map((s) => (s.name === activeSheet.name ? nextSheet : s)),
-    }));
-    
-    setSelectionRange(null);
-    setEditingCell(null);
-    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+    runtimeDisposersRef.current.push(
+      univerAPI.onCommandExecuted((commandInfo) => {
+        const commandId = String(commandInfo.id ?? "").toLowerCase();
+        if (commandId.includes("selection") || commandId.includes("scroll") || commandId.includes("focus")) return;
+        if (!SPREADSHEET_MUTATION_COMMAND_MARKERS.some((marker) => commandId.includes(marker))) return;
+
+        schedulePublishUniverWorkbook(fWorkbook, xlsx);
+      }),
+    );
   }
 
-  function handleInsertRows(targetRowIndex: number, amount: number, direction: "above" | "below") {
-    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
-    const worksheet = previewState.workbook.Sheets[activeSheet.name];
-    if (!worksheet) return;
-
-    const insertAtRow = direction === "above" ? targetRowIndex : targetRowIndex + 1;
-    const newWorksheet: any = {};
-
-    for (const key in worksheet) {
-      if (key.startsWith("!")) {
-        newWorksheet[key] = worksheet[key];
-        continue;
-      }
-      const cellPos = previewState.xlsx.utils.decode_cell(key);
-      let newRow = cellPos.r;
-      if (cellPos.r >= insertAtRow) {
-        newRow += amount;
-      }
-      const newKey = previewState.xlsx.utils.encode_cell({ c: cellPos.c, r: newRow });
-      newWorksheet[newKey] = worksheet[key];
+  function schedulePublishUniverWorkbook(fWorkbook: UniverWorkbook, xlsx: typeof XLSXModule) {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
     }
 
-    if (worksheet["!ref"]) {
-      const range = previewState.xlsx.utils.decode_range(worksheet["!ref"]);
-      const newRange = {
-        s: { c: range.s.c, r: range.s.r },
-        e: { c: range.e.c, r: range.e.r + amount },
-      };
-      newWorksheet["!ref"] = previewState.xlsx.utils.encode_range(newRange);
-    }
-
-    if (worksheet["!rows"]) {
-      const newRows = [];
-      for (let i = 0; i < worksheet["!rows"].length; i++) {
-        if (worksheet["!rows"][i]) {
-          if (i < insertAtRow) {
-            newRows[i] = worksheet["!rows"][i];
-          } else {
-            newRows[i + amount] = worksheet["!rows"][i];
-          }
-        }
-      }
-      newWorksheet["!rows"] = newRows;
-    }
-
-    previewState.workbook.Sheets[activeSheet.name] = newWorksheet;
-    const nextSheet = buildSheetPreview(activeSheet.name, newWorksheet, previewState.xlsx);
-
-    setRowHeightsBySheet((current) => {
-      const sheetHeights = current[activeSheet.name] || {};
-      const newSheetHeights: Record<number, number> = {};
-      for (const rowStr in sheetHeights) {
-        const row = parseInt(rowStr, 10);
-        if (row < insertAtRow) {
-          newSheetHeights[row] = sheetHeights[row];
-        } else {
-          newSheetHeights[row + amount] = sheetHeights[row];
-        }
-      }
-      return {
-        ...current,
-        [activeSheet.name]: newSheetHeights,
-      };
-    });
-
-    setPreviewState((current) => ({
-      ...current,
-      sheets: current.sheets.map((s) => (s.name === activeSheet.name ? nextSheet : s)),
-    }));
-    
-    setSelectionRange(null);
-    setEditingCell(null);
-    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      publishUniverWorkbook(fWorkbook, xlsx);
+    }, SAVE_DEBOUNCE_MS);
   }
 
-  function updateCellValue(cell: SpreadsheetCell, value: string) {
-    if (!activeSheet || !previewState.workbook || !previewState.xlsx) return;
+  function publishCurrentUniverWorkbook() {
+    const fWorkbook = fWorkbookRef.current;
+    const xlsx = previewState.xlsx;
+    if (!fWorkbook || !xlsx) return;
 
-    const worksheet = previewState.workbook.Sheets[activeSheet.name];
-    if (!worksheet) return;
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
 
-    setWorksheetCellValue(worksheet, cell.address, value, previewState.xlsx);
-
-    const nextSheets = previewState.sheets.map((sheet) => {
-      if (sheet.name !== activeSheet.name) return sheet;
-
-      return {
-        ...sheet,
-        rows: sheet.rows.map((row) =>
-          row.map((item) => (item.address === cell.address ? { ...item, value } : item)),
-        ),
-      };
-    });
-
-    setPreviewState((current) => ({
-      ...current,
-      sheets: nextSheets,
-    }));
-    publishWorkbookFile(previewState.workbook, previewState.xlsx);
+    publishUniverWorkbook(fWorkbook, xlsx);
   }
 
-  function publishWorkbookFile(workbook: XLSXModule.WorkBook, xlsx: typeof XLSXModule) {
+  function publishUniverWorkbook(fWorkbook: UniverWorkbook, xlsx: typeof XLSXModule) {
+    const workbook = buildSheetJsWorkbookFromUniver(fWorkbook.save(), xlsx);
     const bookType: XLSXModule.BookType = activeFile.filename.toLowerCase().endsWith(".xls") ? "xls" : "xlsx";
     const workbookBytes = xlsx.write(workbook, { bookType, type: "array" }) as ArrayBuffer;
     const nextFile = new File([workbookBytes], activeFile.filename, {
@@ -890,153 +369,337 @@ export function SpreadsheetPreview({
 
     lastPublishedFileRef.current = nextFile;
     onUpdateSpreadsheetFile(activeFile.id, nextFile);
-  }
 
-  function getColumnWidth(col: number) {
-    return activeColumnWidths[col] ?? DEFAULT_COLUMN_WIDTH;
-  }
-
-  function getColumnStyle(col: number): CSSProperties {
-    const width = getColumnWidth(col);
-
-    return {
-      maxWidth: width,
-      minWidth: width,
-      width,
-    };
-  }
-
-  function getTableWidth(sheet: SheetPreview) {
-    return 54 + sheet.columnIndexes.reduce((total, col) => total + getColumnWidth(col), 0);
-  }
-
-  function getRowHeight(row: number) {
-    return activeRowHeights[row] ?? DEFAULT_ROW_HEIGHT;
-  }
-
-  function startColumnResize(col: number, event: ReactPointerEvent<HTMLElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    if (!activeSheet) return;
-
-    setDragAnchor(null);
-    const startX = event.clientX;
-    const startWidth = getColumnWidth(col);
-    const sheetKey = activeSheet.name;
-
-    startResize("col-resize", (moveEvent) => {
-      const delta = (moveEvent.clientX - startX) / getUiScale();
-      const nextWidth = clampSize(startWidth + delta, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
-
-      setColumnWidthsBySheet((current) => ({
-        ...current,
-        [sheetKey]: {
-          ...(current[sheetKey] ?? {}),
-          [col]: nextWidth,
-        },
-      }));
+    const sheets = workbook.SheetNames.map((sheetName) => buildSheetPreview(sheetName, workbook.Sheets[sheetName], xlsx));
+    setPreviewState((current) => ({
+      ...current,
+      sheets,
+      workbook,
+    }));
+    void indexSpreadsheetWorkbook({ ...activeFile, file: nextFile }, workbook, xlsx).catch((error) => {
+      console.warn("Failed to index spreadsheet structure:", error);
     });
   }
 
-  function handleColumnHeaderPointerDown(index: number, event: ReactPointerEvent<HTMLTableCellElement>) {
-    if (event.button !== 0) return;
-    if (!(event.target instanceof Element)) return;
-    if (event.target.closest(".spreadsheet-column-resizer")) return;
-
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const edgeThreshold = 8;
-    const isNearRightEdge = event.clientX >= bounds.right - edgeThreshold;
-    const isNearLeftEdge = event.clientX <= bounds.left + edgeThreshold;
-
-    if (isNearRightEdge) {
-      startColumnResize(activeSheet.columnIndexes[index], event);
-      return;
+  function disposeUniverRuntime() {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
 
-    if (isNearLeftEdge && index > 0) {
-      startColumnResize(activeSheet.columnIndexes[index - 1], event);
-      return;
+    for (const disposer of runtimeDisposersRef.current) {
+      disposer.dispose();
     }
+    runtimeDisposersRef.current = [];
 
-    if (activeSheet) {
-      const col = activeSheet.columnIndexes[index];
-      setEditingCell(null);
-      setDragAnchor(null);
-      setSelectionRange({
-        startRow: activeSheet.rowStart,
-        startCol: col,
-        endRow: activeSheet.rowStart + activeSheet.rows.length - 1,
-        endCol: col,
+    fWorkbookRef.current = null;
+    univerRuntimeRef.current?.univer.dispose();
+    univerRuntimeRef.current = null;
+
+    if (containerRef.current) {
+      containerRef.current.replaceChildren();
+    }
+  }
+
+  function patchUniverEventOffset(event: Event) {
+    if (!(event instanceof MouseEvent)) return;
+
+    const scale = getUiScale();
+    if (Math.abs(scale - 1) < 0.001) return;
+
+    const target = event.target instanceof Element ? event.target : containerRef.current;
+    const targetRect = target?.getBoundingClientRect();
+    if (!targetRect) return;
+
+    const offsetX = (event.clientX - targetRect.left) / scale;
+    const offsetY = (event.clientY - targetRect.top) / scale;
+
+    try {
+      Object.defineProperties(event, {
+        offsetX: {
+          configurable: true,
+          get: () => offsetX,
+        },
+        offsetY: {
+          configurable: true,
+          get: () => offsetY,
+        },
       });
+    } catch {
+      // Some embedded runtimes may make MouseEvent offsets non-configurable.
+      // In that case Univer falls back to the browser-provided coordinates.
     }
   }
 
-  function handleRowHeaderPointerDown(rowIndex: number, event: ReactPointerEvent<HTMLTableCellElement>) {
-    if (event.button !== 0) return;
-    if (!(event.target instanceof Element)) return;
-    if (event.target.closest(".spreadsheet-row-resizer")) return;
+  async function indexSpreadsheetWorkbook(
+    file: PreviewFile,
+    workbook: XLSXModule.WorkBook,
+    xlsx: typeof XLSXModule,
+  ) {
+    const blocks = buildSpreadsheetIndexBlocks(workbook, xlsx);
+    const signature = JSON.stringify(blocks);
+    if (!signature || signature === lastIndexSignatureRef.current) return;
 
-    if (!activeSheet) return;
+    const request: DocumentIndexRequest = {
+      document_id: getDocumentIndexId(file),
+      filename: file.filename,
+      path: file.diskPath,
+      original_path: file.diskPath,
+      stored_path: file.diskPath,
+      extension: file.filename.split(".").pop()?.toLowerCase() ?? "xlsx",
+      file_type: "spreadsheet",
+      size_bytes: file.file.size,
+      parse_status: "parsed",
+      index_status: "indexed",
+      blocks,
+    };
 
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const edgeThreshold = 8;
-    const isNearBottomEdge = event.clientY >= bounds.bottom - edgeThreshold;
-    const isNearTopEdge = event.clientY <= bounds.top + edgeThreshold;
-
-    const actualRow = activeSheet.rowStart + rowIndex;
-
-    if (isNearBottomEdge) {
-      startRowResize(actualRow, event);
-      return;
-    }
-
-    if (isNearTopEdge && rowIndex > 0) {
-      startRowResize(actualRow - 1, event);
-      return;
-    }
-
-    setEditingCell(null);
-    setDragAnchor(null);
-    const startCol = activeSheet.columnIndexes[0];
-    const endCol = activeSheet.columnIndexes[activeSheet.columnIndexes.length - 1];
-
-    setSelectionRange({
-      startRow: actualRow,
-      startCol: startCol,
-      endRow: actualRow,
-      endCol: endCol,
-    });
-  }
-
-  function startRowResize(row: number, event: ReactPointerEvent<HTMLElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    if (!activeSheet) return;
-
-    setDragAnchor(null);
-    const startY = event.clientY;
-    const startHeight = getRowHeight(row);
-    const sheetKey = activeSheet.name;
-
-    startResize("row-resize", (moveEvent) => {
-      const delta = (moveEvent.clientY - startY) / getUiScale();
-      const nextHeight = clampSize(startHeight + delta, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT);
-
-      setRowHeightsBySheet((current) => ({
-        ...current,
-        [sheetKey]: {
-          ...(current[sheetKey] ?? {}),
-          [row]: nextHeight,
-        },
-      }));
-    });
+    await invoke<DocumentIndexResult>("index_document_structure", { request });
+    lastIndexSignatureRef.current = signature;
   }
 }
 
 function getDocumentIndexId(activeFile: PreviewFile) {
   return activeFile.diskPath ? `path:${normalizeFilePath(activeFile.diskPath).toLowerCase()}` : activeFile.id;
+}
+
+function buildUniverWorkbookData(
+  activeFile: PreviewFile,
+  workbook: XLSXModule.WorkBook,
+  xlsx: typeof XLSXModule,
+): IWorkbookData {
+  const sheetOrder = workbook.SheetNames.map((_, index) => `sheet-${index}`);
+  const sheets = workbook.SheetNames.reduce<Record<string, Partial<IWorksheetData>>>((result, sheetName, index) => {
+    const sheetId = sheetOrder[index];
+    result[sheetId] = buildUniverWorksheetData(sheetId, sheetName, workbook.Sheets[sheetName], xlsx);
+    return result;
+  }, {});
+
+  return {
+    id: `workbook-${safeIdentifier(activeFile.id)}`,
+    appVersion: "0.22.1",
+    locale: LocaleType.ZH_CN,
+    name: activeFile.filename,
+    sheetOrder,
+    sheets,
+    styles: {},
+    resources: [],
+  };
+}
+
+function buildUniverWorksheetData(
+  sheetId: string,
+  sheetName: string,
+  sheet: XLSXModule.WorkSheet | undefined,
+  xlsx: typeof XLSXModule,
+): Partial<IWorksheetData> {
+  const fallbackRange = xlsx.utils.decode_range("A1:A1");
+  const usedRange = sheet?.["!ref"] ? xlsx.utils.decode_range(sheet["!ref"]) : fallbackRange;
+  const cellData: IWorksheetData["cellData"] = {};
+
+  if (sheet) {
+    for (const address of Object.keys(sheet)) {
+      if (address.startsWith("!")) continue;
+
+      const point = xlsx.utils.decode_cell(address);
+      const cell = sheet[address] as XLSXModule.CellObject | undefined;
+      const univerCell = cell ? toUniverCell(cell, xlsx) : null;
+      if (!univerCell) continue;
+
+      cellData[point.r] = cellData[point.r] ?? {};
+      cellData[point.r][point.c] = univerCell;
+    }
+  }
+
+  return {
+    id: sheetId,
+    name: sheetName,
+    tabColor: "",
+    hidden: BooleanNumber.FALSE,
+    freeze: {
+      xSplit: 0,
+      ySplit: 0,
+      startRow: 0,
+      startColumn: 0,
+    },
+    rowCount: Math.max(usedRange.e.r + 1, DEFAULT_ROW_COUNT),
+    columnCount: Math.max(usedRange.e.c + 1, DEFAULT_COLUMN_COUNT),
+    zoomRatio: 1,
+    scrollTop: 0,
+    scrollLeft: 0,
+    defaultColumnWidth: DEFAULT_COLUMN_WIDTH,
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    defaultStyle: {
+      vt: VerticalAlign.MIDDLE,
+    },
+    mergeData: ((sheet?.["!merges"] ?? []) as XLSXModule.Range[]).map((merge) => ({
+      startRow: merge.s.r,
+      endRow: merge.e.r,
+      startColumn: merge.s.c,
+      endColumn: merge.e.c,
+    })),
+    cellData,
+    rowData: buildUniverRowData(sheet),
+    columnData: buildUniverColumnData(sheet),
+    rowHeader: {
+      width: 54,
+    },
+    columnHeader: {
+      height: 28,
+    },
+    showGridlines: BooleanNumber.TRUE,
+    rightToLeft: BooleanNumber.FALSE,
+  };
+}
+
+function toUniverCell(cell: XLSXModule.CellObject, xlsx: typeof XLSXModule): ICellData | null {
+  const formula = typeof cell.f === "string" && cell.f.trim() ? ensureFormulaEquals(cell.f) : undefined;
+  const formattedValue = xlsx.utils.format_cell(cell);
+  const value = getCellRawValue(cell, formattedValue);
+
+  if (value === null && !formula) return null;
+
+  return {
+    v: value ?? formattedValue,
+    t: getUniverCellValueType(value ?? formattedValue),
+    ...(formula ? { f: formula } : {}),
+  };
+}
+
+function getCellRawValue(cell: XLSXModule.CellObject, formattedValue: string) {
+  if (cell.v === undefined || cell.v === null) return formattedValue || null;
+  if (cell.v instanceof Date) return formattedValue || cell.v.toISOString();
+  if (typeof cell.v === "string" || typeof cell.v === "number" || typeof cell.v === "boolean") return cell.v;
+
+  return formattedValue || String(cell.v);
+}
+
+function getUniverCellValueType(value: string | number | boolean) {
+  if (typeof value === "number") return CellValueType.NUMBER;
+  if (typeof value === "boolean") return CellValueType.BOOLEAN;
+  return CellValueType.STRING;
+}
+
+function buildUniverRowData(sheet: XLSXModule.WorkSheet | undefined): IWorksheetData["rowData"] {
+  return ((sheet?.["!rows"] ?? []) as XLSXModule.RowInfo[]).reduce<IWorksheetData["rowData"]>((result, row, index) => {
+    if (!row) return result;
+
+    const height = row.hpx ?? (row.hpt ? Math.round(row.hpt * 1.333) : undefined);
+    if (height) result[index] = { h: height };
+    return result;
+  }, {});
+}
+
+function buildUniverColumnData(sheet: XLSXModule.WorkSheet | undefined): IWorksheetData["columnData"] {
+  return ((sheet?.["!cols"] ?? []) as XLSXModule.ColInfo[]).reduce<IWorksheetData["columnData"]>((result, column, index) => {
+    if (!column) return result;
+
+    const width = column.wpx ?? (column.wch ? Math.round(column.wch * 8) : undefined);
+    if (width) result[index] = { w: width };
+    return result;
+  }, {});
+}
+
+function buildSheetJsWorkbookFromUniver(
+  snapshot: IWorkbookData,
+  xlsx: typeof XLSXModule,
+): XLSXModule.WorkBook {
+  const workbook = xlsx.utils.book_new();
+
+  for (const sheetId of snapshot.sheetOrder) {
+    const sheet = snapshot.sheets[sheetId];
+    if (!sheet) continue;
+
+    const worksheet = buildSheetJsWorksheetFromUniver(sheet, xlsx);
+    xlsx.utils.book_append_sheet(workbook, worksheet, sheet.name || "Sheet");
+  }
+
+  return workbook;
+}
+
+function buildSheetJsWorksheetFromUniver(
+  sheet: Partial<IWorksheetData>,
+  xlsx: typeof XLSXModule,
+): XLSXModule.WorkSheet {
+  const worksheet: XLSXModule.WorkSheet = {};
+  let maxRow = 0;
+  let maxColumn = 0;
+
+  for (const [rowKey, row] of Object.entries(sheet.cellData ?? {})) {
+    const rowIndex = Number(rowKey);
+    if (!Number.isFinite(rowIndex) || !row) continue;
+
+    for (const [columnKey, cell] of Object.entries(row)) {
+      const columnIndex = Number(columnKey);
+      if (!Number.isFinite(columnIndex) || !cell) continue;
+
+      const sheetCell = toSheetJsCell(cell);
+      if (!sheetCell) continue;
+
+      const address = xlsx.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      worksheet[address] = sheetCell;
+      maxRow = Math.max(maxRow, rowIndex);
+      maxColumn = Math.max(maxColumn, columnIndex);
+    }
+  }
+
+  worksheet["!ref"] = xlsx.utils.encode_range({
+    s: { r: 0, c: 0 },
+    e: { r: Math.max(maxRow, 0), c: Math.max(maxColumn, 0) },
+  });
+
+  if (sheet.mergeData?.length) {
+    worksheet["!merges"] = sheet.mergeData.map((range) => ({
+      s: { r: range.startRow, c: range.startColumn },
+      e: { r: range.endRow, c: range.endColumn },
+    }));
+  }
+
+  const rows = buildSheetJsRowInfo(sheet.rowData);
+  if (rows.length) worksheet["!rows"] = rows;
+
+  const columns = buildSheetJsColumnInfo(sheet.columnData);
+  if (columns.length) worksheet["!cols"] = columns;
+
+  return worksheet;
+}
+
+function toSheetJsCell(cell: ICellData): XLSXModule.CellObject | null {
+  const value = cell.v;
+  const formula = typeof cell.f === "string" && cell.f.trim() ? cell.f.replace(/^=/, "") : undefined;
+
+  if (value === null || value === undefined) {
+    return formula ? ({ t: "n", f: formula } as XLSXModule.CellObject) : null;
+  }
+
+  if (typeof value === "number") return { t: "n", v: value, ...(formula ? { f: formula } : {}) };
+  if (typeof value === "boolean") return { t: "b", v: value, ...(formula ? { f: formula } : {}) };
+
+  return { t: "s", v: String(value), ...(formula ? { f: formula } : {}) };
+}
+
+function buildSheetJsRowInfo(rowData: Partial<IWorksheetData["rowData"]> | undefined): XLSXModule.RowInfo[] {
+  const rows: XLSXModule.RowInfo[] = [];
+
+  for (const [index, row] of Object.entries(rowData ?? {})) {
+    const rowIndex = Number(index);
+    if (!Number.isFinite(rowIndex) || !row?.h) continue;
+    rows[rowIndex] = { hpx: row.h };
+  }
+
+  return rows;
+}
+
+function buildSheetJsColumnInfo(columnData: Partial<IWorksheetData["columnData"]> | undefined): XLSXModule.ColInfo[] {
+  const columns: XLSXModule.ColInfo[] = [];
+
+  for (const [index, column] of Object.entries(columnData ?? {})) {
+    const columnIndex = Number(index);
+    if (!Number.isFinite(columnIndex) || !column?.w) continue;
+    columns[columnIndex] = { wpx: column.w };
+  }
+
+  return columns;
 }
 
 function buildSheetPreview(
@@ -1047,40 +710,25 @@ function buildSheetPreview(
   const fallbackRange = xlsx.utils.decode_range("A1:A1");
   const sheetRef = sheet?.["!ref"];
   const usedRange = sheetRef ? xlsx.utils.decode_range(sheetRef) : fallbackRange;
-  const rowCount = usedRange.e.r - usedRange.s.r + 1;
-  const columnCount = usedRange.e.c - usedRange.s.c + 1;
-  const visibleRowCount = Math.min(rowCount, MAX_VISIBLE_ROWS);
-  const visibleColumnCount = Math.min(columnCount, MAX_VISIBLE_COLUMNS);
-  const columnIndexes = Array.from({ length: visibleColumnCount }, (_, index) => usedRange.s.c + index);
-  const columns = Array.from({ length: visibleColumnCount }, (_, index) =>
-    encodeColumnLabel(usedRange.s.c + index),
-  );
-  const rows = Array.from({ length: visibleRowCount }, (_, rowIndex) => {
-    const row = usedRange.s.r + rowIndex;
-
-    return Array.from({ length: visibleColumnCount }, (_, colIndex) => {
-      const col = usedRange.s.c + colIndex;
-      const address = encodeCellAddress(row, col);
+  const cells = Object.keys(sheet ?? {})
+    .filter((address) => !address.startsWith("!"))
+    .map((address) => {
+      const point = xlsx.utils.decode_cell(address);
       const cell = sheet?.[address] as XLSXModule.CellObject | undefined;
 
       return {
         address,
-        col,
-        row,
+        col: point.c,
+        row: point.r,
         value: cell ? xlsx.utils.format_cell(cell) : "",
       };
-    });
-  });
+    })
+    .filter((cell) => cell.value.trim().length > 0);
 
   return {
-    columnIndexes,
-    columns,
-    isColumnLimited: columnCount > visibleColumnCount,
-    isRowLimited: rowCount > visibleRowCount,
+    cells,
     name,
     rangeLabel: `${encodeCellAddress(usedRange.s.r, usedRange.s.c)}:${encodeCellAddress(usedRange.e.r, usedRange.e.c)}`,
-    rows,
-    rowStart: usedRange.s.r,
   };
 }
 
@@ -1141,130 +789,36 @@ function buildSpreadsheetIndexBlocks(
   });
 }
 
-function setWorksheetCellValue(
-  sheet: XLSXModule.WorkSheet,
-  address: string,
-  value: string,
-  xlsx: typeof XLSXModule,
-) {
-  const nextCell = createCellObject(value);
+function getSelectionContextText(worksheet: { getSheetName: () => string; getRange: (...args: [number, number, number, number]) => { getDisplayValues: () => string[][] } }, range: IRange) {
+  const normalizedRange = normalizeUniverRange(range);
+  const rowCount = Math.min(normalizedRange.endRow - normalizedRange.startRow + 1, MAX_SELECTION_CONTEXT_ROWS);
+  const columnCount = Math.min(normalizedRange.endColumn - normalizedRange.startColumn + 1, MAX_SELECTION_CONTEXT_COLUMNS);
+  const values = worksheet
+    .getRange(normalizedRange.startRow, normalizedRange.startColumn, rowCount, columnCount)
+    .getDisplayValues();
+  const selectedRows = values.map((row) => row.join("\t")).filter((rowText) => rowText.trim().length > 0);
+  const rangeLabel = buildRangeLabel(worksheet.getSheetName(), normalizedRange);
 
-  if (nextCell) {
-    sheet[address] = nextCell;
-  } else {
-    delete sheet[address];
-  }
-
-  const point = xlsx.utils.decode_cell(address);
-  const currentRange = sheet["!ref"]
-    ? xlsx.utils.decode_range(sheet["!ref"])
-    : { s: { r: point.r, c: point.c }, e: { r: point.r, c: point.c } };
-
-  sheet["!ref"] = xlsx.utils.encode_range({
-    s: {
-      r: Math.min(currentRange.s.r, point.r),
-      c: Math.min(currentRange.s.c, point.c),
-    },
-    e: {
-      r: Math.max(currentRange.e.r, point.r),
-      c: Math.max(currentRange.e.c, point.c),
-    },
-  });
-}
-
-function createCellObject(value: string): XLSXModule.CellObject | null {
-  if (!value.trim()) return null;
-
-  const trimmedValue = value.trim();
-  if (/^(true|false)$/i.test(trimmedValue)) {
-    return { t: "b", v: /^true$/i.test(trimmedValue) };
-  }
-
-  if (/^[+-]?(?:\d+|\d*\.\d+)(?:e[+-]?\d+)?$/i.test(trimmedValue)) {
-    const numericValue = Number(trimmedValue);
-    if (Number.isFinite(numericValue)) {
-      return { t: "n", v: numericValue };
-    }
-  }
-
-  return { t: "s", v: value };
-}
-
-function startResize(cursorClass: "col-resize" | "row-resize", onMove: (event: PointerEvent) => void) {
-  document.body.classList.add("is-resizing-spreadsheet", cursorClass);
-
-  function handlePointerMove(event: PointerEvent) {
-    onMove(event);
-  }
-
-  function stopResize() {
-    document.body.classList.remove("is-resizing-spreadsheet", cursorClass);
-    window.removeEventListener("pointermove", handlePointerMove);
-    window.removeEventListener("pointerup", stopResize);
-    window.removeEventListener("pointercancel", stopResize);
-  }
-
-  window.addEventListener("pointermove", handlePointerMove);
-  window.addEventListener("pointerup", stopResize);
-  window.addEventListener("pointercancel", stopResize);
-}
-
-function clampSize(value: number, min: number, max: number) {
-  if (!Number.isFinite(value)) return min;
-
-  return Math.min(Math.max(Math.round(value), min), max);
-}
-
-function getUiScale() {
-  const rawScale = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-  const scale = Number.parseFloat(rawScale);
-
-  return Number.isFinite(scale) && scale > 0 ? scale : UI_SCALE_FALLBACK;
-}
-
-function normalizeSelectionRange(range: SelectionRange): SelectionRange {
-  return {
-    startRow: Math.min(range.startRow, range.endRow),
-    startCol: Math.min(range.startCol, range.endCol),
-    endRow: Math.max(range.startRow, range.endRow),
-    endCol: Math.max(range.startCol, range.endCol),
-  };
-}
-
-function isCellInSelection(cell: SpreadsheetCell, range: SelectionRange) {
-  return cell.row >= range.startRow && cell.row <= range.endRow && cell.col >= range.startCol && cell.col <= range.endCol;
-}
-
-function getSelectionContextText(sheet: SheetPreview, range: SelectionRange) {
-  const normalizedRange = normalizeSelectionRange(range);
-  const selectedRows = sheet.rows
-    .map((row) =>
-      row
-        .filter((cell) => isCellInSelection(cell, normalizedRange))
-        .map((cell) => cell.value)
-        .join("\t"),
-    )
-    .filter((rowText, index) => {
-      const absoluteRow = sheet.rowStart + index;
-      return absoluteRow >= normalizedRange.startRow && absoluteRow <= normalizedRange.endRow && rowText.trim().length > 0;
-    });
-
-  return [
-    `Sheet: ${sheet.name}`,
-    `Range: ${getRangeLabel(sheet, normalizedRange)}`,
-    "",
-    selectedRows.join("\n"),
-  ]
+  return [`Sheet: ${worksheet.getSheetName()}`, `Range: ${rangeLabel}`, "", selectedRows.join("\n")]
     .join("\n")
     .trim();
 }
 
-function getRangeLabel(sheet: SheetPreview, range: SelectionRange) {
-  const start = encodeCellAddress(range.startRow, range.startCol);
-  const end = encodeCellAddress(range.endRow, range.endCol);
+function normalizeUniverRange(range: IRange): Required<Pick<IRange, "startRow" | "startColumn" | "endRow" | "endColumn">> {
+  return {
+    startRow: Math.min(range.startRow, range.endRow),
+    startColumn: Math.min(range.startColumn, range.endColumn),
+    endRow: Math.max(range.startRow, range.endRow),
+    endColumn: Math.max(range.startColumn, range.endColumn),
+  };
+}
+
+function buildRangeLabel(sheetName: string, range: Required<Pick<IRange, "startRow" | "startColumn" | "endRow" | "endColumn">>) {
+  const start = encodeCellAddress(range.startRow, range.startColumn);
+  const end = encodeCellAddress(range.endRow, range.endColumn);
   const address = start === end ? start : `${start}:${end}`;
 
-  return `${sheet.name}!${address}`;
+  return `${sheetName}!${address}`;
 }
 
 function encodeCellAddress(row: number, col: number) {
@@ -1294,12 +848,10 @@ function findSpreadsheetSearchTarget(sheets: SheetPreview[], target: SearchNavig
     if (hit) return hit;
   }
 
-  for (const [sheetIndex, sheet] of sheets.entries()) {
-    for (const row of sheet.rows) {
-      for (const cell of row) {
-        if (query && cell.value.toLowerCase().includes(query)) {
-          return { sheetIndex, row: cell.row, col: cell.col, address: cell.address };
-        }
+  for (const sheet of sheets) {
+    for (const cell of sheet.cells) {
+      if (query && cell.value.toLowerCase().includes(query)) {
+        return { sheetName: sheet.name, row: cell.row, col: cell.col, address: cell.address };
       }
     }
   }
@@ -1317,11 +869,9 @@ function getMetadataCellAddresses(metadata: Record<string, unknown> | null) {
 }
 
 function findSpreadsheetAddress(sheets: SheetPreview[], address: string) {
-  for (const [sheetIndex, sheet] of sheets.entries()) {
-    for (const row of sheet.rows) {
-      const cell = row.find((item) => item.address === address);
-      if (cell) return { sheetIndex, row: cell.row, col: cell.col, address: cell.address };
-    }
+  for (const sheet of sheets) {
+    const cell = sheet.cells.find((item) => item.address === address);
+    if (cell) return { sheetName: sheet.name, row: cell.row, col: cell.col, address: cell.address };
   }
 
   return null;
@@ -1335,4 +885,19 @@ function parseSearchMetadata(metadataJson: string | undefined) {
   } catch {
     return null;
   }
+}
+
+function ensureFormulaEquals(formula: string) {
+  return formula.startsWith("=") ? formula : `=${formula}`;
+}
+
+function safeIdentifier(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "-") || "workbook";
+}
+
+function getUiScale() {
+  const rawScale = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+  const scale = Number.parseFloat(rawScale);
+
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
 }
