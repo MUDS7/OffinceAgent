@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { renderAsync } from "docx-preview";
 import { AlertTriangle, FileText, RefreshCw, XCircle } from "lucide-react";
 import {
   type ClipboardEvent as ReactClipboardEvent,
@@ -80,6 +81,21 @@ const INDEX_DEBOUNCE_MS = 800;
 const EMU_PER_PIXEL = 9525;
 const NATIVE_SELECTION_PUBLISH_LOCK_MS = 160;
 const TRAILING_LINE_BREAK_MARKER = "\u200b";
+const DOCX_PREVIEW_RENDER_OPTIONS = {
+  breakPages: true,
+  className: "docx-renderer",
+  experimental: true,
+  ignoreFonts: false,
+  ignoreHeight: false,
+  ignoreLastRenderedPageBreak: true,
+  ignoreWidth: false,
+  inWrapper: true,
+  renderEndnotes: true,
+  renderFooters: true,
+  renderFootnotes: true,
+  renderHeaders: true,
+  useBase64URL: true,
+};
 
 export function DocxPreview({
   activeFile,
@@ -103,6 +119,11 @@ export function DocxPreview({
     focus: DocxTextRangePosition;
   } | null>(null);
   const docxPreviewRef = useRef<HTMLDivElement | null>(null);
+  const docxPreviewRenderTokenRef = useRef(0);
+  const docxRenderedDocumentRef = useRef<HTMLDivElement | null>(null);
+  const docxRenderedStyleRef = useRef<HTMLDivElement | null>(null);
+  const docxPageShellRef = useRef<HTMLDivElement | null>(null);
+  const renderedDocumentSyncTimeoutRef = useRef<number | null>(null);
   const isPointerSelectingRef = useRef(false);
   const nativeSelectionPublishLockUntilRef = useRef(0);
   const textElementRefs = useRef(new Map<string, HTMLElement>());
@@ -119,6 +140,7 @@ export function DocxPreview({
     renderError: "",
     warnings: [],
   });
+  const [previewRenderError, setPreviewRenderError] = useState("");
   const [selectedTarget, setSelectedTarget] = useState<SelectedDocxTarget | null>(null);
   const [persistedTextSelection, setPersistedTextSelection] = useState<PersistedDocxTextSelection | null>(null);
   const documentText = useMemo(() => getDocumentText(state.blocks), [state.blocks]);
@@ -147,6 +169,7 @@ export function DocxPreview({
     }
     blocksSourceFileRef.current = null;
     latestBlocksSignatureRef.current = "";
+    setPreviewRenderError("");
     setState({ blocks: [], error: "", isLoading: true, renderError: "", warnings: [] });
     setSelectedTarget(null);
     setPersistedTextSelection(null);
@@ -206,6 +229,46 @@ export function DocxPreview({
   }, [activeFile.id, activeFile.file, onSelectionContextChange]);
 
   useEffect(() => {
+    const bodyContainer = docxRenderedDocumentRef.current;
+    const styleContainer = docxRenderedStyleRef.current;
+    if (!bodyContainer || !styleContainer || state.isLoading || state.error) return;
+    const renderBodyContainer = bodyContainer;
+    const renderStyleContainer = styleContainer;
+
+    if (lastPublishedFileRef.current === activeFile.file && renderBodyContainer.childNodes.length > 0) {
+      setPreviewRenderError("");
+      return;
+    }
+
+    let isCancelled = false;
+    const renderToken = docxPreviewRenderTokenRef.current + 1;
+    docxPreviewRenderTokenRef.current = renderToken;
+    setPreviewRenderError("");
+
+    async function renderDocxPreview() {
+      try {
+        const detachedBody = document.createElement("div");
+        const detachedStyle = document.createElement("div");
+        await renderAsync(activeFile.file, detachedBody, detachedStyle, DOCX_PREVIEW_RENDER_OPTIONS);
+        if (isCancelled || docxPreviewRenderTokenRef.current !== renderToken) return;
+
+        renderBodyContainer.replaceChildren(...Array.from(detachedBody.childNodes));
+        renderStyleContainer.replaceChildren(...Array.from(detachedStyle.childNodes));
+      } catch (error) {
+        if (isCancelled || docxPreviewRenderTokenRef.current !== renderToken) return;
+
+        setPreviewRenderError(getErrorMessage(error));
+      }
+    }
+
+    void renderDocxPreview();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeFile.file, state.error, state.isLoading]);
+
+  useEffect(() => {
     if (state.isLoading || state.error) return;
 
     const signature = getBlocksSignature(state.blocks);
@@ -228,7 +291,6 @@ export function DocxPreview({
     if (!match) return;
 
     const element = textElementRefs.current.get(getTextTargetKey(match.target));
-    if (!element) return;
 
     const documentStart = getTextTargetOffset(match.target, match.start);
     const documentEnd = getTextTargetOffset(match.target, match.end);
@@ -259,6 +321,11 @@ export function DocxPreview({
     ]);
 
     window.requestAnimationFrame(() => {
+      if (!element) {
+        scrollRenderedDocumentToOffset(documentStart, match.text);
+        return;
+      }
+
       element.scrollIntoView({ block: "center", behavior: "smooth" });
       restoreTextSelection(element, match.start, match.end);
       element.classList.add("search-jump-highlight");
@@ -322,6 +389,14 @@ export function DocxPreview({
       return publishDocxFile(signature, blocks, { keepWhenNewer: true });
     });
   }, [activeFile.id, onRegisterSaveFileProvider, state.error, state.isLoading]);
+
+  useEffect(() => {
+    return () => {
+      if (renderedDocumentSyncTimeoutRef.current !== null) {
+        window.clearTimeout(renderedDocumentSyncTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     function handleSelectionChange() {
@@ -436,9 +511,11 @@ export function DocxPreview({
     );
   }
 
-  const warningMessages = state.renderError
-    ? [...state.warnings, `DOCX 自动生成失败：${state.renderError}`]
-    : state.warnings;
+  const warningMessages = [
+    ...state.warnings,
+    previewRenderError ? `DOCX preview render failed: ${previewRenderError}` : "",
+    state.renderError ? `DOCX 自动生成失败：${state.renderError}` : "",
+  ].filter(Boolean);
 
   return (
     <div
@@ -466,22 +543,28 @@ export function DocxPreview({
 
       <div
         className="docx-page-shell"
+        ref={docxPageShellRef}
         onPointerDown={(event) => {
-          if (event.target instanceof Element && event.target.closest(".docx-block, .docx-cell")) return;
+          if (event.target instanceof Element && event.target.closest(".docx-rendered-document, .docx-block, .docx-cell")) {
+            return;
+          }
           clearDocxSelectionContext();
         }}
       >
-        <article className="docx-page" aria-label={`${activeFile.filename} docx editor`}>
-          {state.blocks.length ? (
-            state.blocks.map((block) => {
-              if (block.type === "paragraph") return renderParagraph(block);
-              if (block.type === "table") return renderTable(block);
-              return renderImage(block);
-            })
-          ) : (
-            <p className="docx-empty-text">空文档</p>
-          )}
-        </article>
+        <div className="docx-render-style" ref={docxRenderedStyleRef} aria-hidden="true" />
+        <div
+          className="docx-rendered-document"
+          ref={docxRenderedDocumentRef}
+          aria-label={`${activeFile.filename} docx preview`}
+          contentEditable
+          suppressContentEditableWarning
+          spellCheck={false}
+          onCut={scheduleRenderedDocumentSync}
+          onDrop={(event) => event.preventDefault()}
+          onInput={scheduleRenderedDocumentSync}
+          onKeyDown={handleRenderedDocumentKeyDown}
+          onPaste={handleRenderedDocumentPaste}
+        />
       </div>
     </div>
   );
@@ -1043,6 +1126,64 @@ export function DocxPreview({
     }
   }
 
+  function handleRenderedDocumentKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if ((event.ctrlKey || event.metaKey) && ["a", "c", "s"].includes(event.key.toLowerCase())) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if ((event.key === "Backspace" || event.key === "Delete") && deleteCurrentRenderedDocumentSelection()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (event.key === "Tab") event.preventDefault();
+  }
+
+  function deleteCurrentRenderedDocumentSelection() {
+    const renderedDocument = docxRenderedDocumentRef.current;
+    const selection = window.getSelection();
+    if (!renderedDocument || !selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!renderedDocument.contains(range.commonAncestorContainer)) return false;
+
+    range.deleteContents();
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    setPersistedTextSelection(null);
+    onSelectionContextChange(null);
+    scheduleRenderedDocumentSync();
+    return true;
+  }
+
+  function handleRenderedDocumentPaste(event: ReactClipboardEvent<HTMLElement>) {
+    event.preventDefault();
+    insertPlainTextAtSelection(event.clipboardData.getData("text/plain"));
+    scheduleRenderedDocumentSync();
+  }
+
+  function scheduleRenderedDocumentSync() {
+    if (renderedDocumentSyncTimeoutRef.current !== null) {
+      window.clearTimeout(renderedDocumentSyncTimeoutRef.current);
+    }
+
+    renderedDocumentSyncTimeoutRef.current = window.setTimeout(() => {
+      renderedDocumentSyncTimeoutRef.current = null;
+      syncRenderedDocumentToBlocks();
+    }, 120);
+  }
+
+  function syncRenderedDocumentToBlocks() {
+    const renderedDocument = docxRenderedDocumentRef.current;
+    if (!renderedDocument) return;
+
+    const nextBlocks = extractEditedDocxBlocksFromRenderedDocument(renderedDocument, latestBlocksRef.current);
+    if (getBlocksSignature(nextBlocks) === getBlocksSignature(latestBlocksRef.current)) return;
+
+    setPersistedTextSelection(null);
+    updateDocxBlocks(() => nextBlocks);
+  }
+
   function lockNativeSelectionPublish() {
     nativeSelectionPublishLockUntilRef.current = window.performance.now() + NATIVE_SELECTION_PUBLISH_LOCK_MS;
   }
@@ -1070,9 +1211,49 @@ export function DocxPreview({
   function publishDocxRangeSelection(range: Range) {
     const start = getTextRangePosition(range.startContainer, range.startOffset);
     const end = getTextRangePosition(range.endContainer, range.endOffset);
-    if (!start || !end) return false;
+    if (!start || !end) return publishRenderedDocxRangeSelection(range);
 
     return publishDocxTextSelectionFromPositions(start, end);
+  }
+
+  function publishRenderedDocxRangeSelection(range: Range) {
+    const renderedDocument = docxRenderedDocumentRef.current;
+    if (!renderedDocument || !renderedDocument.contains(range.commonAncestorContainer)) return false;
+
+    const selectedText = getEditablePlainText(window.getSelection()?.toString() ?? range.toString());
+    if (!selectedText.trim()) {
+      onSelectionContextChange(null);
+      return false;
+    }
+
+    const matchedRange = findTextRangeInDocumentText(documentText, selectedText);
+    if (!matchedRange) {
+      setSelectedTarget(null);
+      setPersistedTextSelection(null);
+      publishSelectionContext(selectedText);
+      return true;
+    }
+
+    const segments = buildDocxTextSelectionSegments(matchedRange.start, matchedRange.end);
+    const firstSegment = segments[0];
+    const matchedText = documentText.slice(matchedRange.start, matchedRange.end);
+    if (!firstSegment) {
+      setSelectedTarget(null);
+      setPersistedTextSelection(null);
+      publishSelectionContext(matchedText, matchedRange.start, matchedRange.end);
+      return true;
+    }
+
+    setSelectedTarget(firstSegment.target);
+    updatePersistedTextSelection({
+      ...firstSegment,
+      documentEnd: matchedRange.end,
+      documentStart: matchedRange.start,
+      segments,
+      text: matchedText,
+    });
+    publishSelectionContext(matchedText, matchedRange.start, matchedRange.end, segments);
+    return true;
   }
 
   function publishDocxTextSelectionFromPositions(anchor: DocxTextRangePosition, focus: DocxTextRangePosition) {
@@ -1149,6 +1330,23 @@ export function DocxPreview({
     }
 
     return selectedTarget ? getSelectedTargetLabel(selectedTarget) : "未选中";
+  }
+
+  function scrollRenderedDocumentToOffset(documentStart: number | undefined, text: string) {
+    const shell = docxPageShellRef.current;
+    const renderedDocument = docxRenderedDocumentRef.current;
+    if (!shell || !renderedDocument) return;
+
+    if (scrollRenderedTextNodeIntoView(renderedDocument, text)) return;
+    if (documentStart === undefined || !documentText.length) return;
+
+    const scrollableHeight = shell.scrollHeight - shell.clientHeight;
+    if (scrollableHeight <= 0) return;
+
+    shell.scrollTo({
+      behavior: "smooth",
+      top: (scrollableHeight * clampTextOffset(documentStart, documentText.length)) / documentText.length,
+    });
   }
 
   function renderEditableText(text: string, target: SelectedDocxTextTarget) {
@@ -1544,6 +1742,87 @@ function normalizeDocxWarnings(warnings: string[], originalBlocks: DocxBlock[], 
   return warnings.filter((warning) => !warning.includes("未提取到可显示文本"));
 }
 
+function extractEditedDocxBlocksFromRenderedDocument(renderedDocument: HTMLElement, blocks: DocxBlock[]) {
+  const paragraphElements = getRenderedDocumentParagraphElements(renderedDocument);
+  const tableElements = getRenderedDocumentTableElements(renderedDocument);
+  let paragraphIndex = 0;
+  let tableIndex = 0;
+
+  return blocks.map((block) => {
+    if (block.type === "paragraph") {
+      const element = paragraphElements[paragraphIndex];
+      paragraphIndex += 1;
+      if (!element) return block;
+
+      return {
+        ...block,
+        text: getRenderedEditableText(element),
+      };
+    }
+
+    if (block.type !== "table") return block;
+
+    const tableElement = tableElements[tableIndex];
+    tableIndex += 1;
+    if (!tableElement) return block;
+
+    const cellElements = Array.from(tableElement.querySelectorAll("td, th"));
+    let cellIndex = 0;
+    return {
+      ...block,
+      rows: block.rows.map((row) =>
+        row.map((cell) => {
+          const element = cellElements[cellIndex] as HTMLElement | undefined;
+          cellIndex += 1;
+          if (!element) return cell;
+
+          return {
+            ...cell,
+            text: getRenderedEditableText(element),
+          };
+        }),
+      ),
+    };
+  });
+}
+
+function getRenderedDocumentParagraphElements(renderedDocument: HTMLElement) {
+  return Array.from(renderedDocument.querySelectorAll(".docx-renderer > article p"))
+    .filter((element): element is HTMLElement => element instanceof HTMLElement)
+    .filter((element) => !element.closest("td, th"));
+}
+
+function getRenderedDocumentTableElements(renderedDocument: HTMLElement) {
+  return Array.from(renderedDocument.querySelectorAll(".docx-renderer > article table")).filter(
+    (element): element is HTMLElement => element instanceof HTMLElement,
+  );
+}
+
+function getRenderedEditableText(element: HTMLElement) {
+  return (element.innerText || element.textContent || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\u200b/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function insertPlainTextAtSelection(text: string) {
+  if (!text) return;
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const textNode = document.createTextNode(text);
+  range.insertNode(textNode);
+  range.setStartAfter(textNode);
+  range.setEndAfter(textNode);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 function getDocumentText(blocks: DocxBlock[]) {
   return blocks.map((block) => getDocxBlockText(block)).join("\n");
 }
@@ -1636,6 +1915,74 @@ function findTextMatch(text: string, query: string, fallback: string) {
   if (lineIndex === -1) return null;
 
   return { start: lineIndex, end: lineIndex + line.length };
+}
+
+function findTextRangeInDocumentText(documentText: string, selectedText: string) {
+  const exactText = getEditablePlainText(selectedText);
+  const exactIndex = documentText.indexOf(exactText);
+  if (exactIndex >= 0) return { start: exactIndex, end: exactIndex + exactText.length };
+
+  const normalizedSource = normalizeTextWithSourceMap(documentText);
+  const normalizedNeedle = normalizeWhitespace(exactText);
+  if (!normalizedNeedle) return null;
+
+  const normalizedIndex = normalizedSource.text.indexOf(normalizedNeedle);
+  if (normalizedIndex < 0) return null;
+
+  const lastNormalizedIndex = normalizedIndex + normalizedNeedle.length - 1;
+  return {
+    start: normalizedSource.sourceIndexes[normalizedIndex],
+    end: normalizedSource.sourceIndexes[lastNormalizedIndex] + 1,
+  };
+}
+
+function normalizeTextWithSourceMap(text: string) {
+  let normalized = "";
+  const sourceIndexes: number[] = [];
+  let previousWasWhitespace = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (/\s/.test(character)) {
+      if (previousWasWhitespace) continue;
+      normalized += " ";
+      sourceIndexes.push(index);
+      previousWasWhitespace = true;
+      continue;
+    }
+
+    normalized += character;
+    sourceIndexes.push(index);
+    previousWasWhitespace = false;
+  }
+
+  return { sourceIndexes, text: normalized };
+}
+
+function normalizeWhitespace(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function scrollRenderedTextNodeIntoView(renderedDocument: HTMLElement, text: string) {
+  const normalizedText = normalizeWhitespace(text);
+  if (!normalizedText) return false;
+
+  const walker = document.createTreeWalker(renderedDocument, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const textNode = walker.currentNode as Text;
+    if (!normalizeWhitespace(textNode.data).includes(normalizedText)) continue;
+
+    const element =
+      textNode.parentElement?.closest("p, td, th, li, section, article") ?? textNode.parentElement;
+    if (!element) return false;
+
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.classList.add("search-jump-highlight");
+    window.setTimeout(() => element.classList.remove("search-jump-highlight"), 1600);
+    return true;
+  }
+
+  return false;
 }
 
 function parseSearchMetadata(metadataJson: string | undefined) {
