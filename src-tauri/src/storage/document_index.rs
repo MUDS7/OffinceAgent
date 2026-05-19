@@ -279,4 +279,36 @@ mod tests {
         assert!(index.chunks[2].plain_text.contains("Page: 2"));
         assert!(index.chunks[2].plain_text.contains("Third paragraph."));
     }
+
+    #[test]
+    fn builds_pdf_numbered_section_chunks_across_pages() {
+        let blocks = json!([
+            {
+                "id": "page-1",
+                "type": "pdf_page",
+                "page_number": 1,
+                "text": "4、编制依据\n\n4.1 国家法律法规作为编制依据。"
+            },
+            {
+                "id": "page-2",
+                "type": "pdf_page",
+                "page_number": 2,
+                "text": "4.2 电网规划作为编制依据。\n\n4.3 设计规程作为编制依据。\n\n4.4 设备材料价格依据。\n\n4.5 费用标准依据。\n\n4.6 可研批复依据。\n\n4.7 其他相关文件依据。\n\n5 工程设想\n\n5.1 本期工程内容。"
+            }
+        ]);
+
+        let index = build_document_index("pdf_002", "estimate.pdf", &blocks);
+        let section = index
+            .chunks
+            .iter()
+            .find(|chunk| chunk.chunk_type == "pdf_section" && chunk.title_path == "4 编制依据")
+            .expect("parent PDF section should be indexed");
+
+        assert!(section.content.contains("4.1 国家法律法规作为编制依据"));
+        assert!(section.content.contains("4.7 其他相关文件依据"));
+        assert!(!section.content.contains("5.1 本期工程内容"));
+        assert_eq!(section.paragraph_start_index, Some(1));
+        assert_eq!(section.paragraph_end_index, Some(8));
+        assert!(section.plain_text.contains("Pages: 1-2"));
+    }
 }
