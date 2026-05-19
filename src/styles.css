@@ -139,9 +139,6 @@ body.is-resizing-spreadsheet.row-resize * {
     padding-left: 15px;
   }
 
-  .menu-items > button:nth-last-child(-n + 3) {
-    display: none;
-  }
 }
 
 @media (max-width: 920px) {
