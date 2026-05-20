@@ -101,6 +101,7 @@ export function CenterPane({
           activeFile={activeFile}
           searchNavigationTarget={searchNavigationTarget}
           onSaveFile={onSaveTextFile}
+          onRegisterSaveFileProvider={onRegisterSaveFileProvider}
           onSelectionContextChange={onSelectionContextChange}
           onUpdateSpreadsheetFile={onUpdateSpreadsheetFile}
         />

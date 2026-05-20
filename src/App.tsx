@@ -168,6 +168,26 @@ function App() {
   } as CSSProperties;
   const activeFilename = selectedWorkspaceFile?.file.name ?? "未选择文件";
 
+  useEffect(() => {
+    function handleGlobalSaveShortcut(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      if (selectedFileId) {
+        void saveWorkspaceFile(selectedFileId);
+      }
+    }
+
+    window.addEventListener("keydown", handleGlobalSaveShortcut, { capture: true });
+
+    return () => {
+      window.removeEventListener("keydown", handleGlobalSaveShortcut, { capture: true });
+    };
+  }, [selectedFileId, saveWorkspaceFile]);
+
   function isChatRequestCancelled(streamId: string) {
     const activeRequest = activeChatRequestRef.current;
     return !activeRequest || activeRequest.streamId !== streamId || activeRequest.cancelled;

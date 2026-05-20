@@ -17,12 +17,13 @@ import { useEffect, useRef, useState } from "react";
 import type * as XLSXModule from "xlsx";
 import type { DocumentIndexRequest, DocumentIndexResult } from "../../types";
 import { normalizeFilePath } from "../../utils/fileUtils";
-import type { DocumentSelectionContext, PreviewFile, SearchNavigationTarget } from "./types";
+import type { DocumentSelectionContext, PreviewFile, SaveFileProvider, SearchNavigationTarget } from "./types";
 
 type SpreadsheetPreviewProps = {
   activeFile: PreviewFile;
   searchNavigationTarget: SearchNavigationTarget | null;
   onSaveFile: (fileId: string) => void;
+  onRegisterSaveFileProvider: (fileId: string, provider: SaveFileProvider) => () => void;
   onSelectionContextChange: (context: DocumentSelectionContext | null) => void;
   onUpdateSpreadsheetFile: (fileId: string, file: File) => void;
 };
@@ -71,6 +72,7 @@ const DEFAULT_COLUMN_WIDTH = 132;
 const DEFAULT_ROW_HEIGHT = 28;
 const DEFAULT_ROW_COUNT = 100;
 const DEFAULT_COLUMN_COUNT = 26;
+const TEXT_CELL_STYLE_ID = "office-agent-text-cell";
 const MAX_SELECTION_CONTEXT_ROWS = 200;
 const MAX_SELECTION_CONTEXT_COLUMNS = 80;
 const SAVE_DEBOUNCE_MS = 600;
@@ -104,6 +106,7 @@ export function SpreadsheetPreview({
   activeFile,
   searchNavigationTarget,
   onSaveFile,
+  onRegisterSaveFileProvider,
   onSelectionContextChange,
   onUpdateSpreadsheetFile,
 }: SpreadsheetPreviewProps) {
@@ -239,10 +242,31 @@ export function SpreadsheetPreview({
   }, [searchNavigationTarget?.id, previewState.error, previewState.isLoading, previewState.sheets]);
 
   useEffect(() => {
+    return onRegisterSaveFileProvider(activeFile.id, () => {
+      if (previewState.isLoading) {
+        return lastPublishedFileRef.current ?? activeFile.file;
+      }
+
+      if (previewState.error) {
+        throw new Error(`Excel 预览失败，无法保存（文件：${activeFile.filename}）：${previewState.error}`);
+      }
+
+      return publishCurrentUniverWorkbook() ?? lastPublishedFileRef.current ?? activeFile.file;
+    });
+  }, [
+    activeFile.file,
+    activeFile.filename,
+    activeFile.id,
+    onRegisterSaveFileProvider,
+    previewState.error,
+    previewState.isLoading,
+    previewState.xlsx,
+  ]);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        publishCurrentUniverWorkbook();
         onSaveFile(activeFile.id);
       }
     }
@@ -345,20 +369,20 @@ export function SpreadsheetPreview({
     }, SAVE_DEBOUNCE_MS);
   }
 
-  function publishCurrentUniverWorkbook() {
+  function publishCurrentUniverWorkbook(): File | null {
     const fWorkbook = fWorkbookRef.current;
     const xlsx = previewState.xlsx;
-    if (!fWorkbook || !xlsx) return;
+    if (!fWorkbook || !xlsx) return null;
 
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
 
-    publishUniverWorkbook(fWorkbook, xlsx);
+    return publishUniverWorkbook(fWorkbook, xlsx);
   }
 
-  function publishUniverWorkbook(fWorkbook: UniverWorkbook, xlsx: typeof XLSXModule) {
+  function publishUniverWorkbook(fWorkbook: UniverWorkbook, xlsx: typeof XLSXModule): File {
     const workbook = buildSheetJsWorkbookFromUniver(fWorkbook.save(), xlsx);
     const bookType: XLSXModule.BookType = activeFile.filename.toLowerCase().endsWith(".xls") ? "xls" : "xlsx";
     const workbookBytes = xlsx.write(workbook, { bookType, type: "array" }) as ArrayBuffer;
@@ -379,6 +403,8 @@ export function SpreadsheetPreview({
     void indexSpreadsheetWorkbook({ ...activeFile, file: nextFile }, workbook, xlsx).catch((error) => {
       console.warn("Failed to index spreadsheet structure:", error);
     });
+
+    return nextFile;
   }
 
   function disposeUniverRuntime() {
@@ -482,7 +508,13 @@ function buildUniverWorkbookData(
     name: activeFile.filename,
     sheetOrder,
     sheets,
-    styles: {},
+    styles: {
+      [TEXT_CELL_STYLE_ID]: {
+        n: {
+          pattern: "@",
+        },
+      },
+    },
     resources: [],
   };
 }
@@ -530,7 +562,7 @@ function buildUniverWorksheetData(
     defaultColumnWidth: DEFAULT_COLUMN_WIDTH,
     defaultRowHeight: DEFAULT_ROW_HEIGHT,
     defaultStyle: {
-      vt: VerticalAlign.MIDDLE,
+      vt: VerticalAlign.TOP,
     },
     mergeData: ((sheet?.["!merges"] ?? []) as XLSXModule.Range[]).map((merge) => ({
       startRow: merge.s.r,
@@ -556,12 +588,14 @@ function toUniverCell(cell: XLSXModule.CellObject, xlsx: typeof XLSXModule): ICe
   const formula = typeof cell.f === "string" && cell.f.trim() ? ensureFormulaEquals(cell.f) : undefined;
   const formattedValue = xlsx.utils.format_cell(cell);
   const value = getCellRawValue(cell, formattedValue);
+  const cellValue = value ?? formattedValue;
 
   if (value === null && !formula) return null;
 
   return {
-    v: value ?? formattedValue,
-    t: getUniverCellValueType(value ?? formattedValue),
+    v: cellValue,
+    t: getUniverCellValueType(cellValue),
+    ...(!formula && typeof cellValue === "string" ? { s: TEXT_CELL_STYLE_ID } : {}),
     ...(formula ? { f: formula } : {}),
   };
 }
@@ -670,6 +704,10 @@ function toSheetJsCell(cell: ICellData): XLSXModule.CellObject | null {
 
   if (value === null || value === undefined) {
     return formula ? ({ t: "n", f: formula } as XLSXModule.CellObject) : null;
+  }
+
+  if (cell.t === CellValueType.STRING || cell.t === CellValueType.FORCE_STRING) {
+    return { t: "s", v: String(value), ...(formula ? { f: formula } : {}) };
   }
 
   if (typeof value === "number") return { t: "n", v: value, ...(formula ? { f: formula } : {}) };
