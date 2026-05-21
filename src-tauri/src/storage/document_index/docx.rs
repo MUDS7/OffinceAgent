@@ -12,13 +12,41 @@ struct HeadingContext {
     level: i32,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct DocxHeadingProfile {
+    allow_chapter: bool,
+    allow_arabic_comma: bool,
+    allow_chinese_comma: bool,
+    allow_decimal: bool,
+    allow_single_dot: bool,
+}
+
+impl DocxHeadingProfile {
+    fn fallback() -> Self {
+        Self {
+            allow_chapter: true,
+            allow_arabic_comma: true,
+            allow_chinese_comma: true,
+            allow_decimal: true,
+            allow_single_dot: false,
+        }
+    }
+}
+
 // DOCX 块索引器会跨 block 维护标题上下文，保证后续段落/图片/表格挂到正确父标题下。
-#[derive(Default)]
 pub(super) struct DocxBlockIndexer {
     heading_stack: Vec<HeadingContext>,
+    heading_profile: DocxHeadingProfile,
 }
 
 impl DocxBlockIndexer {
+    pub(super) fn new(heading_profile: DocxHeadingProfile) -> Self {
+        Self {
+            heading_stack: Vec::new(),
+            heading_profile,
+        }
+    }
+
     pub(super) fn build_block(
         &mut self,
         document_id: &str,
@@ -31,6 +59,7 @@ impl DocxBlockIndexer {
             block,
             order_index,
             &mut self.heading_stack,
+            &self.heading_profile,
             index,
         );
     }
@@ -41,6 +70,7 @@ fn build_docx_like_block_index(
     block: &Value,
     order_index: usize,
     heading_stack: &mut Vec<HeadingContext>,
+    heading_profile: &DocxHeadingProfile,
     index: &mut BuiltDocumentIndex,
 ) {
     // node 索引尽量贴近原始块：每个 block 对应一个结构节点，标题块会更新父子层级。
@@ -53,7 +83,7 @@ fn build_docx_like_block_index(
     let text = extract_block_text(block);
 
     if block_type == "paragraph" {
-        if let Some(level) = heading_level(block) {
+        if let Some(level) = heading_level(block, heading_profile) {
             // 同级或更深层标题结束后，新标题应该挂到最近的上级标题下面。
             while heading_stack
                 .last()
@@ -114,8 +144,68 @@ fn build_docx_like_block_index(
     });
 }
 
+pub(super) fn infer_docx_heading_profile(blocks: &[Value]) -> DocxHeadingProfile {
+    let mut chapter_count = 0usize;
+    let mut arabic_comma_count = 0usize;
+    let mut chinese_comma_count = 0usize;
+    let mut decimal_count = 0usize;
+    let mut single_dot_count = 0usize;
+
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("paragraph") {
+            continue;
+        }
+        let text = extract_block_text(block);
+        if is_caption_like_text(&text) {
+            continue;
+        }
+
+        match numbered_heading_kind(&text) {
+            Some(NumberedHeadingKind::Chapter) => chapter_count += 1,
+            Some(NumberedHeadingKind::ArabicComma) => arabic_comma_count += 1,
+            Some(NumberedHeadingKind::ChineseComma) => chinese_comma_count += 1,
+            Some(NumberedHeadingKind::Decimal(_)) => decimal_count += 1,
+            Some(NumberedHeadingKind::SingleDot) => single_dot_count += 1,
+            None => {}
+        }
+    }
+
+    let allow_chapter = chapter_count > 0;
+    let allow_arabic_comma = arabic_comma_count > 0;
+    let allow_chinese_comma = chinese_comma_count >= 2;
+    let allow_decimal = decimal_count > 0;
+    let allow_single_dot =
+        single_dot_count >= 2 && !allow_chapter && !allow_arabic_comma && !allow_chinese_comma;
+
+    if allow_chapter
+        || allow_arabic_comma
+        || allow_chinese_comma
+        || allow_decimal
+        || allow_single_dot
+    {
+        DocxHeadingProfile {
+            allow_chapter,
+            allow_arabic_comma,
+            allow_chinese_comma,
+            allow_decimal,
+            allow_single_dot,
+        }
+    } else {
+        DocxHeadingProfile::fallback()
+    }
+}
+
 // 兼容上游可能给出的 level、style_id、style 三种标题标记。
-fn heading_level(block: &Value) -> Option<i32> {
+fn heading_level(block: &Value, heading_profile: &DocxHeadingProfile) -> Option<i32> {
+    let text = extract_block_text(block);
+    if is_caption_like_text(&text) {
+        return None;
+    }
+
+    if let Some(level) = heading_level_from_numbered_text(&text, heading_profile) {
+        return Some(level);
+    }
+
     if let Some(level) = block.get("level").and_then(Value::as_i64) {
         if (1..=9).contains(&level) {
             return Some(level as i32);
@@ -153,6 +243,220 @@ fn heading_level(block: &Value) -> Option<i32> {
     }
 
     None
+}
+
+fn heading_level_from_numbered_text(
+    text: &str,
+    heading_profile: &DocxHeadingProfile,
+) -> Option<i32> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 120 {
+        return None;
+    }
+
+    match numbered_heading_kind(trimmed)? {
+        NumberedHeadingKind::Chapter if heading_profile.allow_chapter => Some(1),
+        NumberedHeadingKind::ArabicComma if heading_profile.allow_arabic_comma => Some(1),
+        NumberedHeadingKind::ChineseComma if heading_profile.allow_chinese_comma => Some(1),
+        NumberedHeadingKind::Decimal(level) if heading_profile.allow_decimal => Some(level),
+        NumberedHeadingKind::SingleDot if heading_profile.allow_single_dot => Some(1),
+        _ => None,
+    }
+}
+
+enum NumberedHeadingKind {
+    Chapter,
+    ArabicComma,
+    ChineseComma,
+    Decimal(i32),
+    SingleDot,
+}
+
+fn numbered_heading_kind(text: &str) -> Option<NumberedHeadingKind> {
+    let trimmed = text.trim();
+    if is_chapter_heading(trimmed) {
+        return Some(NumberedHeadingKind::Chapter);
+    }
+    if is_arabic_comma_heading(trimmed) {
+        return Some(NumberedHeadingKind::ArabicComma);
+    }
+    if is_chinese_comma_heading(trimmed) {
+        return Some(NumberedHeadingKind::ChineseComma);
+    }
+    if let Some(level) = heading_level_from_decimal_prefix(trimmed) {
+        return Some(NumberedHeadingKind::Decimal(level));
+    }
+    if is_single_dot_heading(trimmed) {
+        return Some(NumberedHeadingKind::SingleDot);
+    }
+    None
+}
+
+fn is_chapter_heading(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix('第') {
+        let mut saw_digit = false;
+        for character in rest.chars() {
+            if character.is_ascii_digit() || is_common_chinese_number(character) {
+                saw_digit = true;
+                continue;
+            }
+
+            return saw_digit && character == '章';
+        }
+    }
+
+    false
+}
+
+fn is_arabic_comma_heading(text: &str) -> bool {
+    let Some((prefix, title)) = text.split_once('、') else {
+        return false;
+    };
+    !title.trim().is_empty() && prefix.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_chinese_comma_heading(text: &str) -> bool {
+    let Some((prefix, title)) = text.split_once('、') else {
+        return false;
+    };
+    !title.trim().is_empty() && !prefix.is_empty() && prefix.chars().all(is_common_chinese_number)
+}
+
+fn is_common_chinese_number(character: char) -> bool {
+    matches!(
+        character,
+        '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+    )
+}
+
+fn is_single_dot_heading(text: &str) -> bool {
+    let Some((prefix, title)) = text.split_once('.') else {
+        return false;
+    };
+    !title.trim().is_empty()
+        && prefix.chars().all(|character| character.is_ascii_digit())
+        && !title.trim_start().starts_with('.')
+}
+
+fn is_caption_like_text(text: &str) -> bool {
+    is_caption_text(text, &CaptionKind::Image) || is_caption_text(text, &CaptionKind::Table)
+}
+
+fn heading_level_from_decimal_prefix(text: &str) -> Option<i32> {
+    let mut number_count = 0;
+    let mut saw_digit_in_part = false;
+    let mut last_was_dot = false;
+    let mut consumed_any_separator = false;
+
+    for character in text.chars() {
+        if character.is_ascii_digit() {
+            if !saw_digit_in_part {
+                number_count += 1;
+                saw_digit_in_part = true;
+            }
+            last_was_dot = false;
+            continue;
+        }
+
+        if character == '.' && saw_digit_in_part {
+            consumed_any_separator = true;
+            saw_digit_in_part = false;
+            last_was_dot = true;
+            continue;
+        }
+
+        if character.is_whitespace() {
+            break;
+        }
+
+        break;
+    }
+
+    if number_count >= 2 && consumed_any_separator && !last_was_dot {
+        Some(number_count.min(9))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod docx_heading_tests {
+    use super::{
+        heading_level, heading_level_from_numbered_text, infer_docx_heading_profile,
+        DocxHeadingProfile,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn detects_plain_numbered_docx_headings() {
+        let profile = DocxHeadingProfile::fallback();
+        assert_eq!(
+            heading_level_from_numbered_text("7、响应方案", &profile),
+            Some(1)
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("第7章 响应方案", &profile),
+            Some(1)
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("7.5 采购需求中所需的全部内容", &profile),
+            Some(2)
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("7.5.1 系统架构概述", &profile),
+            Some(3)
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("7.5.1.1前端架构", &profile),
+            Some(4)
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("1.定制化服务", &profile),
+            None
+        );
+        assert_eq!(
+            heading_level_from_numbered_text("（1）人员资质：项目团队成员", &profile),
+            None
+        );
+    }
+
+    #[test]
+    fn excludes_captions_even_when_word_marks_them_as_headings() {
+        let profile = DocxHeadingProfile::fallback();
+        let block = json!({
+            "type": "paragraph",
+            "text": "图1.后端架构图",
+            "style": "heading 5",
+            "style_id": "5"
+        });
+
+        assert_eq!(heading_level(&block, &profile), None);
+    }
+
+    #[test]
+    fn infers_single_dot_heading_style_only_when_it_is_document_level() {
+        let decimal_document = vec![
+            json!({ "type": "paragraph", "text": "7、响应方案" }),
+            json!({ "type": "paragraph", "text": "7.3.2特色服务" }),
+            json!({ "type": "paragraph", "text": "1.定制化服务" }),
+            json!({ "type": "paragraph", "text": "2.采用最新技术" }),
+        ];
+        let decimal_profile = infer_docx_heading_profile(&decimal_document);
+        assert_eq!(
+            heading_level_from_numbered_text("1.定制化服务", &decimal_profile),
+            None
+        );
+
+        let single_dot_document = vec![
+            json!({ "type": "paragraph", "text": "1. 项目概述" }),
+            json!({ "type": "paragraph", "text": "2. 技术方案" }),
+        ];
+        let single_dot_profile = infer_docx_heading_profile(&single_dot_document);
+        assert_eq!(
+            heading_level_from_numbered_text("2. 技术方案", &single_dot_profile),
+            Some(1)
+        );
+    }
 }
 
 // chunk 的一个组成部分，可以是正文段落，也可以是图片/表格占位和结构化元数据。
@@ -307,6 +611,7 @@ pub(super) fn build_docx_section_chunks(
     document_id: &str,
     filename: &str,
     blocks: &[Value],
+    heading_profile: &DocxHeadingProfile,
 ) -> Vec<IndexedChunk> {
     // chunk 以标题章节为自然边界，Excel sheet 由 xlsx.rs 独立生成行组 chunk。
     let mut chunks = Vec::new();
@@ -320,7 +625,7 @@ pub(super) fn build_docx_section_chunks(
 
         if block.get("type").and_then(Value::as_str) == Some("paragraph") {
             paragraph_index += 1;
-            if let Some(level) = heading_level(block) {
+            if let Some(level) = heading_level(block, heading_profile) {
                 // 新标题开始前先提交上一节，避免不同章节的正文混到同一个 chunk。
                 flush_docx_chunk(document_id, filename, &mut accumulator, &mut chunks);
                 apply_heading_to_accumulator(&mut accumulator, level, extract_block_text(block));

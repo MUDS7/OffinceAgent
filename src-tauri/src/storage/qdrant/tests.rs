@@ -11,7 +11,7 @@ use super::{
     payload::normalize_generic_qdrant_point,
     uploaded_chunks::{
         collapse_descendant_hits, expand_docx_section_descendants, lexical_match_terms,
-        rerank_uploaded_document_hits,
+        prepend_docx_outline_hits, rerank_uploaded_document_hits,
     },
     *,
 };
@@ -193,6 +193,58 @@ fn expands_docx_parent_section_hits_with_descendants() {
     assert!(hits[0].content.contains("7.5.1.2 Data flow"));
     assert!(hits[0].content.contains("Data flow content."));
     assert!(!hits[0].content.contains("Sibling content."));
+}
+
+#[test]
+fn prepends_docx_outline_for_heading_queries() {
+    let connection = Connection::open_in_memory().expect("in-memory SQLite should open");
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE doc_nodes (
+                document_id TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                level INTEGER,
+                title TEXT,
+                order_index INTEGER NOT NULL
+            );
+            ",
+        )
+        .expect("doc_nodes table should be created");
+
+    for (title, level, order_index) in [
+        ("7、响应方案", 1, 1),
+        ("7.1 整体服务方案", 2, 2),
+        ("7.5 采购需求中所需的全部内容", 2, 3),
+        ("7.5.2编程语言、数据架构说明", 3, 4),
+        ("7.6 供应商认为需加以说明的其他内容", 2, 5),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO doc_nodes (document_id, node_type, level, title, order_index)
+                 VALUES ('doc_1', 'heading', ?1, ?2, ?3)",
+                params![level, title, order_index],
+            )
+            .expect("heading should insert");
+    }
+
+    let mut hits = vec![test_uploaded_hit(
+        "chunk_1",
+        "7、响应方案 > 7.5 采购需求中所需的全部内容",
+        0.9,
+        3,
+    )];
+
+    prepend_docx_outline_hits(&connection, "补充响应方案各级标题", &mut hits)
+        .expect("outline should be prepended");
+
+    assert_eq!(hits[0].chunk_type, "docx_outline");
+    assert!(hits[0].content.contains("7.1 整体服务方案"));
+    assert!(hits[0].content.contains("7.5.2编程语言、数据架构说明"));
+    assert!(hits[0]
+        .content
+        .contains("7.6 供应商认为需加以说明的其他内容"));
+    assert_eq!(hits[1].chunk_id, "chunk_1");
 }
 
 #[test]

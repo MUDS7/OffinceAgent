@@ -64,7 +64,8 @@ pub(super) fn build_document_index(
     }
 
     // DOCX 与 XLSX 可以混在同一个 blocks 数组里：节点逐块生成，chunk 再按格式汇总。
-    let mut docx_indexer = docx::DocxBlockIndexer::default();
+    let docx_heading_profile = docx::infer_docx_heading_profile(blocks);
+    let mut docx_indexer = docx::DocxBlockIndexer::new(docx_heading_profile.clone());
 
     for (order_index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str) {
@@ -78,7 +79,8 @@ pub(super) fn build_document_index(
     }
 
     // 先生成 DOCX 标题段落块，再追加 XLSX 行组块，保持 chunk.order_index 连续。
-    index.chunks = docx::build_docx_section_chunks(document_id, filename, blocks);
+    index.chunks =
+        docx::build_docx_section_chunks(document_id, filename, blocks, &docx_heading_profile);
     let xlsx_chunks =
         xlsx::build_xlsx_row_group_chunks(document_id, filename, blocks, index.chunks.len());
     index.chunks.extend(xlsx_chunks);

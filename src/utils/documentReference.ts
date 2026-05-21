@@ -35,7 +35,7 @@ export async function searchUploadedDocumentReference(
 
   return invoke<UploadedDocumentChunkHit[]>("search_uploaded_document_chunks", {
     query: buildUploadedDocumentReferenceQuery(instruction),
-    limit: 5,
+    limit: 12,
     minScore: 0.03,
   });
 }

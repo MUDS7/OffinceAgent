@@ -78,6 +78,7 @@ pub(crate) fn search_uploaded_document_chunks(
     rerank_uploaded_document_hits(query, &search_distance, &mut hits);
     expand_docx_section_descendants(&connection, &mut hits)?;
     collapse_descendant_hits(&mut hits);
+    prepend_docx_outline_hits(&connection, query, &mut hits)?;
     hits.truncate(result_limit.max(1));
     Ok(hits)
 }
@@ -504,4 +505,96 @@ pub(super) fn collapse_descendant_hits(hits: &mut Vec<UploadedDocumentChunkHit>)
                 && hit.title_path.starts_with(&descendant_prefix)
         })
     });
+}
+
+pub(super) fn prepend_docx_outline_hits(
+    connection: &Connection,
+    query: &str,
+    hits: &mut Vec<UploadedDocumentChunkHit>,
+) -> Result<(), String> {
+    if !is_outline_query(query) || hits.is_empty() {
+        return Ok(());
+    }
+
+    let mut seen_documents = HashSet::new();
+    let mut outline_hits = Vec::new();
+    for hit in hits.iter() {
+        if !seen_documents.insert(hit.document_id.clone()) {
+            continue;
+        }
+        if let Some(outline_hit) = load_docx_outline_hit(connection, hit)? {
+            outline_hits.push(outline_hit);
+        }
+    }
+
+    if outline_hits.is_empty() {
+        return Ok(());
+    }
+
+    outline_hits.extend(std::mem::take(hits));
+    *hits = outline_hits;
+    Ok(())
+}
+
+fn is_outline_query(query: &str) -> bool {
+    let compact = compact_match_text(query);
+    [
+        "标题", "章节", "目录", "提纲", "outline", "heading", "headings",
+    ]
+    .iter()
+    .any(|term| compact.contains(term))
+}
+
+fn load_docx_outline_hit(
+    connection: &Connection,
+    source_hit: &UploadedDocumentChunkHit,
+) -> Result<Option<UploadedDocumentChunkHit>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT title, level
+             FROM doc_nodes
+             WHERE document_id = ?1
+               AND node_type = 'heading'
+               AND COALESCE(title, '') <> ''
+             ORDER BY order_index",
+        )
+        .map_err(|error| format!("cannot prepare DOCX outline lookup: {error}"))?;
+    let rows = statement
+        .query_map(params![source_hit.document_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i32>>(1)?))
+        })
+        .map_err(|error| format!("cannot scan DOCX outline headings: {error}"))?;
+
+    let mut lines = Vec::new();
+    for row in rows {
+        let (title, level) =
+            row.map_err(|error| format!("cannot read DOCX outline heading: {error}"))?;
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = "  ".repeat(level.unwrap_or(1).saturating_sub(1) as usize);
+        lines.push(format!("{indent}{trimmed}"));
+    }
+
+    if lines.is_empty() {
+        return Ok(None);
+    }
+
+    let content = format!(
+        "完整标题目录（来自上传文档，按原文顺序）：\n{}",
+        lines.join("\n")
+    );
+    Ok(Some(UploadedDocumentChunkHit {
+        chunk_id: format!("outline:{}", source_hit.document_id),
+        document_id: source_hit.document_id.clone(),
+        document_name: source_hit.document_name.clone(),
+        chunk_type: "docx_outline".to_string(),
+        title_path: "完整标题目录".to_string(),
+        score: source_hit.score,
+        content: content.clone(),
+        plain_text: content,
+        images: Vec::new(),
+        order_index: source_hit.order_index.saturating_sub(1),
+    }))
 }
